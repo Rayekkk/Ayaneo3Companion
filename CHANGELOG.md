@@ -2,6 +2,13 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.3.1
+
+### Changed
+
+- Reduced the Max preset boost limits to a safer 35 W SPL, 38 W SPPT and
+  40 W FPPT. Custom tuning still permits 35/40/45 W.
+
 ## 0.3.0
 
 ### Added

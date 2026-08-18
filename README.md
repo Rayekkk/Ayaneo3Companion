@@ -71,7 +71,7 @@ All sections start collapsed whenever the plugin opens.
 
 ## How it works
 
-The Max preset uses 35 W SPL, 40 W SPPT and 45 W FPPT. The two higher values
+The Max preset uses 35 W SPL, 38 W SPPT and 40 W FPPT. The two higher values
 are short boost limits; sustained power remains capped at AYANEO's official 35 W.
 
 - On Bazzite, TDP is written through `org.shadowblip.PowerStation`. On SteamOS,

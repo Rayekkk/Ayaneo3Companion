@@ -72,7 +72,7 @@ PRESETS = {
     "Low power": {"spl": 8, "sppt": 10, "fppt": 12},
     "Balanced": {"spl": 15, "sppt": 18, "fppt": 25},
     "Performance": {"spl": 30, "sppt": 32, "fppt": 35},
-    "Max": {"spl": 35, "sppt": 40, "fppt": 45},
+    "Max": {"spl": 35, "sppt": 38, "fppt": 40},
 }
 
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
@@ -406,7 +406,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.3.0"},
+        headers={"User-Agent": "Ayaneo3Companion/0.3.1"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
