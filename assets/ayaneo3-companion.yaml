@@ -41,4 +41,10 @@ mapping:
     target_event:
       gamepad:
         button: QuickAccess
+  - name: Quick Access F24
+    source_events:
+      - keyboard: KeyF24
+    target_event:
+      gamepad:
+        button: QuickAccess
 filtered_events: []

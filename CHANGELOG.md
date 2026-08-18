@@ -2,6 +2,13 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.4.1
+
+### Fixed
+
+- Map the AYANEO 3's cold-boot `F24` QAM button event to Steam Quick Access,
+  while retaining compatibility with the alternate `Meta+D` firmware mapping.
+
 ## 0.4.0
 
 ### Added

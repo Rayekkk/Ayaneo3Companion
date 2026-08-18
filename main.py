@@ -482,7 +482,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.4.0"},
+        headers={"User-Agent": "Ayaneo3Companion/0.4.1"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
