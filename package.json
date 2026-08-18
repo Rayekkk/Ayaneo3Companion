@@ -1,6 +1,6 @@
 {
   "name": "ayaneo3companion",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "AYANEO 3 hardware controls for Decky Loader",
   "license": "BSD-3-Clause",
   "type": "module",

@@ -147,7 +147,8 @@ function detectPreset(tdp: Tdp, presets: Record<string, Tdp>): Preset {
 
 const finite = (value: number, fallback: number) => Number.isFinite(value) ? value : fallback;
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
-const offsetMax = (spl: number) => Math.max(0, 35 - spl);
+const spptOffsetMax = (spl: number) => Math.max(0, 40 - spl);
+const fpptOffsetMax = (spl: number) => Math.max(0, 45 - spl);
 const fromAbsolute = (tdp: Tdp): Tuning => ({
   spl: tdp.spl,
   spptOff: Math.max(0, tdp.sppt - tdp.spl),
@@ -160,9 +161,10 @@ const absolute = (tuning: Tuning): Tdp => ({
 });
 function normalise(tuning: Tuning): Tuning {
   const spl = clamp(finite(tuning.spl, 15), 5, 35);
-  const max = offsetMax(spl);
-  const spptOff = clamp(finite(tuning.spptOff, 0), 0, max);
-  const fpptOff = Math.max(clamp(finite(tuning.fpptOff, spptOff), 0, max), spptOff);
+  const spptMax = spptOffsetMax(spl);
+  const fpptMax = fpptOffsetMax(spl);
+  const spptOff = clamp(finite(tuning.spptOff, 0), 0, spptMax);
+  const fpptOff = Math.max(clamp(finite(tuning.fpptOff, spptOff), 0, fpptMax), spptOff);
   return { spl, spptOff, fpptOff };
 }
 
@@ -266,7 +268,8 @@ const Content: FC = () => {
   const tuning = normalise(fromAbsolute(tdp));
   const spptOff = tuning.spptOff;
   const fpptOff = tuning.fpptOff;
-  const maxOffset = offsetMax(tuning.spl);
+  const maxSpptOffset = spptOffsetMax(tuning.spl);
+  const maxFpptOffset = fpptOffsetMax(tuning.spl);
   const setCustomTdp = (next: Tdp) => { tdpDirty.current = true; setPreset("Custom"); setState({ ...state, tdp: next }); setStatus(null); };
   const setSpl = (value: number) => {
     if (!Number.isFinite(value)) return;
@@ -274,12 +277,12 @@ const Content: FC = () => {
   };
   const setSpptOff = (value: number) => {
     if (!Number.isFinite(value)) return;
-    const nextSppt = clamp(value, 0, maxOffset);
+    const nextSppt = clamp(value, 0, maxSpptOffset);
     setCustomTdp(absolute(normalise({ ...tuning, spptOff: nextSppt, fpptOff: Math.max(tuning.fpptOff, nextSppt) })));
   };
   const setFpptOff = (value: number) => {
     if (!Number.isFinite(value)) return;
-    const nextFppt = clamp(value, 0, maxOffset);
+    const nextFppt = clamp(value, 0, maxFpptOffset);
     setCustomTdp(absolute(normalise({ ...tuning, fpptOff: nextFppt, spptOff: Math.min(tuning.spptOff, nextFppt) })));
   };
   const choosePreset = (name: Preset) => {
@@ -376,8 +379,8 @@ const Content: FC = () => {
       {preset === "Custom" && <>
         <PanelSection title="TDP Limits">
           <PanelSectionRow><SliderField label={`SPL (TDP) - ${tuning.spl} W`} value={tuning.spl} min={5} max={35} step={1} onChange={setSpl} description="Sustained power limit - the main TDP dial" /></PanelSectionRow>
-          <PanelSectionRow><SliderField key={`sppt-${tuning.spl}-${maxOffset}`} label={`SPPT +${spptOff} W  =  ${tuning.spl + spptOff} W`} value={spptOff} min={0} max={maxOffset || 1} step={1} disabled={maxOffset === 0} onChange={setSpptOff} description={maxOffset === 0 ? "No headroom left at this SPL" : `Slow limit headroom above SPL (max +${maxOffset} W here)`} /></PanelSectionRow>
-          {state.tdp_backend !== "PowerStation" ? <PanelSectionRow><SliderField key={`fppt-${tuning.spl}-${maxOffset}`} label={`FPPT +${fpptOff} W  =  ${tuning.spl + fpptOff} W`} value={fpptOff} min={0} max={maxOffset || 1} step={1} disabled={maxOffset === 0} onChange={setFpptOff} description={maxOffset === 0 ? "No headroom left at this SPL" : `Fast limit headroom above SPL (max +${maxOffset} W here)`} /></PanelSectionRow> : <PanelSectionRow><Field label="FPPT is automatic" description="PowerStation derives the fast limit from SPL and SPPT." /></PanelSectionRow>}
+          <PanelSectionRow><SliderField key={`sppt-${tuning.spl}-${maxSpptOffset}`} label={`SPPT +${spptOff} W  =  ${tuning.spl + spptOff} W`} value={spptOff} min={0} max={maxSpptOffset || 1} step={1} disabled={maxSpptOffset === 0} onChange={setSpptOff} description={maxSpptOffset === 0 ? "No headroom left at this SPL" : `Slow limit headroom above SPL (max 40 W)`} /></PanelSectionRow>
+          {state.tdp_backend !== "PowerStation" ? <PanelSectionRow><SliderField key={`fppt-${tuning.spl}-${maxFpptOffset}`} label={`FPPT +${fpptOff} W  =  ${tuning.spl + fpptOff} W`} value={fpptOff} min={0} max={maxFpptOffset || 1} step={1} disabled={maxFpptOffset === 0} onChange={setFpptOff} description={maxFpptOffset === 0 ? "No headroom left at this SPL" : `Fast limit headroom above SPL (max 45 W)`} /></PanelSectionRow> : <PanelSectionRow><Field label="FPPT is automatic" description="PowerStation derives the fast limit from SPL and SPPT." /></PanelSectionRow>}
         </PanelSection>
         <PanelSection title="Action">
           <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => { tdpDirty.current = false; run(perGame && game ? setGameProfile(game.appId, tdp) : setTdp(tdp), "TDP apply failed", perGame && game ? `Custom settings saved for ${game.name}.` : "Custom settings applied."); }}>{busy ? "Applying..." : perGame && game ? `Apply & Save for ${game.name}` : "Apply TDP"}</ButtonItem></PanelSectionRow>

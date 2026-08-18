@@ -21,7 +21,7 @@ TDP profiles, vibration, RGB lighting, rear buttons and OLED display support.
 | | |
 |---|---|
 | **TDP presets** | Low Power, Balanced and Performance profiles tuned for the AYANEO 3 |
-| **Custom TDP** | SPL, SPPT and FPPT controls up to the official 35 W ceiling |
+| **Custom TDP** | SPL up to 35 W, with short boost limits up to 40 W SPPT and 45 W FPPT |
 | **Per-game profiles** | Saves a TDP profile for the running game and applies it automatically |
 | **Live power** | Shows current package power in the TDP panel |
 | **Vibration** | Off, Low, Medium and High strength plus a 0.5 second test |

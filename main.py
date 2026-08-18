@@ -92,8 +92,8 @@ def _clamp(value, low, high):
 def normalize_tdp(raw) -> dict:
     source = raw if isinstance(raw, dict) else {}
     spl = _clamp(source.get("spl", DEFAULT_TDP["spl"]), 5, 35)
-    sppt = _clamp(source.get("sppt", DEFAULT_TDP["sppt"]), spl, 35)
-    fppt = _clamp(source.get("fppt", DEFAULT_TDP["fppt"]), sppt, 35)
+    sppt = _clamp(source.get("sppt", DEFAULT_TDP["sppt"]), spl, 40)
+    fppt = _clamp(source.get("fppt", DEFAULT_TDP["fppt"]), sppt, 45)
     return {"spl": spl, "sppt": sppt, "fppt": fppt}
 
 
@@ -326,7 +326,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.2.7"},
+        headers={"User-Agent": "Ayaneo3Companion/0.2.8"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())

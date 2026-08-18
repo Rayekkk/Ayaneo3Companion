@@ -2,6 +2,14 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.2.8
+
+### Changed
+
+- Custom SPPT now reaches 40 W and FPPT reaches 45 W. Both values were accepted
+  by the Ryzen 7 8840U SMU on retail AYANEO 3 hardware; sustained SPL remains
+  capped at AYANEO's official 35 W limit.
+
 ## 0.2.7
 
 Initial public source version.

@@ -7,7 +7,8 @@ import main
 
 class LogicTests(unittest.TestCase):
     def test_tdp_clamps_and_orders(self):
-        self.assertEqual(main.normalize_tdp({"spl": 2, "sppt": 1, "fppt": 99}), {"spl": 5, "sppt": 5, "fppt": 35})
+        self.assertEqual(main.normalize_tdp({"spl": 2, "sppt": 1, "fppt": 99}), {"spl": 5, "sppt": 5, "fppt": 45})
+        self.assertEqual(main.normalize_tdp({"spl": 35, "sppt": 99, "fppt": 99}), {"spl": 35, "sppt": 40, "fppt": 45})
 
     def test_controller_normalization(self):
         value = main.normalize_controller({"vibration": "wat", "rgb_mode": "wat", "color": "oops", "brightness": 999})
