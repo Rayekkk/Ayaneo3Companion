@@ -2,6 +2,14 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.4.0
+
+### Added
+
+- Magic Module controls to eject the left, right or both controller modules.
+- Automatic controller power-off after release and power-on after both modules
+  are seated again, matching the complete HHD replacement sequence.
+
 ## 0.3.1
 
 ### Changed

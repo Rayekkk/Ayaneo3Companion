@@ -15,7 +15,7 @@ interface Controller { vibration: Vibration; rgb_mode: RgbMode; color: string; b
 interface Hsv { hue: number; saturation: number; brightness: number }
 interface RunningGame { appId: string; name: string }
 interface GameProfile { exists: boolean; profile: Tdp }
-interface State { supported: boolean; device: string; tdp_backend: string; tdp: Tdp; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean }
+interface State { supported: boolean; device: string; tdp_backend: string; tdp: Tdp; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean }
 
 const getState = callable<[], State>("get_state");
 const setTdp = callable<[Tdp], State>("set_tdp");
@@ -26,9 +26,10 @@ const setActiveApp = callable<[string], void>("set_active_app");
 const setController = callable<[Controller], State>("set_controller");
 const testVibration = callable<[number], { success: boolean; error?: string }>("test_vibration");
 const setChargeBypass = callable<[boolean], State>("set_charge_bypass");
+const ejectModules = callable<["left" | "right" | "both"], State>("eject_modules");
 const setScreenFix = callable<[boolean], State>("set_screen_fix");
 const setButtonFix = callable<[boolean], State>("set_button_fix");
-const CLOSED = { tdp: false, battery: false, vibration: false, rgb: false, buttons: false, screen: false };
+const CLOSED = { tdp: false, battery: false, modules: false, vibration: false, rgb: false, buttons: false, screen: false };
 const PRESET_ORDER: Preset[] = ["Low power", "Balanced", "Performance", "Max", "Custom"];
 const vibrationOptions = ["off", "low", "medium", "high"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
@@ -394,6 +395,15 @@ const Content: FC = () => {
       <PanelSection title="Charge Control">
         <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "Charge bypass is unavailable on this kernel."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={enabled => run(setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")} /></PanelSectionRow>
         <PanelSectionRow><Field label={state.charge_bypass ? "Bypass active" : "Automatic charging"} description="State read directly from the AYANEO embedded controller." /></PanelSectionRow>
+      </PanelSection>
+    </Fold>
+
+    <Fold title="Magic Modules" {...fold("modules")}>
+      <PanelSection title="Controller Eject">
+        <PanelSectionRow><Field label={state.modules_reconnecting ? "Waiting for both modules" : state.modules_connected ? "Both modules connected" : "Module disconnected"} description="After ejection, insert both modules to power and initialise the controller again." /></PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy || state.modules_reconnecting || !state.module_eject_supported} onClick={() => run(ejectModules("left"), "Left module eject failed", "Left module released.")}>Eject Left</ButtonItem></PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy || state.modules_reconnecting || !state.module_eject_supported} onClick={() => run(ejectModules("right"), "Right module eject failed", "Right module released.")}>Eject Right</ButtonItem></PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy || state.modules_reconnecting || !state.module_eject_supported} onClick={() => run(ejectModules("both"), "Module eject failed", "Both modules released.")}>Eject Both</ButtonItem></PanelSectionRow>
       </PanelSection>
     </Fold>
 

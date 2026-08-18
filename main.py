@@ -20,6 +20,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -56,6 +57,11 @@ INPUT_MAP_TARGET = Path("/etc/inputplumber/capability_maps.d/ayaneo3-companion.y
 EC_CHARGE_REGISTER = 0x1E
 EC_CHARGE_AUTO = 0xAA
 EC_CHARGE_INHIBIT = 0x55
+EC_CONTROLLER_POWER_REGISTER = 0x2D
+EC_CONTROLLER_POWER_OFF = 0xFE
+EC_CONTROLLER_POWER_ON = 0xFF
+EC_MODULE_REGISTER = 0x2F
+EC_MODULE_MASK = 0x03
 
 VIBRATION_VALUES = {"off": 0x04, "low": 0x01, "medium": 0x02, "high": 0x03}
 RGB_MODES = {"off": 0xFF, "solid": 0x01, "pulse": 0x02, "rainbow": 0x03}
@@ -78,6 +84,8 @@ PRESETS = {
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
 _lock = threading.RLock()
 _tdp_apply_lock = threading.Lock()
+_ec_lock = threading.Lock()
+_controller_apply_lock = threading.Lock()
 
 def _dmi(name: str) -> str:
     try:
@@ -165,6 +173,42 @@ def write_charge_bypass(enabled: bool) -> None:
         raise RuntimeError("AYANEO EC did not retain the charge setting")
 
 
+def _read_ec_register(register: int) -> int:
+    path = _ec_io_path()
+    if path is None:
+        raise RuntimeError("AYANEO EC access is unavailable")
+    with _ec_lock, path.open("rb", buffering=0) as ec:
+        ec.seek(register)
+        value = ec.read(1)
+    if len(value) != 1:
+        raise RuntimeError(f"could not read AYANEO EC register 0x{register:02x}")
+    return value[0]
+
+
+def _write_ec_register(register: int, value: int) -> None:
+    path = ensure_charge_control()
+    if path is None:
+        raise RuntimeError("AYANEO EC write access is unavailable")
+    with _ec_lock, path.open("r+b", buffering=0) as ec:
+        ec.seek(register)
+        if ec.write(bytes([value])) != 1:
+            raise RuntimeError(f"could not write AYANEO EC register 0x{register:02x}")
+
+
+def controller_powered() -> bool:
+    return _read_ec_register(EC_CONTROLLER_POWER_REGISTER) == EC_CONTROLLER_POWER_ON
+
+
+def both_modules_connected() -> bool:
+    # Bits set in this register mean that the corresponding module is absent.
+    return (_read_ec_register(EC_MODULE_REGISTER) & EC_MODULE_MASK) == 0
+
+
+def set_controller_power(enabled: bool) -> None:
+    _write_ec_register(EC_CONTROLLER_POWER_REGISTER,
+                       EC_CONTROLLER_POWER_ON if enabled else EC_CONTROLLER_POWER_OFF)
+
+
 def _clamp(value, low, high):
     return max(low, min(high, int(value)))
 
@@ -220,7 +264,7 @@ def _rgb_bytes(config: dict):
     return tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v))
 
 
-def controller_command(config: dict) -> bytes:
+def controller_command(config: dict, eject: str | None = None) -> bytes:
     config = normalize_controller(config)
     mode = RGB_MODES[config["rgb_mode"]]
     r, g, b = _rgb_bytes(config)
@@ -229,6 +273,7 @@ def controller_command(config: dict) -> bytes:
     command[3:5] = bytes((0x21, 0x09))
     command[8:12] = bytes((mode, r, g, b))
     command[12:16] = bytes((mode, r, g, b))
+    command[20] = {None: 0x00, "left": 0x07, "right": 0x70, "both": 0x77}.get(eject, 0x00)
     command[22:25] = bytes((0x33, 0x22, vibration))
     command[32] = 1
     command[37:39] = bytes((0x64, 0x64))
@@ -285,17 +330,48 @@ def read_controller() -> dict:
 
 
 def apply_controller(config: dict) -> None:
-    path = _vendor_hidraw()
-    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-    try:
-        check = _hid_exchange(fd, AYA_CHECK)
-        if len(check) > 17 and check[17] == 1:
-            _hid_exchange(fd, AYA_CUSTOM)
-        if not _hid_exchange(fd, controller_command(config)):
-            raise RuntimeError("controller rejected configuration")
-        _hid_exchange(fd, AYA_SAVE, timeout=1.5)
-    finally:
-        os.close(fd)
+    with _controller_apply_lock:
+        path = _vendor_hidraw()
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            check = _hid_exchange(fd, AYA_CHECK)
+            if len(check) > 17 and check[17] == 1:
+                _hid_exchange(fd, AYA_CUSTOM)
+            if not _hid_exchange(fd, controller_command(config)):
+                raise RuntimeError("controller rejected configuration")
+            _hid_exchange(fd, AYA_SAVE, timeout=1.5)
+        finally:
+            os.close(fd)
+
+
+def eject_controller_modules(side: str, config: dict) -> None:
+    if side not in ("left", "right", "both"):
+        raise ValueError("invalid controller module selection")
+    if not supported_device():
+        raise RuntimeError("module eject is restricted to AYANEO 3")
+    with _controller_apply_lock:
+        path = _vendor_hidraw()
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        started = time.monotonic()
+        try:
+            check = _hid_exchange(fd, AYA_CHECK)
+            if len(check) > 17 and check[17] == 1:
+                _hid_exchange(fd, AYA_CUSTOM)
+            if not _hid_exchange(fd, controller_command(config, side)):
+                raise RuntimeError("controller rejected the eject command")
+            # Match HHD's module-release verification before cutting controller
+            # power so the stepper motor can finish moving the latch.
+            for _ in range(20):
+                response = _hid_exchange(fd, AYA_CHECK)
+                time.sleep(0.4)
+                if len(response) > 19 and response[19] & ~0x11 == 0:
+                    break
+        finally:
+            os.close(fd)
+        remaining = 3.0 - (time.monotonic() - started)
+        if remaining > 0:
+            time.sleep(remaining)
+        set_controller_power(False)
 
 
 def _event_has_rumble(node: str) -> bool:
@@ -406,7 +482,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.3.1"},
+        headers={"User-Agent": "Ayaneo3Companion/0.4.0"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
@@ -591,6 +667,7 @@ class Plugin:
     _restore_task = None
     _edid_task = None
     _ac_task = None
+    _module_task = None
     _active_app = ""
 
     @staticmethod
@@ -621,6 +698,11 @@ class Plugin:
                 state["charge_bypass_supported"] = True
             except (OSError, RuntimeError):
                 state["charge_bypass_supported"] = False
+            try:
+                state["modules_connected"] = both_modules_connected()
+                state["module_eject_supported"] = True
+            except (OSError, RuntimeError):
+                state["module_eject_supported"] = False
             return state
 
     async def get_state(self):
@@ -709,6 +791,19 @@ class Plugin:
             Plugin._state["charge_bypass"] = value
             Plugin._state["charge_bypass_supported"] = True
             self._save("charge_bypass", value)
+        return await self.get_state()
+
+    async def eject_modules(self, side):
+        side = str(side or "").lower()
+        with _lock:
+            if Plugin._state.get("modules_reconnecting"):
+                raise RuntimeError("reinsert both modules before ejecting again")
+            controller = dict(Plugin._state["controller"])
+        await asyncio.to_thread(eject_controller_modules, side, controller)
+        with _lock:
+            Plugin._state["modules_reconnecting"] = True
+            Plugin._state["modules_connected"] = False
+        decky.logger.info(f"{LOG} ejected {side} controller module(s)")
         return await self.get_state()
 
     async def set_screen_fix(self, enabled):
@@ -808,6 +903,36 @@ class Plugin:
                 except Exception as error:
                     decky.logger.warning(f"{LOG} charger TDP restore failed: {error}")
 
+    async def _module_loop(self):
+        """Power the controller back on after both replacement modules are seated."""
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                powered = await asyncio.to_thread(controller_powered)
+                connected = await asyncio.to_thread(both_modules_connected)
+                with _lock:
+                    Plugin._state["modules_connected"] = connected
+                    reconnecting = Plugin._state.get("modules_reconnecting", False)
+                if not powered and connected:
+                    await asyncio.to_thread(set_controller_power, True)
+                    await asyncio.sleep(1)
+                    with _lock:
+                        Plugin._state["modules_reconnecting"] = False
+                        controller = dict(Plugin._state["controller"])
+                    try:
+                        await asyncio.to_thread(apply_controller, controller)
+                    except Exception as error:
+                        decky.logger.warning(f"{LOG} controller setting restore failed: {error}")
+                    decky.logger.info(f"{LOG} replacement modules connected; controller powered on")
+                elif reconnecting and powered:
+                    # Recover if firmware powered the controller itself.
+                    with _lock:
+                        Plugin._state["modules_reconnecting"] = False
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                decky.logger.debug(f"{LOG} module monitor unavailable: {error}")
+
     async def _main(self):
         await asyncio.to_thread(settings.read)
         is_supported = await asyncio.to_thread(supported_device)
@@ -831,6 +956,9 @@ class Plugin:
             "button_fix_installed": False,
             "charge_bypass_supported": charge_control is not None,
             "charge_bypass": charge_bypass,
+            "module_eject_supported": charge_control is not None,
+            "modules_reconnecting": False,
+            "modules_connected": True,
             "gpu_power_w": None,
         }
         Plugin._active_app = ""
@@ -838,6 +966,7 @@ class Plugin:
             Plugin._restore_task = asyncio.create_task(self._restore_hardware())
             Plugin._edid_task = asyncio.create_task(self._edid_loop())
             Plugin._ac_task = asyncio.create_task(self._ac_loop())
+            Plugin._module_task = asyncio.create_task(self._module_loop())
         decky.logger.info(f"{LOG} started on {Plugin._state['device']}")
 
     async def _unload(self):
@@ -853,6 +982,15 @@ class Plugin:
             Plugin._ac_task.cancel()
             await asyncio.wait([Plugin._ac_task], timeout=1.0)
             Plugin._ac_task = None
+        if Plugin._module_task:
+            Plugin._module_task.cancel()
+            await asyncio.wait([Plugin._module_task], timeout=1.0)
+            Plugin._module_task = None
+        try:
+            if not await asyncio.to_thread(controller_powered):
+                await asyncio.to_thread(set_controller_power, True)
+        except Exception as error:
+            decky.logger.warning(f"{LOG} could not restore controller power on unload: {error}")
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):

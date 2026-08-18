@@ -6,7 +6,7 @@ art and independently verified against retail hardware:
 
   Handheld Daemon (HHD)
   https://github.com/hhd-dev/hhd
-  Copyright its contributors, GPL-3.0-or-later
+  Copyright its contributors, LGPL-2.1-or-later
 
 No HHD source code is distributed with this package. This implementation uses
 only the observed wire-format facts required for device interoperability.

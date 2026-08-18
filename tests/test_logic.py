@@ -45,6 +45,12 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(packet[24], 0x10)
         self.assertEqual(int.from_bytes(packet[1:3], "little"), sum(packet[7:]))
 
+    def test_magic_module_eject_commands(self):
+        config = {"vibration": "low", "rgb_mode": "solid", "color": "ff0000", "brightness": 50}
+        self.assertEqual(main.controller_command(config, "left")[20], 0x07)
+        self.assertEqual(main.controller_command(config, "right")[20], 0x70)
+        self.assertEqual(main.controller_command(config, "both")[20], 0x77)
+
     def test_off_packet(self):
         packet = main.controller_command({"vibration": "off", "rgb_mode": "off", "color": "ffffff", "brightness": 100})
         self.assertEqual(packet[8], 0xff)
