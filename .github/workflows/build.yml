@@ -1,0 +1,47 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check the backend parses
+        run: python -m compileall -q main.py
+      - name: Backend tests
+        run: python -m unittest discover -s tests -v
+      - name: Check versions agree
+        run: |
+          plugin=$(python -c "import json;print(json.load(open('plugin.json'))['version'])")
+          pkg=$(python -c "import json;print(json.load(open('package.json'))['version'])")
+          echo "plugin.json=$plugin package.json=$pkg"
+          test "$plugin" = "$pkg"
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Type check
+        run: npm run typecheck
+      - name: Build frontend
+        run: npm run build
+      - name: Package
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ayaneo3Companion
+          path: Ayaneo3Companion-*.zip
+          if-no-files-found: error

@@ -1,0 +1,22 @@
+{
+  "name": "ayaneo3companion",
+  "version": "0.2.7",
+  "description": "AYANEO 3 hardware controls for Decky Loader",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w",
+    "typecheck": "tsc --noEmit",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@decky/api": "^1.1.3",
+    "@decky/rollup": "^1.0.2",
+    "@decky/ui": "^4.12.0",
+    "@types/react": "^19.1.1",
+    "@types/react-dom": "^19.1.1",
+    "rollup": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
