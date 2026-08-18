@@ -5,7 +5,7 @@
   "api_version": 1,
   "main": "main.py",
   "bin": "dist/index.js",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "publish": {
     "tags": ["utilities", "hardware", "performance"],
     "description": "TDP, battery bypass, Magic Modules, controller and OLED support for AYANEO 3."

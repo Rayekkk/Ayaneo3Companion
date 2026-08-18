@@ -2,6 +2,13 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.4.3
+
+### Removed
+
+- Removed the experimental shutdown LED hook because it could leave controller
+  power disabled after boot. Controller power is no longer changed at shutdown.
+
 ## 0.4.2
 
 ### Fixed

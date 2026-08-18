@@ -54,10 +54,6 @@ INPUT_DEVICE_SOURCE = PLUGIN_DIR / "assets" / "01-ayaneo3-companion.yaml"
 INPUT_MAP_SOURCE = PLUGIN_DIR / "assets" / "ayaneo3-companion.yaml"
 INPUT_DEVICE_TARGET = Path("/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml")
 INPUT_MAP_TARGET = Path("/etc/inputplumber/capability_maps.d/ayaneo3-companion.yaml")
-POWEROFF_SCRIPT_SOURCE = PLUGIN_DIR / "assets" / "ayaneo3-companion-poweroff.py"
-POWEROFF_UNIT_SOURCE = PLUGIN_DIR / "assets" / "ayaneo3-companion-poweroff.service"
-POWEROFF_SCRIPT_TARGET = Path("/etc/ayaneo3-companion/poweroff.py")
-POWEROFF_UNIT_TARGET = Path("/etc/systemd/system/ayaneo3-companion-poweroff.service")
 EC_CHARGE_REGISTER = 0x1E
 EC_CHARGE_AUTO = 0xAA
 EC_CHARGE_INHIBIT = 0x55
@@ -211,40 +207,6 @@ def both_modules_connected() -> bool:
 def set_controller_power(enabled: bool) -> None:
     _write_ec_register(EC_CONTROLLER_POWER_REGISTER,
                        EC_CONTROLLER_POWER_ON if enabled else EC_CONTROLLER_POWER_OFF)
-
-
-def install_poweroff_hook() -> None:
-    """Install a shutdown-only hook without coupling it to Decky unloads."""
-    POWEROFF_SCRIPT_TARGET.parent.mkdir(parents=True, exist_ok=True)
-    changed = False
-    for source, target in ((POWEROFF_SCRIPT_SOURCE, POWEROFF_SCRIPT_TARGET),
-                           (POWEROFF_UNIT_SOURCE, POWEROFF_UNIT_TARGET)):
-        data = source.read_bytes()
-        if not target.exists() or target.read_bytes() != data:
-            target.write_bytes(data)
-            changed = True
-    POWEROFF_SCRIPT_TARGET.chmod(0o755)
-    if changed:
-        subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=10)
-    subprocess.run(["systemctl", "enable", "--now", POWEROFF_UNIT_TARGET.name],
-                   check=True, timeout=15, capture_output=True, text=True)
-
-
-def uninstall_poweroff_hook() -> None:
-    subprocess.run(["systemctl", "disable", POWEROFF_UNIT_TARGET.name],
-                   check=False, timeout=10, capture_output=True, text=True)
-    # Stopping runs ExecStop, so immediately restore controller power while the
-    # OS is still up. This also guarantees no active orphan unit remains.
-    subprocess.run(["systemctl", "stop", POWEROFF_UNIT_TARGET.name],
-                   check=False, timeout=10, capture_output=True, text=True)
-    try:
-        set_controller_power(True)
-    except Exception:
-        pass
-    for target in (POWEROFF_UNIT_TARGET, POWEROFF_SCRIPT_TARGET):
-        if target.exists():
-            target.unlink()
-    subprocess.run(["systemctl", "daemon-reload"], check=False, timeout=10)
 
 
 def _clamp(value, low, high):
@@ -520,7 +482,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.4.2"},
+        headers={"User-Agent": "Ayaneo3Companion/0.4.3"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
@@ -974,11 +936,6 @@ class Plugin:
     async def _main(self):
         await asyncio.to_thread(settings.read)
         is_supported = await asyncio.to_thread(supported_device)
-        if is_supported:
-            try:
-                await asyncio.to_thread(install_poweroff_hook)
-            except Exception as error:
-                decky.logger.warning(f"{LOG} shutdown LED hook installation failed: {error}")
         saved_controller = normalize_controller(settings.getSetting("controller", DEFAULT_CONTROLLER))
         charge_control = await asyncio.to_thread(ensure_charge_control) if is_supported else None
         try:
@@ -1037,7 +994,6 @@ class Plugin:
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
-        await asyncio.to_thread(uninstall_poweroff_hook)
         if settings.getSetting("charge_bypass", False):
             try:
                 await asyncio.to_thread(write_charge_bypass, False)
