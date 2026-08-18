@@ -2,6 +2,14 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.4.4
+
+### Added
+
+- Standalone `bootstrap.sh` installer and a Desktop Mode launcher for fresh
+  systems where QAM is not yet accessible. They install the plugin and enable
+  its InputPlumber mapping.
+
 ## 0.4.3
 
 ### Removed

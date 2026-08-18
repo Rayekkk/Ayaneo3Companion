@@ -54,6 +54,20 @@ Other AYANEO models are deliberately rejected by the device checks.
 No release archive is published yet. Build the plugin from source, then install
 the generated zip through **Decky → Settings → Developer → Install Plugin from ZIP**.
 
+On a fresh installation where the QAM button is not available yet, copy
+`bootstrap.sh` and the plugin ZIP to the console, then run:
+
+```bash
+chmod +x bootstrap.sh
+./bootstrap.sh Ayaneo3Companion-0.4.4.zip
+```
+
+The bootstrap installer checks the device, installs the plugin directly and
+enables its InputPlumber QAM mapping. Decky Loader must already be installed.
+For a graphical Desktop Mode workflow, keep the ZIP, `bootstrap.sh` and
+`Install AYANEO 3 Companion.desktop` in the same folder, mark the launcher as
+executable and double-click it.
+
 The display and button sections install persistent system definitions. Restart
 Game Mode when the panel asks for it.
 

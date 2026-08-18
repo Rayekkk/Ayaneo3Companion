@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install AYANEO 3 Companion
+Comment=Install the Decky plugin and enable its QAM button mapping
+Icon=system-software-install
+Terminal=true
+Exec=bash -lc 'launcher="%k"; directory=${launcher%/*}; cd "$directory" && chmod +x bootstrap.sh && ./bootstrap.sh; result=$?; echo; if (( result == 0 )); then echo "Installation complete. You can return to Game Mode."; else echo "Installation failed with status $result."; fi; read -rp "Press Enter to close..."; exit $result'
+Categories=System;

@@ -9,7 +9,7 @@ const name = "Ayaneo3Companion";
 const build = join(root, "build");
 const stage = join(build, name);
 const zip = join(root, `${name}-${manifest.version}.zip`);
-const files = ["main.py", "plugin.json", "package.json", "README.md", "LICENSE", "NOTICE", "dist", "assets"];
+const files = ["main.py", "plugin.json", "package.json", "README.md", "LICENSE", "NOTICE", "bootstrap.sh", "Install AYANEO 3 Companion.desktop", "dist", "assets"];
 if (!existsSync(join(root, "dist", "index.js"))) throw new Error("dist/index.js is missing");
 rmSync(build, { recursive: true, force: true }); rmSync(zip, { force: true }); mkdirSync(stage, { recursive: true });
 for (const file of files) cpSync(join(root, file), join(stage, file), {
