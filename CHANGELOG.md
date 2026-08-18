@@ -2,6 +2,13 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.4.2
+
+### Fixed
+
+- Turn off controller power and joystick LEDs during a real system shutdown
+  using a dedicated systemd hook. Decky reloads do not trigger the hook.
+
 ## 0.4.1
 
 ### Fixed

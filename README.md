@@ -28,6 +28,7 @@ TDP profiles, battery bypass, Magic Modules, vibration, RGB lighting, rear butto
 | **Magic Modules** | Ejects the left, right or both controller modules and handles reconnection |
 | **Vibration** | Off, Low, Medium and High strength plus a 0.5 second test |
 | **RGB lighting** | Solid, Pulse and Rainbow modes with Hue, Saturation and Brightness |
+| **Clean shutdown** | Turns off controller power and joystick LEDs when the system powers down |
 | **Menu and rear buttons** | Correct Steam/QAM mapping plus LC1 as L4 and RC1 as R4 |
 | **OLED definition** | Gamma 2.2 gamescope definition with 60/90/120/144 Hz modes |
 | **HDR metadata** | Corrects the gamescope EDID copy so games receive the panel's 800 nit peak |
@@ -85,6 +86,8 @@ are short boost limits; sustained power remains capped at AYANEO's official 35 W
 - Magic Module release uses AYANEO's vendor HID command. After the latch motors
   finish, the plugin power-cycles the controller through the EC and waits for
   both modules before restoring the saved controller configuration.
+- A dedicated systemd shutdown hook cuts controller power only during system
+  shutdown or reboot, so persisted RGB does not remain lit after power-off.
 - Vibration and RGB use the AYANEO vendor HID interface. The test button sends
   a standard Linux force-feedback effect without changing the saved firmware setting.
 - Button mappings are installed as a device-specific InputPlumber override.
