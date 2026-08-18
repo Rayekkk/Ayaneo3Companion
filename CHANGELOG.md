@@ -2,6 +2,14 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.3.0
+
+### Added
+
+- Battery charge bypass for AYANEO 3. The setting writes the vendor EC charge
+  inhibit value, verifies the actual register state and persists across reboots.
+- Automatic charging is restored when the plugin is uninstalled.
+
 ## 0.2.9
 
 ### Added

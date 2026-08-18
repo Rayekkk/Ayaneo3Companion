@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/github/license/Rayekkk/Ayaneo3Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
 **The missing AYANEO 3 hardware controls in one Steam overlay panel.**
-TDP profiles, vibration, RGB lighting, rear buttons and OLED display support.
+TDP profiles, battery bypass, vibration, RGB lighting, rear buttons and OLED display support.
 
 [Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Building](#building)
 
@@ -24,6 +24,7 @@ TDP profiles, vibration, RGB lighting, rear buttons and OLED display support.
 | **Custom TDP** | SPL up to 35 W, with short boost limits up to 40 W SPPT and 45 W FPPT |
 | **Per-game profiles** | Saves a TDP profile for the running game and applies it automatically |
 | **Live power** | Shows current package power in the TDP panel |
+| **Charge bypass** | Powers the console from its charger while inhibiting battery charging |
 | **Vibration** | Off, Low, Medium and High strength plus a 0.5 second test |
 | **RGB lighting** | Solid, Pulse and Rainbow modes with Hue, Saturation and Brightness |
 | **Menu and rear buttons** | Correct Steam/QAM mapping plus LC1 as L4 and RC1 as R4 |
@@ -61,6 +62,8 @@ All sections start collapsed whenever the plugin opens.
 
 - Open **TDP** to select a preset or create a Custom configuration. Enable
   **Per Game Profile** while a game is running to bind the chosen values to it.
+- Open **Battery** to enable or disable charge bypass. The displayed state is
+  read back from the embedded controller rather than inferred from ACPI.
 - Open **Vibration** to select a strength or play a short test.
 - Open **RGB** to select an animation and tune Hue, Saturation and Brightness.
 - Open **Menu buttons** to install the persistent InputPlumber mapping.
@@ -73,6 +76,9 @@ are short boost limits; sustained power remains capped at AYANEO's official 35 W
 
 - On Bazzite, TDP is written through `org.shadowblip.PowerStation`. On SteamOS,
   the plugin downloads the pinned RyzenAdj build and writes SPL/SPPT/FPPT directly.
+- Charge bypass uses the AYANEO 3 EC charge-control register exposed through
+  the kernel's signed `ec_sys` module. The plugin verifies every write and
+  restores automatic charging before uninstalling.
 - Vibration and RGB use the AYANEO vendor HID interface. The test button sends
   a standard Linux force-feedback effect without changing the saved firmware setting.
 - Button mappings are installed as a device-specific InputPlumber override.

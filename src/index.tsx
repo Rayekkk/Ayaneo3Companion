@@ -15,7 +15,7 @@ interface Controller { vibration: Vibration; rgb_mode: RgbMode; color: string; b
 interface Hsv { hue: number; saturation: number; brightness: number }
 interface RunningGame { appId: string; name: string }
 interface GameProfile { exists: boolean; profile: Tdp }
-interface State { supported: boolean; device: string; tdp_backend: string; tdp: Tdp; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean }
+interface State { supported: boolean; device: string; tdp_backend: string; tdp: Tdp; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean }
 
 const getState = callable<[], State>("get_state");
 const setTdp = callable<[Tdp], State>("set_tdp");
@@ -25,9 +25,10 @@ const deleteGameProfile = callable<[string], State>("delete_game_profile");
 const setActiveApp = callable<[string], void>("set_active_app");
 const setController = callable<[Controller], State>("set_controller");
 const testVibration = callable<[number], { success: boolean; error?: string }>("test_vibration");
+const setChargeBypass = callable<[boolean], State>("set_charge_bypass");
 const setScreenFix = callable<[boolean], State>("set_screen_fix");
 const setButtonFix = callable<[boolean], State>("set_button_fix");
-const CLOSED = { tdp: false, vibration: false, rgb: false, buttons: false, screen: false };
+const CLOSED = { tdp: false, battery: false, vibration: false, rgb: false, buttons: false, screen: false };
 const PRESET_ORDER: Preset[] = ["Low power", "Balanced", "Performance", "Max", "Custom"];
 const vibrationOptions = ["off", "low", "medium", "high"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
@@ -387,6 +388,13 @@ const Content: FC = () => {
           {status && <PanelSectionRow><div style={{ fontSize: "11px" }}>{status}</div></PanelSectionRow>}
         </PanelSection>
       </>}
+    </Fold>
+
+    <Fold title="Battery" {...fold("battery")}>
+      <PanelSection title="Charge Control">
+        <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "Charge bypass is unavailable on this kernel."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={enabled => run(setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")} /></PanelSectionRow>
+        <PanelSectionRow><Field label={state.charge_bypass ? "Bypass active" : "Automatic charging"} description="State read directly from the AYANEO embedded controller." /></PanelSectionRow>
+      </PanelSection>
     </Fold>
 
     <Fold title="Vibration" {...fold("vibration")}><PanelSection title="Vibration"><PanelSectionRow><DropdownItem label="Strength" selectedOption={state.controller.vibration} rgOptions={vibrationOptions} onChange={option => applyController({ vibration: option.data as Vibration })} /></PanelSectionRow><PanelSectionRow><ButtonItem layout="below" disabled={busy || state.controller.vibration === "off"} onClick={() => void runVibrationTest()}>{busy ? "Testing..." : "Test Vibration"}</ButtonItem></PanelSectionRow><PanelSectionRow><Field label="Controller firmware setting" description="Applies to both detachable controller modules." /></PanelSectionRow></PanelSection></Fold>

@@ -1,4 +1,5 @@
-import os, sys, unittest
+import os, sys, tempfile, unittest
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 from _harness import install
 install()
@@ -6,6 +7,28 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
 
 class LogicTests(unittest.TestCase):
+    def test_charge_bypass_register_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "io"
+            path.write_bytes(bytes(256))
+            old_path = main._ec_io_path
+            old_ensure = main.ensure_charge_control
+            old_supported = main.supported_device
+            try:
+                main._ec_io_path = lambda: path
+                main.ensure_charge_control = lambda: path
+                main.supported_device = lambda: True
+                main.write_charge_bypass(True)
+                self.assertTrue(main.read_charge_bypass())
+                self.assertEqual(path.read_bytes()[main.EC_CHARGE_REGISTER], main.EC_CHARGE_INHIBIT)
+                main.write_charge_bypass(False)
+                self.assertFalse(main.read_charge_bypass())
+                self.assertEqual(path.read_bytes()[main.EC_CHARGE_REGISTER], main.EC_CHARGE_AUTO)
+            finally:
+                main._ec_io_path = old_path
+                main.ensure_charge_control = old_ensure
+                main.supported_device = old_supported
+
     def test_tdp_clamps_and_orders(self):
         self.assertEqual(main.normalize_tdp({"spl": 2, "sppt": 1, "fppt": 99}), {"spl": 5, "sppt": 5, "fppt": 45})
         self.assertEqual(main.normalize_tdp({"spl": 35, "sppt": 99, "fppt": 99}), {"spl": 35, "sppt": 40, "fppt": 45})

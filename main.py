@@ -53,6 +53,9 @@ INPUT_DEVICE_SOURCE = PLUGIN_DIR / "assets" / "01-ayaneo3-companion.yaml"
 INPUT_MAP_SOURCE = PLUGIN_DIR / "assets" / "ayaneo3-companion.yaml"
 INPUT_DEVICE_TARGET = Path("/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml")
 INPUT_MAP_TARGET = Path("/etc/inputplumber/capability_maps.d/ayaneo3-companion.yaml")
+EC_CHARGE_REGISTER = 0x1E
+EC_CHARGE_AUTO = 0xAA
+EC_CHARGE_INHIBIT = 0x55
 
 VIBRATION_VALUES = {"off": 0x04, "low": 0x01, "medium": 0x02, "high": 0x03}
 RGB_MODES = {"off": 0xFF, "solid": 0x01, "pulse": 0x02, "rainbow": 0x03}
@@ -106,6 +109,60 @@ def ac_online() -> bool:
         return status not in ("", "Discharging", "Unknown")
     except OSError:
         return False
+
+
+def _ec_io_path() -> Path | None:
+    paths = sorted(Path("/sys/kernel/debug/ec").glob("ec*/io"))
+    return paths[0] if paths else None
+
+
+def ensure_charge_control() -> Path | None:
+    """Load SteamOS' signed generic EC driver with writes enabled."""
+    path = _ec_io_path()
+    write_flag = Path("/sys/module/ec_sys/parameters/write_support")
+    try:
+        writable = write_flag.read_text().strip().lower() in ("y", "1")
+    except OSError:
+        writable = False
+    if path is None or not writable:
+        result = subprocess.run(["modprobe", "ec_sys", "write_support=1"],
+                                capture_output=True, text=True)
+        if result.returncode:
+            decky.logger.warning(f"{LOG} cannot load ec_sys: {result.stderr.strip()}")
+            return None
+        path = _ec_io_path()
+        try:
+            writable = write_flag.read_text().strip().lower() in ("y", "1")
+        except OSError:
+            writable = False
+    return path if writable else None
+
+
+def read_charge_bypass() -> bool:
+    path = _ec_io_path()
+    if path is None:
+        raise RuntimeError("AYANEO EC access is unavailable")
+    with path.open("rb", buffering=0) as ec:
+        ec.seek(EC_CHARGE_REGISTER)
+        value = ec.read(1)
+    if value not in (bytes([EC_CHARGE_AUTO]), bytes([EC_CHARGE_INHIBIT])):
+        raise RuntimeError(f"unexpected AYANEO charge register value: {value.hex() or 'empty'}")
+    return value[0] == EC_CHARGE_INHIBIT
+
+
+def write_charge_bypass(enabled: bool) -> None:
+    if not supported_device():
+        raise RuntimeError("charge bypass is restricted to AYANEO 3")
+    path = ensure_charge_control()
+    if path is None:
+        raise RuntimeError("AYANEO EC charge control is unavailable")
+    value = EC_CHARGE_INHIBIT if enabled else EC_CHARGE_AUTO
+    with path.open("r+b", buffering=0) as ec:
+        ec.seek(EC_CHARGE_REGISTER)
+        if ec.write(bytes([value])) != 1:
+            raise RuntimeError("AYANEO EC rejected the charge setting")
+    if read_charge_bypass() != enabled:
+        raise RuntimeError("AYANEO EC did not retain the charge setting")
 
 
 def _clamp(value, low, high):
@@ -349,7 +406,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.2.9"},
+        headers={"User-Agent": "Ayaneo3Companion/0.3.0"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
@@ -559,6 +616,11 @@ class Plugin:
                 INPUT_DEVICE_TARGET.exists() and INPUT_MAP_TARGET.exists()
                 and INPUT_DEVICE_TARGET.read_bytes() == INPUT_DEVICE_SOURCE.read_bytes()
                 and INPUT_MAP_TARGET.read_bytes() == INPUT_MAP_SOURCE.read_bytes())
+            try:
+                state["charge_bypass"] = read_charge_bypass()
+                state["charge_bypass_supported"] = True
+            except (OSError, RuntimeError):
+                state["charge_bypass_supported"] = False
             return state
 
     async def get_state(self):
@@ -640,6 +702,15 @@ class Plugin:
             decky.logger.error(f"{LOG} vibration test failed: {error}")
             return {"success": False, "error": str(error)}
 
+    async def set_charge_bypass(self, enabled):
+        value = bool(enabled)
+        await asyncio.to_thread(write_charge_bypass, value)
+        with _lock:
+            Plugin._state["charge_bypass"] = value
+            Plugin._state["charge_bypass_supported"] = True
+            self._save("charge_bypass", value)
+        return await self.get_state()
+
     async def set_screen_fix(self, enabled):
         if enabled:
             LUA_TARGET.parent.mkdir(parents=True, exist_ok=True)
@@ -677,7 +748,10 @@ class Plugin:
 
     async def _restore_hardware(self):
         """Reapply persisted volatile hardware settings once boot services settle."""
+        saved_bypass = settings.getSetting("charge_bypass", None)
         pending = {"tdp", "controller"}
+        if isinstance(saved_bypass, bool):
+            pending.add("charge_bypass")
         for delay in (1, 2, 4, 8):
             await asyncio.sleep(delay)
             with _lock:
@@ -697,6 +771,16 @@ class Plugin:
                     decky.logger.info(f"{LOG} restored RGB and vibration after startup")
                 except Exception as error:
                     decky.logger.warning(f"{LOG} controller restore attempt failed: {error}")
+            if "charge_bypass" in pending:
+                try:
+                    await asyncio.to_thread(write_charge_bypass, saved_bypass)
+                    with _lock:
+                        Plugin._state["charge_bypass"] = saved_bypass
+                        Plugin._state["charge_bypass_supported"] = True
+                    pending.remove("charge_bypass")
+                    decky.logger.info(f"{LOG} restored charge bypass after startup")
+                except Exception as error:
+                    decky.logger.warning(f"{LOG} charge bypass restore attempt failed: {error}")
             if not pending:
                 return
         decky.logger.error(f"{LOG} could not restore after startup: {', '.join(sorted(pending))}")
@@ -728,6 +812,12 @@ class Plugin:
         await asyncio.to_thread(settings.read)
         is_supported = await asyncio.to_thread(supported_device)
         saved_controller = normalize_controller(settings.getSetting("controller", DEFAULT_CONTROLLER))
+        charge_control = await asyncio.to_thread(ensure_charge_control) if is_supported else None
+        try:
+            charge_bypass = await asyncio.to_thread(read_charge_bypass) if charge_control else False
+        except (OSError, RuntimeError):
+            charge_control = None
+            charge_bypass = False
         Plugin._state = {
             "supported": is_supported,
             "device": _dmi("product_name") or "unknown",
@@ -739,6 +829,8 @@ class Plugin:
             "edid_patched": False,
             "edid_game_nits": 0,
             "button_fix_installed": False,
+            "charge_bypass_supported": charge_control is not None,
+            "charge_bypass": charge_bypass,
             "gpu_power_w": None,
         }
         Plugin._active_app = ""
@@ -764,6 +856,12 @@ class Plugin:
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
+        if settings.getSetting("charge_bypass", False):
+            try:
+                await asyncio.to_thread(write_charge_bypass, False)
+                decky.logger.info(f"{LOG} restored automatic charging before uninstall")
+            except Exception as error:
+                decky.logger.warning(f"{LOG} could not restore charging before uninstall: {error}")
         if _is_our_display_script(LUA_TARGET):
             LUA_TARGET.unlink()
         for source, target in ((INPUT_DEVICE_SOURCE, INPUT_DEVICE_TARGET),
