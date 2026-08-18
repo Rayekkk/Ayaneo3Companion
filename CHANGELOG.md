@@ -2,6 +2,14 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## 0.2.9
+
+### Added
+
+- Max preset with 35 W SPL, 40 W SPPT and 45 W FPPT.
+- Charger monitoring that re-applies the active global or per-game TDP several
+  times over six seconds after connecting or disconnecting external power.
+
 ## 0.2.8
 
 ### Changed

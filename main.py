@@ -69,10 +69,12 @@ PRESETS = {
     "Low power": {"spl": 8, "sppt": 10, "fppt": 12},
     "Balanced": {"spl": 15, "sppt": 18, "fppt": 25},
     "Performance": {"spl": 30, "sppt": 32, "fppt": 35},
+    "Max": {"spl": 35, "sppt": 40, "fppt": 45},
 }
 
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
 _lock = threading.RLock()
+_tdp_apply_lock = threading.Lock()
 
 def _dmi(name: str) -> str:
     try:
@@ -83,6 +85,27 @@ def _dmi(name: str) -> str:
 
 def supported_device() -> bool:
     return _dmi("sys_vendor").upper() == "AYANEO" and _dmi("product_name").upper() == "AYANEO 3"
+
+
+def ac_online() -> bool:
+    """Return the real charger state, ignoring USB-C source-role supplies."""
+    mains_seen = False
+    for supply in glob.glob("/sys/class/power_supply/*"):
+        try:
+            if Path(supply, "type").read_text().strip() != "Mains":
+                continue
+            mains_seen = True
+            if Path(supply, "online").read_text().strip() == "1":
+                return True
+        except OSError:
+            continue
+    if mains_seen:
+        return False
+    try:
+        status = Path("/sys/class/power_supply/BAT0/status").read_text().strip()
+        return status not in ("", "Discharging", "Unknown")
+    except OSError:
+        return False
 
 
 def _clamp(value, low, high):
@@ -326,7 +349,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.2.8"},
+        headers={"User-Agent": "Ayaneo3Companion/0.2.9"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
@@ -373,7 +396,7 @@ def tdp_backend() -> str:
     return "PowerStation" if _powerstation_card() else "RyzenAdj"
 
 
-def apply_tdp(config: dict) -> None:
+def _apply_tdp_unlocked(config: dict) -> None:
     values = normalize_tdp(config)
     card = _powerstation_card()
     if card:
@@ -396,6 +419,13 @@ def apply_tdp(config: dict) -> None:
                             capture_output=True, text=True, timeout=10, env=env)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "RyzenAdj failed")
+
+
+def apply_tdp(config: dict) -> None:
+    # RPC, game changes, startup restore and charger restore can all arrive on
+    # separate worker threads. Never interleave two three-register writes.
+    with _tdp_apply_lock:
+        _apply_tdp_unlocked(config)
 
 
 def gpu_power_watts():
@@ -503,6 +533,7 @@ class Plugin:
     _state = {}
     _restore_task = None
     _edid_task = None
+    _ac_task = None
     _active_app = ""
 
     @staticmethod
@@ -670,6 +701,29 @@ class Plugin:
                 return
         decky.logger.error(f"{LOG} could not restore after startup: {', '.join(sorted(pending))}")
 
+    async def _ac_loop(self):
+        """Restore the active TDP after firmware reacts to charger changes."""
+        previous = await asyncio.to_thread(ac_online)
+        while True:
+            await asyncio.sleep(1)
+            current = await asyncio.to_thread(ac_online)
+            if current == previous:
+                continue
+            previous = current
+            decky.logger.info(f"{LOG} charger {'connected' if current else 'disconnected'}; restoring TDP")
+            # Firmware profile writes can land after the power-supply event, so
+            # one immediate write is not enough. These intervals total 6 s.
+            for delay in (0.5, 1.0, 1.5, 3.0):
+                await asyncio.sleep(delay)
+                with _lock:
+                    target = dict(Plugin._state["tdp"])
+                try:
+                    await asyncio.to_thread(apply_tdp, target)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    decky.logger.warning(f"{LOG} charger TDP restore failed: {error}")
+
     async def _main(self):
         await asyncio.to_thread(settings.read)
         is_supported = await asyncio.to_thread(supported_device)
@@ -691,6 +745,7 @@ class Plugin:
         if is_supported:
             Plugin._restore_task = asyncio.create_task(self._restore_hardware())
             Plugin._edid_task = asyncio.create_task(self._edid_loop())
+            Plugin._ac_task = asyncio.create_task(self._ac_loop())
         decky.logger.info(f"{LOG} started on {Plugin._state['device']}")
 
     async def _unload(self):
@@ -702,6 +757,10 @@ class Plugin:
             Plugin._edid_task.cancel()
             await asyncio.wait([Plugin._edid_task], timeout=1.0)
             Plugin._edid_task = None
+        if Plugin._ac_task:
+            Plugin._ac_task.cancel()
+            await asyncio.wait([Plugin._ac_task], timeout=1.0)
+            Plugin._ac_task = None
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):

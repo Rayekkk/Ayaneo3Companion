@@ -20,7 +20,7 @@ TDP profiles, vibration, RGB lighting, rear buttons and OLED display support.
 
 | | |
 |---|---|
-| **TDP presets** | Low Power, Balanced and Performance profiles tuned for the AYANEO 3 |
+| **TDP presets** | Low Power, Balanced, Performance and Max profiles tuned for the AYANEO 3 |
 | **Custom TDP** | SPL up to 35 W, with short boost limits up to 40 W SPPT and 45 W FPPT |
 | **Per-game profiles** | Saves a TDP profile for the running game and applies it automatically |
 | **Live power** | Shows current package power in the TDP panel |
@@ -29,7 +29,7 @@ TDP profiles, vibration, RGB lighting, rear buttons and OLED display support.
 | **Menu and rear buttons** | Correct Steam/QAM mapping plus LC1 as L4 and RC1 as R4 |
 | **OLED definition** | Gamma 2.2 gamescope definition with 60/90/120/144 Hz modes |
 | **HDR metadata** | Corrects the gamescope EDID copy so games receive the panel's 800 nit peak |
-| **Persistent settings** | Restores hardware settings after startup and follows games with the QAM closed |
+| **Persistent settings** | Restores settings after startup, follows games with the QAM closed and re-applies TDP after charger changes |
 
 ---
 
@@ -67,6 +67,9 @@ All sections start collapsed whenever the plugin opens.
 - Open **OLED display** to install the gamescope definition and monitor the EDID correction.
 
 ## How it works
+
+The Max preset uses 35 W SPL, 40 W SPPT and 45 W FPPT. The two higher values
+are short boost limits; sustained power remains capped at AYANEO's official 35 W.
 
 - On Bazzite, TDP is written through `org.shadowblip.PowerStation`. On SteamOS,
   the plugin downloads the pinned RyzenAdj build and writes SPL/SPPT/FPPT directly.

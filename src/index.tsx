@@ -8,7 +8,7 @@ import { FC, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 type Vibration = "off" | "low" | "medium" | "high";
 type RgbMode = "off" | "solid" | "pulse" | "rainbow";
-type Preset = "Low power" | "Balanced" | "Performance" | "Custom";
+type Preset = "Low power" | "Balanced" | "Performance" | "Max" | "Custom";
 interface Tdp { spl: number; sppt: number; fppt: number }
 interface Tuning { spl: number; spptOff: number; fpptOff: number }
 interface Controller { vibration: Vibration; rgb_mode: RgbMode; color: string; brightness: number }
@@ -28,7 +28,7 @@ const testVibration = callable<[number], { success: boolean; error?: string }>("
 const setScreenFix = callable<[boolean], State>("set_screen_fix");
 const setButtonFix = callable<[boolean], State>("set_button_fix");
 const CLOSED = { tdp: false, vibration: false, rgb: false, buttons: false, screen: false };
-const PRESET_ORDER: Preset[] = ["Low power", "Balanced", "Performance", "Custom"];
+const PRESET_ORDER: Preset[] = ["Low power", "Balanced", "Performance", "Max", "Custom"];
 const vibrationOptions = ["off", "low", "medium", "high"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 
@@ -138,7 +138,7 @@ const SlowSliderField: FC<SlowSliderProps> = slider => {
 };
 
 function detectPreset(tdp: Tdp, presets: Record<string, Tdp>): Preset {
-  for (const name of ["Low power", "Balanced", "Performance"] as Preset[]) {
+  for (const name of ["Low power", "Balanced", "Performance", "Max"] as Preset[]) {
     const value = presets[name];
     if (value && value.spl === tdp.spl && value.sppt === tdp.sppt && value.fppt === tdp.fppt) return name;
   }
