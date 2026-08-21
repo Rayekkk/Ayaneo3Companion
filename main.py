@@ -113,6 +113,7 @@ AUDIO_LEGACY_TEST_PATHS = frozenset({
     "/home/deck/ayaneo3-audio-cal-test",
     "/home/deck/ayaneo3-audio-fix",
 })
+POWER_SUPPLY_ROOT = Path("/sys/class/power_supply")
 EC_CHARGE_REGISTER = 0x1E
 EC_CHARGE_AUTO = 0xAA
 EC_CHARGE_INHIBIT = 0x55
@@ -838,6 +839,99 @@ def ac_online() -> bool:
         return status not in ("", "Discharging", "Unknown")
     except OSError:
         return False
+
+
+def _power_supply_number(path: Path, name: str) -> int | None:
+    try:
+        return int((path / name).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _upower_time_to_full(battery_name: str) -> int | None:
+    """Read UPower's filtered charging estimate without keeping a D-Bus client."""
+    if not battery_name.replace("_", "").isalnum():
+        return None
+    result = subprocess.run([
+        "busctl", "--system", "get-property", "org.freedesktop.UPower",
+        f"/org/freedesktop/UPower/devices/battery_{battery_name}",
+        "org.freedesktop.UPower.Device", "TimeToFull",
+    ], capture_output=True, text=True, timeout=3)
+    if result.returncode:
+        return None
+    try:
+        seconds = int(result.stdout.split()[-1])
+    except (IndexError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def battery_status() -> dict:
+    """Return live battery data and an estimated charging time."""
+    battery = None
+    try:
+        for candidate in sorted(POWER_SUPPLY_ROOT.iterdir()):
+            try:
+                if (candidate / "type").read_text().strip() == "Battery":
+                    battery = candidate
+                    break
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if battery is None:
+        return {
+            "available": False, "percent": None, "status": "Unavailable",
+            "seconds_to_full": None, "power_w": None, "source": "none",
+        }
+
+    try:
+        status = (battery / "status").read_text().strip() or "Unknown"
+    except OSError:
+        status = "Unknown"
+    percent = _power_supply_number(battery, "capacity")
+    energy_now = _power_supply_number(battery, "energy_now")
+    energy_full = _power_supply_number(battery, "energy_full")
+    power_now = _power_supply_number(battery, "power_now")
+    charge_now = _power_supply_number(battery, "charge_now")
+    charge_full = _power_supply_number(battery, "charge_full")
+    current_now = _power_supply_number(battery, "current_now")
+    voltage_now = _power_supply_number(battery, "voltage_now")
+
+    if percent is None and energy_now is not None and energy_full and energy_full > 0:
+        percent = round(100 * energy_now / energy_full)
+    if percent is not None:
+        percent = max(0, min(100, percent))
+
+    power_w = power_now / 1_000_000 if power_now is not None else None
+    if power_w is None and current_now is not None and voltage_now is not None:
+        power_w = current_now * voltage_now / 1_000_000_000_000
+    if power_w is not None:
+        power_w = round(abs(power_w), 2)
+
+    seconds = None
+    source = "none"
+    if status.lower() == "charging":
+        try:
+            seconds = _upower_time_to_full(battery.name)
+        except (OSError, subprocess.SubprocessError):
+            seconds = None
+        if seconds is not None:
+            source = "UPower"
+        elif energy_now is not None and energy_full is not None and power_now and power_now > 0:
+            seconds = round(max(0, energy_full - energy_now) * 3600 / power_now)
+            source = "sysfs"
+        elif charge_now is not None and charge_full is not None and current_now and current_now > 0:
+            seconds = round(max(0, charge_full - charge_now) * 3600 / current_now)
+            source = "sysfs"
+        if seconds is not None and not 0 < seconds <= 48 * 60 * 60:
+            seconds = None
+            source = "none"
+
+    return {
+        "available": True, "percent": percent, "status": status,
+        "seconds_to_full": seconds, "power_w": power_w, "source": source,
+    }
 
 
 def _ec_io_path() -> Path | None:
@@ -1732,6 +1826,9 @@ class Plugin:
 
     async def get_state(self):
         return await asyncio.to_thread(self._snapshot)
+
+    async def get_battery_status(self):
+        return await asyncio.to_thread(battery_status)
 
     async def set_tdp(self, raw):
         value = normalize_tdp(raw)

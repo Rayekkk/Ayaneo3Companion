@@ -19,9 +19,11 @@ interface Hsv { hue: number; saturation: number; brightness: number }
 interface RunningGame { appId: string; name: string }
 interface GameProfile { exists: boolean; profile: Tdp }
 interface ModuleInfo { code: number | null; label: string; layout: string; status: string; connected: boolean }
+interface BatteryStatus { available: boolean; percent: number | null; status: string; seconds_to_full: number | null; power_w: number | null; source: "UPower" | "sysfs" | "none" }
 interface State { supported: boolean; device: string; tdp_backend: string; tdp: Tdp; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
 
 const getState = callable<[], State>("get_state");
+const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
 const setTdp = callable<[Tdp], State>("set_tdp");
 const getGameProfile = callable<[string], GameProfile>("get_game_profile");
 const setGameProfile = callable<[string, Tdp], State>("set_game_profile");
@@ -47,6 +49,13 @@ const VIBRATION_APPLY_DELAY_MS = 150;
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const presetOptions = PRESET_ORDER.map(data => ({ data, label: data }));
 const titleCase = (value: string) => value ? value[0].toUpperCase() + value.slice(1) : value;
+const formatDuration = (seconds: number): string => {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (!hours) return `${minutes} min`;
+  return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`;
+};
 
 type GameListener = (game: RunningGame | null) => void;
 class AppWatcher {
@@ -231,6 +240,7 @@ const Content: FC = () => {
   const [rgbEdit, setRgbEdit] = useState<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
   const [game, setGame] = useState<RunningGame | null>(AppWatcher.currentGame());
   const [perGame, setPerGame] = useState(false);
+  const [battery, setBattery] = useState<BatteryStatus | null>(null);
   const gameRequest = useRef(0);
   const busy = pendingAction !== null;
 
@@ -300,6 +310,22 @@ const Content: FC = () => {
     const timer = setInterval(refresh, 1500);
     return () => clearInterval(timer);
   }, [refresh, visible]);
+
+  useEffect(() => {
+    if (!visible || activeSection !== "battery") return;
+    let cancelled = false;
+    const updateBattery = async () => {
+      try {
+        const next = await getBatteryStatus();
+        if (!cancelled) setBattery(next);
+      } catch (error) {
+        console.warn("[ayaneo3companion] battery status unavailable", error);
+      }
+    };
+    void updateBattery();
+    const timer = setInterval(() => void updateBattery(), 10000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [activeSection, visible]);
 
   useEffect(() => () => {
     if (controllerTimer.current) clearTimeout(controllerTimer.current);
@@ -559,10 +585,24 @@ const Content: FC = () => {
       </>}
     </PanelSection>}
 
-    {activeSection === "battery" && <PanelSection title="Charge Control">
-      <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "Charge bypass is unavailable on this kernel."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={enabled => void run("battery", () => setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")} /></PanelSectionRow>
-      <PanelSectionRow><Field label={state.charge_bypass ? "Bypass active" : "Automatic charging"} description="State read directly from the AYANEO embedded controller." /></PanelSectionRow>
-    </PanelSection>}
+    {activeSection === "battery" && <>
+      <PanelSection title="Battery Status">
+        {!battery
+          ? <PanelSectionRow><Spinner /></PanelSectionRow>
+          : <PanelSectionRow><Field
+              label={battery.available ? `${battery.percent == null ? "Battery" : `${battery.percent}%`} · ${battery.status}` : "Battery unavailable"}
+              description={battery.seconds_to_full != null
+                ? `Estimated time to full: ${formatDuration(battery.seconds_to_full)}${battery.power_w == null ? "" : ` · ${battery.power_w.toFixed(1)} W net charge`}`
+                : battery.status.toLowerCase() === "charging" ? "Calculating the charging estimate..."
+                : battery.status.toLowerCase() === "full" ? "The battery is fully charged."
+                : "Time to full is shown while the battery is charging."}
+            /></PanelSectionRow>}
+      </PanelSection>
+      <PanelSection title="Charge Control">
+        <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "Charge bypass is unavailable on this kernel."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={enabled => void run("battery", () => setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")} /></PanelSectionRow>
+        <PanelSectionRow><Field label={state.charge_bypass ? "Bypass active" : "Automatic charging"} description="State read directly from the AYANEO embedded controller." /></PanelSectionRow>
+      </PanelSection>
+    </>}
 
     {activeSection === "modules" && <>
       <PanelSection title="Installed Modules">

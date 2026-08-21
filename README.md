@@ -25,6 +25,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lig
 | **Per-game profiles** | Saves a TDP profile for the running game and applies it automatically |
 | **Live power** | Shows current package power in the TDP panel |
 | **Charge bypass** | Powers the console from its charger while inhibiting battery charging |
+| **Charging estimate** | Shows live battery percentage, net charging power and estimated time to full only while Battery is open |
 | **Magic Modules** | Identifies every known module and upper/lower layout, ejects either side and provides Quick Reset |
 | **Vibration** | Firmware Off/Low/Medium/High strength, 0-100% Linux FF gain and a vibration test |
 | **RGB lighting** | Solid, Pulse and Rainbow modes with Hue, Saturation and Brightness |

@@ -8,6 +8,59 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
 
 class LogicTests(unittest.TestCase):
+    def test_battery_status_uses_upower_time_to_full(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            battery = root / "BAT0"
+            battery.mkdir()
+            for name, value in {
+                "type": "Battery", "status": "Charging", "capacity": "82",
+                "energy_now": "37826000", "energy_full": "46130000",
+                "power_now": "5139000", "voltage_now": "11550000",
+            }.items():
+                (battery / name).write_text(value)
+            with mock.patch.object(main, "POWER_SUPPLY_ROOT", root), \
+                 mock.patch.object(main, "_upower_time_to_full", return_value=5869):
+                value = main.battery_status()
+        self.assertEqual(value["percent"], 82)
+        self.assertEqual(value["status"], "Charging")
+        self.assertEqual(value["seconds_to_full"], 5869)
+        self.assertEqual(value["power_w"], 5.14)
+        self.assertEqual(value["source"], "UPower")
+
+    def test_battery_status_falls_back_to_energy_and_power(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            battery = root / "BAT0"
+            battery.mkdir()
+            for name, value in {
+                "type": "Battery", "status": "Charging", "capacity": "82",
+                "energy_now": "37826000", "energy_full": "46130000",
+                "power_now": "5139000",
+            }.items():
+                (battery / name).write_text(value)
+            with mock.patch.object(main, "POWER_SUPPLY_ROOT", root), \
+                 mock.patch.object(main, "_upower_time_to_full", return_value=None):
+                value = main.battery_status()
+        self.assertEqual(value["seconds_to_full"], 5817)
+        self.assertEqual(value["source"], "sysfs")
+
+    def test_battery_status_does_not_estimate_while_discharging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            battery = root / "BAT0"
+            battery.mkdir()
+            for name, value in {
+                "type": "Battery", "status": "Discharging", "capacity": "70",
+                "energy_now": "32000000", "energy_full": "46130000", "power_now": "8000000",
+            }.items():
+                (battery / name).write_text(value)
+            with mock.patch.object(main, "POWER_SUPPLY_ROOT", root), \
+                 mock.patch.object(main, "_upower_time_to_full") as upower:
+                value = main.battery_status()
+        upower.assert_not_called()
+        self.assertIsNone(value["seconds_to_full"])
+
     def test_charge_bypass_register_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "io"

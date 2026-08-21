@@ -6,6 +6,8 @@ All notable changes to AYANEO 3 Companion, newest first.
 
 ### Added
 
+- Show a live estimated time to full in Battery using UPower with a direct
+  energy/power fallback. Battery polling runs only while that QAM page is open.
 - Identify every known left and right AYANEO 3 Magic Module, including its
   reported module ID, physical upper/lower layout and partial connection state.
 - Add Magic Module Quick Reset with automatic restoration of RGB, vibration,
