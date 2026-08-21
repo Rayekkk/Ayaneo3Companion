@@ -1,5 +1,6 @@
-import os, sys, tempfile, unittest
+import asyncio, hashlib, os, struct, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 from _harness import install
 install()
@@ -30,13 +31,77 @@ class LogicTests(unittest.TestCase):
                 main.supported_device = old_supported
 
     def test_tdp_clamps_and_orders(self):
-        self.assertEqual(main.normalize_tdp({"spl": 2, "sppt": 1, "fppt": 99}), {"spl": 5, "sppt": 5, "fppt": 45})
-        self.assertEqual(main.normalize_tdp({"spl": 35, "sppt": 99, "fppt": 99}), {"spl": 35, "sppt": 40, "fppt": 45})
-        self.assertEqual(main.PRESETS["Max"], {"spl": 35, "sppt": 38, "fppt": 40})
+        self.assertEqual(main.normalize_tdp({"spl": 2, "sppt": 1, "fppt": 99}), {"spl": 5, "sppt": 5, "fppt": 37})
+        self.assertEqual(main.normalize_tdp({"spl": 35, "sppt": 99, "fppt": 99}), {"spl": 35, "sppt": 37, "fppt": 37})
+        self.assertEqual(main.PRESETS["Minimum"], {"spl": 5, "sppt": 8, "fppt": 10})
+        self.assertEqual(main.PRESETS["Max"], {"spl": 32, "sppt": 35, "fppt": 37})
 
     def test_controller_normalization(self):
-        value = main.normalize_controller({"vibration": "wat", "rgb_mode": "wat", "color": "oops", "brightness": 999})
-        self.assertEqual(value, {"vibration": "high", "rgb_mode": "solid", "color": "6600ff", "brightness": 100})
+        value = main.normalize_controller({"vibration": "wat", "ff_gain": 999, "rgb_mode": "wat", "color": "oops", "brightness": 999})
+        self.assertEqual(value, {"vibration": "high", "ff_gain": 100, "rgb_mode": "solid", "color": "6600ff", "brightness": 100})
+
+    def test_ff_gain_event(self):
+        writes = []
+        with mock.patch.object(main, "_rumble_event_node", return_value="/dev/input/event5"), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "write", side_effect=lambda _fd, data: writes.append(data) or len(data)), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.time, "time", return_value=12.25):
+            main.set_vibration_gain(50)
+        self.assertEqual(struct.unpack("<qqHHi", writes[0]),
+                         (12, 250000, main.EV_FF, main.FF_GAIN, round(0xFFFF * 0.5)))
+
+    def test_key_binding_map_preserves_native_buttons_and_adds_l5_r5(self):
+        mapping = main.button_map_bytes().decode()
+        self.assertIn("button: LeftTop", mapping)
+        self.assertIn("button: RightTop", mapping)
+        self.assertIn("button: LeftPaddle2", mapping)
+        self.assertIn("button: RightPaddle2", mapping)
+        self.assertIn("Quick Access legacy firmware fallback", mapping)
+        self.assertIn("keyboard: KeyLeftMeta", mapping)
+        self.assertIn("keyboard: KeyD", mapping)
+        self.assertEqual(main.INPUT_MAP_TARGET.name, "ayaneo_type7.yaml")
+
+    def test_rear_button_firmware_commands_only_target_lc1_rc1(self):
+        left = main.rear_button_command(0x12, 0x0f)
+        right = main.rear_button_command(0x13, 0x15)
+        clear = main.rear_button_command(0x12, None)
+        self.assertEqual(left[3:8], bytes([0x0b, 0x07, 0x12, 0, 0x02]))
+        self.assertEqual(right[3:8], bytes([0x0b, 0x07, 0x13, 0, 0x02]))
+        self.assertEqual((left[12], right[12]), (0x0f, 0x15))
+        self.assertEqual(clear[3:8], bytes([0x0b, 0x07, 0x12, 0, 0]))
+        self.assertEqual(int.from_bytes(left[1:3], "little"), sum(left[7:]))
+
+    def test_complete_button_table_matches_known_ayaneo3_bindings(self):
+        commands = main.button_table_commands()
+        self.assertEqual(len(commands), 33)
+        by_slot = {command[5]: command for command in commands}
+        self.assertEqual((by_slot[0x10][12], by_slot[0x11][12]), (0x70, 0x71))
+        self.assertEqual((by_slot[0x12][12], by_slot[0x13][12]), (0x0f, 0x15))
+        self.assertEqual((by_slot[0x17][7], by_slot[0x17][10], by_slot[0x17][12]),
+                         (0x02, 0x08, 0x07))
+
+    def test_rear_button_programming_is_saved(self):
+        calls = []
+
+        def exchange(_fd, command, timeout=0.4):
+            calls.append((command, timeout))
+            return bytes(64)
+
+        with mock.patch.object(main, "supported_device", return_value=True), \
+             mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(main, "_hid_exchange", side_effect=exchange):
+            main.program_rear_buttons(True)
+
+        table = calls[1:34]
+        self.assertEqual([command[5] for command, _ in table], list(range(33)))
+        self.assertEqual([table[0x12][0][12], table[0x13][0][12]], [0x0f, 0x15])
+        self.assertEqual(calls[-3][0][20], 0x88)
+        self.assertEqual(calls[-2][0][20], 0x00)
+        self.assertEqual(calls[-1], (main.AYA_SAVE, 1.5))
 
     def test_controller_packet_shape_and_checksum(self):
         packet = main.controller_command({"vibration": "low", "rgb_mode": "solid", "color": "ff0000", "brightness": 50})
@@ -51,16 +116,205 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(main.controller_command(config, "right")[20], 0x70)
         self.assertEqual(main.controller_command(config, "both")[20], 0x77)
 
+    def test_magic_module_presence_matches_ec_absent_bits(self):
+        with mock.patch.object(main, "_read_ec_register", return_value=0):
+            self.assertEqual(main.module_presence(), {"left": True, "right": True})
+        with mock.patch.object(main, "_read_ec_register", return_value=main.EC_MODULE_LEFT):
+            self.assertEqual(main.module_presence(), {"left": False, "right": True})
+        with mock.patch.object(main, "_read_ec_register", return_value=main.EC_MODULE_RIGHT):
+            self.assertEqual(main.module_presence(), {"left": True, "right": False})
+
+    def test_magic_module_identification_and_layout(self):
+        response = bytearray(64)
+        response[main.MODULE_INFO_LEFT_INDEX] = 0x44
+        response[main.MODULE_INFO_RIGHT_INDEX] = 0x50
+        left, right = main.decode_module_layout(bytes(response))
+        self.assertEqual((left["label"], left["layout"]),
+                         ("Joystick / Cross", "Top: Joystick · Bottom: Cross"))
+        self.assertEqual((right["label"], right["layout"]),
+                         ("Joystick / ABXY", "Top: ABXY · Bottom: Joystick"))
+
+    def test_incomplete_module_pair_uses_unpowered_state(self):
+        left, right = main.module_states_from_presence({"left": True, "right": False})
+        self.assertEqual((left["status"], right["status"]), ("unpowered", "disconnected"))
+
+    def test_tm_guard_switches_only_when_firmware_requests_custom_mode(self):
+        needs_custom = bytearray(64)
+        needs_custom[main.AYA_CUSTOM_REQUIRED_INDEX] = 1
+        custom = bytearray(64)
+        calls = []
+
+        def exchange(_fd, command, timeout=0.4):
+            calls.append(command)
+            if command == main.AYA_CUSTOM:
+                return bytes(64)
+            return bytes(custom)
+
+        with mock.patch.object(main, "_hid_exchange", side_effect=exchange), \
+             mock.patch.object(main.time, "sleep"):
+            self.assertTrue(main._switch_to_custom_mode_fd(7, bytes(needs_custom)))
+        self.assertIn(main.AYA_CUSTOM, calls)
+
+        calls.clear()
+        with mock.patch.object(main, "_hid_exchange", side_effect=exchange):
+            self.assertFalse(main._switch_to_custom_mode_fd(7, bytes(custom)))
+        self.assertNotIn(main.AYA_CUSTOM, calls)
+
+    def test_magic_module_quick_reset_packet(self):
+        config = {"vibration": "high", "rgb_mode": "solid", "color": "ff0000", "brightness": 100}
+        self.assertEqual(main.controller_command(config, reset=True)[20], 0x88)
+
+    def test_startup_restore_never_activates_magic_module_reset(self):
+        previous = main.Plugin._state
+        main.Plugin._state = {
+            "tdp": dict(main.DEFAULT_TDP),
+            "controller": dict(main.DEFAULT_CONTROLLER),
+            "button_fix_installed": True,
+        }
+        try:
+            with mock.patch.object(main.settings, "getSetting", return_value=None), \
+                 mock.patch.object(main.asyncio, "sleep", new=mock.AsyncMock()), \
+                 mock.patch.object(main, "apply_tdp"), \
+                 mock.patch.object(main, "apply_controller"), \
+                 mock.patch.object(main, "set_vibration_gain"), \
+                 mock.patch.object(main, "program_rear_buttons") as program:
+                asyncio.run(main.Plugin()._restore_hardware())
+            program.assert_not_called()
+        finally:
+            main.Plugin._state = previous
+
     def test_off_packet(self):
         packet = main.controller_command({"vibration": "off", "rgb_mode": "off", "color": "ffffff", "brightness": 100})
         self.assertEqual(packet[8], 0xff)
         self.assertEqual(packet[12], 0xff)
         self.assertEqual(packet[24], 0x40)
 
+    def test_vibration_feedback_is_single_pulse_without_firmware_save(self):
+        config = {"vibration": "high", "rgb_mode": "solid", "color": "ff0000", "brightness": 50}
+        calls = []
+
+        def exchange(_fd, command, timeout=0.4):
+            calls.append(("hid", command[4], timeout))
+            return bytes(64)
+
+        with mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(main, "_hid_exchange", side_effect=exchange), \
+             mock.patch.object(main, "play_vibration_test",
+                               side_effect=lambda level, duration: calls.append(("pulse", level, duration))):
+            main.apply_controller(config, True, "medium", False)
+            config["vibration"] = "off"
+            main.apply_controller(config, True, "high", False)
+
+        self.assertEqual(calls[:3], [
+            ("hid", 0x08, 0.4), ("hid", 0x09, 0.4),
+            ("pulse", "high", main.VIBRATION_CONFIRM_MS),
+        ])
+        self.assertEqual(calls[3:6], [
+            ("pulse", "high", main.VIBRATION_CONFIRM_MS), ("hid", 0x08, 0.4),
+            ("hid", 0x09, 0.4),
+        ])
+        self.assertNotIn(("hid", 0x05, 1.5), calls)
+
     def test_download_url_allowlist(self):
         self.assertEqual(main._checked_download_url(main.RYZENADJ_URL), main.RYZENADJ_URL)
         with self.assertRaises(RuntimeError):
             main._checked_download_url("https://example.com/ryzenadj")
+
+    def test_audio_alias_names_preserve_compression(self):
+        source = Path("cs35l41-dsp1-spk-prot-1f660105.bin.zst")
+        self.assertEqual(main._audio_alias_filenames(source), (
+            "cs35l41-dsp1-spk-prot-1f660105-spkid1-l0.bin.zst",
+            "cs35l41-dsp1-spk-prot-1f660105-spkid1-r0.bin.zst",
+        ))
+
+    def test_prepare_audio_aliases_copies_current_system_tuning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_dir = root / "system"
+            source_dir.mkdir()
+            source = source_dir / f"{main.AUDIO_FIRMWARE_STEM}.bin"
+            source.write_bytes(b"ayaneo-tuning")
+            old_system = main.AUDIO_FIRMWARE_SYSTEM_DIR
+            old_root = main.AUDIO_FIRMWARE_ROOT
+            try:
+                main.AUDIO_FIRMWARE_SYSTEM_DIR = source_dir
+                main.AUDIO_FIRMWARE_ROOT = root / "runtime"
+                targets = main._prepare_audio_aliases()
+            finally:
+                main.AUDIO_FIRMWARE_SYSTEM_DIR = old_system
+                main.AUDIO_FIRMWARE_ROOT = old_root
+            self.assertEqual([path.read_bytes() for path in targets], [b"ayaneo-tuning"] * 2)
+
+    def test_audio_idle_session_stops_pipewire_when_suspend_keeps_pcm_open(self):
+        calls = []
+        with mock.patch.object(main, "_audio_playback_active", side_effect=[True, True]), \
+             mock.patch.object(main, "_suspend_audio_outputs", return_value=["sink"]), \
+             mock.patch.object(main, "_wait_for_audio_idle"), \
+             mock.patch.object(main, "_resume_audio_outputs") as resume, \
+             mock.patch.object(main, "_set_audio_services",
+                               side_effect=lambda running: calls.append(running)):
+            with main._audio_idle_session(1):
+                calls.append("work")
+        self.assertEqual(calls, [False, "work", True])
+        resume.assert_called_once_with(["sink"])
+
+    def test_prepare_audio_calibration_firmware_verifies_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            system = root / "system"
+            system.mkdir()
+            wmfw = system / f"{main.AUDIO_FIRMWARE_WMFW_STEM}.wmfw.zst"
+            wmfw.write_bytes(b"ayaneo-wmfw")
+            calibration = b"verified-calibration"
+            old_system = main.AUDIO_FIRMWARE_SYSTEM_DIR
+            old_root = main.AUDIO_FIRMWARE_ROOT
+            old_hash = main.AUDIO_CALIBRATION_SHA256
+            try:
+                main.AUDIO_FIRMWARE_SYSTEM_DIR = system
+                main.AUDIO_FIRMWARE_ROOT = root / "runtime"
+                main.AUDIO_CALIBRATION_SHA256 = hashlib.sha256(calibration).hexdigest()
+                with mock.patch.object(main, "_download_audio_calibration",
+                                       return_value=calibration):
+                    wmfw_target, bin_target = main._prepare_audio_calibration_firmware()
+            finally:
+                main.AUDIO_FIRMWARE_SYSTEM_DIR = old_system
+                main.AUDIO_FIRMWARE_ROOT = old_root
+                main.AUDIO_CALIBRATION_SHA256 = old_hash
+            self.assertEqual(wmfw_target.read_bytes(), b"ayaneo-wmfw")
+            self.assertEqual(bin_target.read_bytes(), calibration)
+
+    def test_audio_efi_rebuild_preserves_amp_ids(self):
+        payload = bytearray(main.AUDIO_EFI_PAYLOAD_SIZE)
+        main.AUDIO_EFI_HEADER.pack_into(payload, 0, main.AUDIO_EFI_PAYLOAD_SIZE, 2)
+        offset = main.AUDIO_EFI_HEADER.size
+        main.AUDIO_EFI_RECORD.pack_into(payload, offset, 0x1111, 123, 21, 1, 11952)
+        main.AUDIO_EFI_RECORD.pack_into(
+            payload, offset + main.AUDIO_EFI_RECORD.size, 0x2222, 456, 22, 1, 11531)
+        original = struct.pack("<I", main.AUDIO_EFI_ATTRIBUTES) + bytes(payload)
+        candidate = main._build_audio_efi(original, (11956, 11477), 23)
+        records = main._decode_audio_efi(candidate)
+        self.assertEqual([record[0] for record in records], [0x1111, 0x2222])
+        self.assertEqual([record[2] for record in records], [23, 23])
+        self.assertEqual([record[4] for record in records], [11956, 11477])
+
+    def test_audio_efi_write_is_one_operation_without_fsync(self):
+        candidate = b"candidate"
+        original = b"original!"
+        path = mock.MagicMock()
+        path.__str__.return_value = "/fake/efivar"
+        path.read_bytes.return_value = candidate
+        completed = main.subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(main.subprocess, "run", return_value=completed), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "write", return_value=len(candidate)) as write, \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "fsync") as fsync:
+            main._write_audio_efi(path, candidate, original)
+        write.assert_called_once_with(7, candidate)
+        fsync.assert_not_called()
 
     def test_display_script_is_gamma22(self):
         self.assertTrue(main._is_our_display_script(main.LUA_SOURCE))
@@ -113,5 +367,13 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(value["vibration"], "high")
         self.assertEqual(value["rgb_mode"], "solid")
         self.assertEqual(value["color"], "3c00ff")
+
+    def test_hx370_custom_mode_flag_uses_status_byte_18(self):
+        response = bytes.fromhex(
+            "0000000800000c019100ff019100ff000000010000332230000000000000000144"
+            "5000006464000000000000000000000000000000000000000000000000000000")
+        self.assertEqual(response[17], 0)
+        self.assertEqual(response[18], 1)
+        self.assertTrue(main.controller_requires_custom(response))
 
 if __name__ == "__main__": unittest.main()

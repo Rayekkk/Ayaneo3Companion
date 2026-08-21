@@ -2,20 +2,8 @@
 version: 1
 kind: CapabilityMap
 name: AYANEO 3 Companion
-id: ayaneo3-companion
+id: aya7
 mapping:
-  - name: LC1 Rear Button
-    source_events:
-      - keyboard: KeyL
-    target_event:
-      gamepad:
-        button: LeftPaddle1
-  - name: RC1 Rear Button
-    source_events:
-      - keyboard: KeyR
-    target_event:
-      gamepad:
-        button: RightPaddle1
   - name: LC
     source_events:
       - keyboard: KeyF21
@@ -28,7 +16,7 @@ mapping:
     target_event:
       gamepad:
         button: RightTop
-  - name: AYASpace
+  - name: Aya Space
     source_events:
       - keyboard: KeyF23
     target_event:
@@ -36,15 +24,27 @@ mapping:
         button: Guide
   - name: Quick Access
     source_events:
+      - keyboard: KeyF24
+    target_event:
+      gamepad:
+        button: QuickAccess
+  - name: Quick Access legacy firmware fallback
+    source_events:
       - keyboard: KeyLeftMeta
       - keyboard: KeyD
     target_event:
       gamepad:
         button: QuickAccess
-  - name: Quick Access F24
+  - name: LC1
     source_events:
-      - keyboard: KeyF24
+      - keyboard: KeyL
     target_event:
       gamepad:
-        button: QuickAccess
+        button: LeftPaddle2
+  - name: RC1
+    source_events:
+      - keyboard: KeyR
+    target_event:
+      gamepad:
+        button: RightPaddle2
 filtered_events: []

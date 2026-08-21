@@ -4,3 +4,6 @@ build/
 *.zip
 __pycache__/
 tests/_settings/
+/AYANEO3_Audio_Calibration/
+/AYANEO3_EC_0.21_SHELL/
+/artifacts/

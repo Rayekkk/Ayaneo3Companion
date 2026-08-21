@@ -10,3 +10,10 @@ art and independently verified against retail hardware:
 
 No HHD source code is distributed with this package. This implementation uses
 only the observed wire-format facts required for device interoperability.
+
+The optional speaker recalibration downloads the AYANEO 3 calibration
+coefficient file from the HHD hardware-firmware repository at runtime and
+verifies its pinned SHA-256 digest. The file is not included in this package:
+
+  HHD hardware firmware
+  https://github.com/hhd-dev/hwfirm

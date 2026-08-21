@@ -1,6 +1,6 @@
 {
   "name": "ayaneo3companion",
-  "version": "0.4.4",
+  "version": "0.7.0",
   "description": "AYANEO 3 hardware controls for Decky Loader",
   "license": "BSD-3-Clause",
   "type": "module",
@@ -18,5 +18,8 @@
     "@types/react-dom": "^19.1.1",
     "rollup": "^4.0.0",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "react-icons": "^5.7.0"
   }
 }

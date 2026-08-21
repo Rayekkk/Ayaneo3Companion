@@ -6,6 +6,7 @@
 
 import asyncio
 import colorsys
+import contextlib
 import glob
 import hashlib
 import json
@@ -36,7 +37,9 @@ RYZENADJ_LIB = BIN_DIR / "libryzenadj.so"
 RYZENADJ_URL = "https://github.com/FlyGoat/RyzenAdj/releases/download/v0.19.0/ryzenadj-manylinux_2_28-x86_64.tar.gz"
 RYZENADJ_ARCHIVE_SHA256 = "d04547f111c6af3e40d3f210468adb884561618ddade0b640d90e50c88d03444"
 RYZENADJ_BINARY_SHA256 = "18a61170efec95d2366355b9dd5c75a961a9e8008d42e3471f4f414a6faec471"
-ALLOWED_DOWNLOAD_HOSTS = frozenset({"github.com", "release-assets.githubusercontent.com"})
+ALLOWED_DOWNLOAD_HOSTS = frozenset({
+    "github.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com",
+})
 MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024
 CA_BUNDLES = (
     "/etc/ssl/certs/ca-certificates.crt",
@@ -50,10 +53,66 @@ LUA_SOURCE = PLUGIN_DIR / "assets" / "ayaneo.ayaneo3.oled.lua"
 LUA_TARGET = Path("/etc/gamescope/scripts/00-gamescope/displays/ayaneo.ayaneo3.oled.lua")
 PUBLISHED_EDID = Path("/home/deck/.config/gamescope/edid.bin")
 EDID_TARGET_NITS = 800
-INPUT_DEVICE_SOURCE = PLUGIN_DIR / "assets" / "01-ayaneo3-companion.yaml"
 INPUT_MAP_SOURCE = PLUGIN_DIR / "assets" / "ayaneo3-companion.yaml"
-INPUT_DEVICE_TARGET = Path("/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml")
-INPUT_MAP_TARGET = Path("/etc/inputplumber/capability_maps.d/ayaneo3-companion.yaml")
+INPUT_MAP_TARGET = Path("/etc/inputplumber/capability_maps.d/ayaneo_type7.yaml")
+LEGACY_INPUT_DEVICE_TARGET = Path("/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml")
+LEGACY_INPUT_MAP_TARGETS = (
+    Path("/etc/inputplumber/capability_maps.d/01-ayaneo3-companion-aya7.yaml"),
+    Path("/etc/inputplumber/capability_maps.d/ayaneo3-companion.yaml"),
+)
+AUDIO_FIRMWARE_PATH = Path("/sys/module/firmware_class/parameters/path")
+AUDIO_FIRMWARE_ROOT = Path("/var/lib/ayaneo3-companion/firmware")
+AUDIO_FIRMWARE_SYSTEM_DIR = Path("/usr/lib/firmware/cirrus")
+AUDIO_FIRMWARE_STEM = "cs35l41-dsp1-spk-prot-1f660105"
+AUDIO_FIRMWARE_WMFW_STEM = "cs35l41-dsp1-spk-prot-1f660105"
+AUDIO_FIRMWARE_ALIASES = (
+    f"{AUDIO_FIRMWARE_STEM}-spkid1-l0",
+    f"{AUDIO_FIRMWARE_STEM}-spkid1-r0",
+)
+AUDIO_FIRMWARE_CONTROLS = (
+    "L0 DSP1 Firmware Load",
+    "R0 DSP1 Firmware Load",
+)
+AUDIO_FIRMWARE_TYPE_CONTROLS = (
+    "L0 DSP1 Firmware Type",
+    "R0 DSP1 Firmware Type",
+)
+AUDIO_CALIBRATION_URL = (
+    "https://raw.githubusercontent.com/hhd-dev/hwfirm/master/cirrus/"
+    "cs35l41-dsp1-spk-cali-1f660105-spkid1.bin"
+)
+AUDIO_CALIBRATION_SHA256 = "966262929355aeaf01e0a4c193d3be1e23443a59438b71e3d8daefe2fc6d4f59"
+AUDIO_CALIBRATION_BIN = "cs35l41-dsp1-spk-cali-1f660105-spkid1.bin"
+AUDIO_CALIBRATION_WMFW = "cs35l41-dsp1-spk-cali-1f660105-spkid1"
+AUDIO_CALIBRATION_AMBIENT = 23
+AUDIO_CALIBRATION_BACKUP_ROOT = Path("/var/lib/ayaneo3-companion/audio-calibration")
+AUDIO_CALIBRATION_EFI_GLOB = (
+    "/sys/firmware/efi/efivars/"
+    "CirrusSmartAmpCalibrationData-02f9af02-7734-4233-b43d-93fe5aa35db3"
+)
+AUDIO_EFI_HEADER = struct.Struct("<II")
+AUDIO_EFI_RECORD = struct.Struct("<QQbBH")
+AUDIO_EFI_ATTRIBUTES = 0x00000007
+AUDIO_EFI_PAYLOAD_SIZE = AUDIO_EFI_HEADER.size + 2 * AUDIO_EFI_RECORD.size
+AUDIO_AMPLIFIERS = (("left", "0x40"), ("right", "0x41"))
+AUDIO_DSP_REGISTERS = {
+    "cal_r": 0x02800268,
+    "ambient": 0x0280026C,
+    "status": 0x02800270,
+    "checksum": 0x02800274,
+}
+AUDIO_USER_STOP_UNITS = (
+    "pipewire-pulse.socket", "pipewire-pulse.service", "wireplumber.service",
+    "pipewire.socket", "pipewire.service",
+)
+AUDIO_USER_START_UNITS = (
+    "pipewire.socket", "pipewire.service", "wireplumber.service",
+    "pipewire-pulse.socket", "pipewire-pulse.service",
+)
+AUDIO_LEGACY_TEST_PATHS = frozenset({
+    "/home/deck/ayaneo3-audio-cal-test",
+    "/home/deck/ayaneo3-audio-fix",
+})
 EC_CHARGE_REGISTER = 0x1E
 EC_CHARGE_AUTO = 0xAA
 EC_CHARGE_INHIBIT = 0x55
@@ -61,7 +120,58 @@ EC_CONTROLLER_POWER_REGISTER = 0x2D
 EC_CONTROLLER_POWER_OFF = 0xFE
 EC_CONTROLLER_POWER_ON = 0xFF
 EC_MODULE_REGISTER = 0x2F
-EC_MODULE_MASK = 0x03
+EC_MODULE_LEFT = 0x01
+EC_MODULE_RIGHT = 0x02
+EC_MODULE_MASK = EC_MODULE_LEFT | EC_MODULE_RIGHT
+
+# AYANEO reports a separate identifier for each physical component layout. Bit
+# 6 selects the reversed arrangement, but the UI reports the useful upper/lower
+# positions instead of calling a correctly installed module "rotated".
+LEFT_MODULES = {
+    0x02: "Cross Film / Joystick",
+    0x04: "Cross / Joystick",
+    0x06: "Cross / Touchpad",
+    0x08: "Direction / Joystick",
+    0x42: "Joystick / Cross Film",
+    0x44: "Joystick / Cross",
+    0x46: "Touchpad / Cross",
+    0x48: "Joystick / Direction",
+}
+RIGHT_MODULES = {
+    0x10: "ABXY / Joystick",
+    0x12: "ABXY / Touchpad",
+    0x14: "ABXYCZ Fighting",
+    0x16: "ABXY Film / Joystick",
+    0x50: "Joystick / ABXY",
+    0x52: "Touchpad / ABXY",
+    0x54: "ABXYCZ Fighting [R]",
+    0x56: "Joystick / ABXY Film",
+}
+MODULE_LAYOUTS = {
+    "left": {
+        0x02: "Top: Cross Film · Bottom: Joystick",
+        0x04: "Top: Cross · Bottom: Joystick",
+        0x06: "Top: Cross · Bottom: Touchpad",
+        0x08: "Top: Direction · Bottom: Joystick",
+        0x42: "Top: Joystick · Bottom: Cross Film",
+        0x44: "Top: Joystick · Bottom: Cross",
+        0x46: "Top: Touchpad · Bottom: Cross",
+        0x48: "Top: Joystick · Bottom: Direction",
+    },
+    "right": {
+        0x10: "Top: Joystick · Bottom: ABXY",
+        0x12: "Top: Touchpad · Bottom: ABXY",
+        0x14: "Six-button fighting layout",
+        0x16: "Top: Joystick · Bottom: ABXY Film",
+        0x50: "Top: ABXY · Bottom: Joystick",
+        0x52: "Top: ABXY · Bottom: Touchpad",
+        0x54: "Six-button fighting layout · R variant",
+        0x56: "Top: ABXY Film · Bottom: Joystick",
+    },
+}
+MODULE_INFO_LEFT_INDEX = 32
+MODULE_INFO_RIGHT_INDEX = 33
+TM_GUARD_INTERVAL = 0.5
 
 VIBRATION_VALUES = {"off": 0x04, "low": 0x01, "medium": 0x02, "high": 0x03}
 RGB_MODES = {"off": 0xFF, "solid": 0x01, "pulse": 0x02, "rainbow": 0x03}
@@ -70,15 +180,20 @@ EVIOCSFF = 0x40304580
 EVIOCRMFF = 0x40044581
 EV_FF = 0x15
 FF_RUMBLE = 0x50
+FF_GAIN = 0x60
+VIBRATION_CONFIRM_MS = 500
+VIBRATION_TEST_MS = 500
 DEFAULT_CONTROLLER = {
-    "vibration": "high", "rgb_mode": "solid", "color": "6600ff", "brightness": 100,
+    "vibration": "high", "ff_gain": 100,
+    "rgb_mode": "solid", "color": "6600ff", "brightness": 100,
 }
 DEFAULT_TDP = {"spl": 15, "sppt": 18, "fppt": 25}
 PRESETS = {
+    "Minimum": {"spl": 5, "sppt": 8, "fppt": 10},
     "Low power": {"spl": 8, "sppt": 10, "fppt": 12},
     "Balanced": {"spl": 15, "sppt": 18, "fppt": 25},
     "Performance": {"spl": 30, "sppt": 32, "fppt": 35},
-    "Max": {"spl": 35, "sppt": 38, "fppt": 40},
+    "Max": {"spl": 32, "sppt": 35, "fppt": 37},
 }
 
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
@@ -86,6 +201,7 @@ _lock = threading.RLock()
 _tdp_apply_lock = threading.Lock()
 _ec_lock = threading.Lock()
 _controller_apply_lock = threading.Lock()
+_audio_apply_lock = threading.Lock()
 
 def _dmi(name: str) -> str:
     try:
@@ -96,6 +212,611 @@ def _dmi(name: str) -> str:
 
 def supported_device() -> bool:
     return _dmi("sys_vendor").upper() == "AYANEO" and _dmi("product_name").upper() == "AYANEO 3"
+
+
+def _audio_firmware_source() -> Path | None:
+    for suffix in (".bin.zst", ".bin.xz", ".bin"):
+        source = AUDIO_FIRMWARE_SYSTEM_DIR / f"{AUDIO_FIRMWARE_STEM}{suffix}"
+        if source.is_file():
+            return source
+    return None
+
+
+def _audio_wmfw_source() -> Path | None:
+    for suffix in (".wmfw.zst", ".wmfw.xz", ".wmfw"):
+        source = AUDIO_FIRMWARE_SYSTEM_DIR / f"{AUDIO_FIRMWARE_WMFW_STEM}{suffix}"
+        if source.is_file():
+            return source
+    return None
+
+
+def _audio_alias_filenames(source: Path) -> tuple[str, str]:
+    if not source.name.startswith(AUDIO_FIRMWARE_STEM):
+        raise RuntimeError("unexpected AYANEO audio firmware filename")
+    suffix = source.name[len(AUDIO_FIRMWARE_STEM):]
+    if suffix not in (".bin.zst", ".bin.xz", ".bin"):
+        raise RuntimeError("unsupported AYANEO audio firmware compression")
+    return tuple(f"{alias}{suffix}" for alias in AUDIO_FIRMWARE_ALIASES)
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    try:
+        if first.stat().st_size != second.stat().st_size:
+            return False
+        return hashlib.sha256(first.read_bytes()).digest() == hashlib.sha256(second.read_bytes()).digest()
+    except OSError:
+        return False
+
+
+def _clean_subprocess_env() -> dict:
+    environment = os.environ.copy()
+    # Decky's PyInstaller runtime ships private libraries that are incompatible
+    # with SteamOS systemctl and some host multimedia utilities.
+    environment.pop("LD_LIBRARY_PATH", None)
+    environment.pop("LD_PRELOAD", None)
+    return environment
+
+
+def _prepare_audio_aliases() -> tuple[Path, Path]:
+    source = _audio_firmware_source()
+    if source is None:
+        raise RuntimeError("SteamOS AYANEO 3 audio firmware is missing")
+    target_dir = AUDIO_FIRMWARE_ROOT / "cirrus"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    targets = tuple(target_dir / name for name in _audio_alias_filenames(source))
+    for target in targets:
+        if _same_file(source, target):
+            continue
+        temporary = target.with_name(f".{target.name}.tmp")
+        shutil.copyfile(source, temporary)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, target)
+    return targets
+
+
+def _audio_card_index() -> int | None:
+    for card in range(8):
+        try:
+            result = subprocess.run(["amixer", "-c", str(card), "controls"],
+                                    capture_output=True, text=True, timeout=5,
+                                    env=_clean_subprocess_env())
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode == 0 and all(name in result.stdout for name in AUDIO_FIRMWARE_CONTROLS):
+            return card
+    return None
+
+
+def _set_audio_control(card: int, control: str, value, action: str = "set") -> None:
+    result = subprocess.run([
+        "amixer", "-q", "-c", str(card), "cset",
+        f"iface=CARD,name={control}", str(value),
+    ], capture_output=True, text=True, timeout=15, env=_clean_subprocess_env())
+    if result.returncode:
+        message = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        if "resource busy" in message.lower():
+            raise RuntimeError("audio is currently playing; stop playback and try again")
+        raise RuntimeError(f"could not {action} {control[:2]} audio DSP: {message}")
+
+
+def _audio_control_value(card: int, control: str) -> str | None:
+    result = subprocess.run([
+        "amixer", "-c", str(card), "cget", f"iface=CARD,name={control}",
+    ], capture_output=True, text=True, timeout=10, env=_clean_subprocess_env())
+    if result.returncode:
+        return None
+    for line in reversed(result.stdout.splitlines()):
+        if "values=" in line:
+            return line.partition("values=")[2].strip()
+    return None
+
+
+def _set_audio_firmware_load(card: int, control: str, enabled: bool) -> None:
+    _set_audio_control(card, control, "on" if enabled else "off", "reload")
+
+
+def _audio_playback_active(card: int) -> bool:
+    for status in Path(f"/proc/asound/card{card}").glob("pcm*p/sub*/status"):
+        try:
+            state = status.read_text().splitlines()[0].partition(":")[2].strip()
+        except (OSError, IndexError):
+            continue
+        if state and state != "CLOSED":
+            return True
+    return False
+
+
+def _wait_for_audio_idle(card: int, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while _audio_playback_active(card) and time.monotonic() < deadline:
+        time.sleep(0.25)
+    if _audio_playback_active(card):
+        raise RuntimeError("audio is currently playing; stop playback and try again")
+
+
+def _deck_audio_command(arguments: list[str], timeout: float = 8.0):
+    return subprocess.run([
+        "/usr/bin/runuser", "-u", "deck", "--", "/usr/bin/env",
+        "XDG_RUNTIME_DIR=/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+        *arguments,
+    ], capture_output=True, text=True, timeout=timeout, env=_clean_subprocess_env())
+
+
+def _suspend_audio_outputs() -> list[str]:
+    result = _deck_audio_command(["/usr/bin/pactl", "list", "short", "sinks"])
+    if result.returncode:
+        decky.logger.warning(f"{LOG} could not list PipeWire sinks: {result.stderr.strip()}")
+        return []
+    suspended = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        name = fields[1]
+        changed = _deck_audio_command(["/usr/bin/pactl", "suspend-sink", name, "1"])
+        if changed.returncode == 0:
+            suspended.append(name)
+        else:
+            decky.logger.warning(f"{LOG} could not suspend sink {name}: {changed.stderr.strip()}")
+    if suspended:
+        time.sleep(0.35)
+    return suspended
+
+
+def _resume_audio_outputs(sinks: list[str]) -> None:
+    for name in sinks:
+        try:
+            result = _deck_audio_command(["/usr/bin/pactl", "suspend-sink", name, "0"])
+            if result.returncode:
+                decky.logger.warning(f"{LOG} could not resume sink {name}: {result.stderr.strip()}")
+        except Exception as error:
+            decky.logger.warning(f"{LOG} could not resume sink {name}: {error}")
+
+
+def _set_audio_services(running: bool) -> None:
+    if running:
+        result = _deck_audio_command([
+            "/usr/bin/systemctl", "--user", "start", *AUDIO_USER_START_UNITS,
+        ], timeout=20.0)
+        if result.returncode:
+            message = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+            raise RuntimeError(f"could not start PipeWire: {message}")
+        time.sleep(0.6)
+        return
+
+    # A connected ALSA client can leave pipewire-pulse in "deactivating" for
+    # its full stop timeout. Disable socket activation first, terminate the
+    # disposable user daemons, then enqueue their stop jobs without waiting.
+    commands = (
+        ["/usr/bin/systemctl", "--user", "stop", "--no-block",
+         "pipewire-pulse.socket", "pipewire.socket"],
+        ["/usr/bin/systemctl", "--user", "kill", "--signal=SIGKILL",
+         "pipewire-pulse.service", "wireplumber.service", "pipewire.service"],
+        ["/usr/bin/systemctl", "--user", "stop", "--no-block",
+         "pipewire-pulse.service", "wireplumber.service", "pipewire.service"],
+    )
+    for arguments in commands:
+        result = _deck_audio_command(arguments, timeout=5.0)
+        if result.returncode:
+            message = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+            raise RuntimeError(f"could not release PipeWire audio: {message}")
+    time.sleep(0.35)
+
+
+@contextlib.contextmanager
+def _audio_idle_session(card: int):
+    """Temporarily release the physical PCM, then restore the user audio stack."""
+    suspended = _suspend_audio_outputs() if _audio_playback_active(card) else []
+    services_stopped = False
+    try:
+        if _audio_playback_active(card):
+            services_stopped = True
+            _set_audio_services(False)
+        _wait_for_audio_idle(card)
+        yield
+    finally:
+        if services_stopped:
+            _set_audio_services(True)
+        _resume_audio_outputs(suspended)
+
+
+def _reload_audio_dsps_unlocked(card: int) -> None:
+    disabled = []
+    try:
+        for control in AUDIO_FIRMWARE_CONTROLS:
+            _set_audio_firmware_load(card, control, False)
+            disabled.append(control)
+        time.sleep(0.25)
+        for control in AUDIO_FIRMWARE_CONTROLS:
+            _set_audio_firmware_load(card, control, True)
+            disabled.remove(control)
+            time.sleep(0.25)
+    finally:
+        for control in disabled:
+            try:
+                _set_audio_firmware_load(card, control, True)
+            except Exception as error:
+                decky.logger.error(f"{LOG} could not recover {control}: {error}")
+
+
+def _reload_audio_dsps(card: int) -> None:
+    with _audio_idle_session(card):
+        _reload_audio_dsps_unlocked(card)
+
+
+def audio_fix_supported() -> bool:
+    return (_audio_firmware_source() is not None and AUDIO_FIRMWARE_PATH.exists()
+            and _audio_card_index() is not None)
+
+
+def audio_fix_installed() -> bool:
+    source = _audio_firmware_source()
+    if source is None:
+        return False
+    try:
+        configured = AUDIO_FIRMWARE_PATH.read_text().strip()
+    except OSError:
+        return False
+    if configured != str(AUDIO_FIRMWARE_ROOT):
+        return False
+    return all(_same_file(source, AUDIO_FIRMWARE_ROOT / "cirrus" / name)
+               for name in _audio_alias_filenames(source))
+
+
+def audio_fix_ready() -> bool:
+    if not audio_fix_installed():
+        return False
+    card = _audio_card_index()
+    if card is None:
+        return False
+    return (
+        all(_audio_control_value(card, control) == "on" for control in AUDIO_FIRMWARE_CONTROLS)
+        and all(_audio_control_value(card, control) == "0"
+                for control in AUDIO_FIRMWARE_TYPE_CONTROLS)
+    )
+
+
+def _apply_audio_fix_locked() -> None:
+    if not supported_device():
+        raise RuntimeError("audio fix is restricted to AYANEO 3")
+    _prepare_audio_aliases()
+    try:
+        configured = AUDIO_FIRMWARE_PATH.read_text().strip()
+    except OSError as error:
+        raise RuntimeError(f"kernel firmware path is unavailable: {error}") from error
+    allowed = {"", str(AUDIO_FIRMWARE_ROOT), *AUDIO_LEGACY_TEST_PATHS}
+    if configured not in allowed:
+        raise RuntimeError(f"another custom firmware path is active: {configured}")
+    AUDIO_FIRMWARE_PATH.write_text(str(AUDIO_FIRMWARE_ROOT))
+    card = _audio_card_index()
+    if card is None:
+        raise RuntimeError("AYANEO CS35L41 audio controls were not found")
+    _reload_audio_dsps(card)
+
+
+def apply_audio_fix() -> None:
+    with _audio_apply_lock:
+        _apply_audio_fix_locked()
+
+
+def _remove_audio_fix_locked(reload_dsp: bool = True) -> None:
+    configured = ""
+    try:
+        configured = AUDIO_FIRMWARE_PATH.read_text().strip()
+        if configured == str(AUDIO_FIRMWARE_ROOT):
+            AUDIO_FIRMWARE_PATH.write_text("")
+    except OSError:
+        pass
+    try:
+        if reload_dsp:
+            card = _audio_card_index()
+            if card is None:
+                raise RuntimeError("AYANEO CS35L41 audio controls were not found")
+            _reload_audio_dsps(card)
+    except Exception:
+        if configured == str(AUDIO_FIRMWARE_ROOT):
+            with contextlib.suppress(OSError):
+                AUDIO_FIRMWARE_PATH.write_text(str(AUDIO_FIRMWARE_ROOT))
+        raise
+    if AUDIO_FIRMWARE_ROOT.exists():
+        shutil.rmtree(AUDIO_FIRMWARE_ROOT)
+
+
+def remove_audio_fix(reload_dsp: bool = True) -> None:
+    with _audio_apply_lock:
+        _remove_audio_fix_locked(reload_dsp)
+
+
+def _download_audio_calibration() -> bytes:
+    request = urllib.request.Request(
+        _checked_download_url(AUDIO_CALIBRATION_URL),
+        headers={"User-Agent": "Ayaneo3Companion/0.6.1"},
+    )
+    with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
+        _checked_download_url(response.geturl())
+        declared = response.headers.get("Content-Length")
+        if declared and int(declared) > 64 * 1024:
+            raise RuntimeError("audio calibration file is unexpectedly large")
+        data = response.read(64 * 1024 + 1)
+    if len(data) > 64 * 1024:
+        raise RuntimeError("audio calibration file exceeded the download limit")
+    if hashlib.sha256(data).hexdigest() != AUDIO_CALIBRATION_SHA256:
+        raise RuntimeError("audio calibration file checksum mismatch")
+    return data
+
+
+def _prepare_audio_calibration_firmware() -> tuple[Path, Path]:
+    wmfw_source = _audio_wmfw_source()
+    if wmfw_source is None:
+        raise RuntimeError("SteamOS AYANEO calibration firmware is missing")
+    target_dir = AUDIO_FIRMWARE_ROOT / "cirrus"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    wmfw_suffix = wmfw_source.name[len(AUDIO_FIRMWARE_WMFW_STEM):]
+    wmfw_target = target_dir / f"{AUDIO_CALIBRATION_WMFW}{wmfw_suffix}"
+    if not _same_file(wmfw_source, wmfw_target):
+        temporary = wmfw_target.with_name(f".{wmfw_target.name}.tmp")
+        shutil.copyfile(wmfw_source, temporary)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, wmfw_target)
+
+    bin_target = target_dir / AUDIO_CALIBRATION_BIN
+    try:
+        valid_bin = hashlib.sha256(bin_target.read_bytes()).hexdigest() == AUDIO_CALIBRATION_SHA256
+    except OSError:
+        valid_bin = False
+    if not valid_bin:
+        data = _download_audio_calibration()
+        temporary = bin_target.with_name(f".{bin_target.name}.tmp")
+        temporary.write_bytes(data)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, bin_target)
+    return wmfw_target, bin_target
+
+
+def _set_audio_firmware_type(card: int, profile: int) -> None:
+    for control in AUDIO_FIRMWARE_CONTROLS:
+        _set_audio_firmware_load(card, control, False)
+    time.sleep(0.3)
+    for control in AUDIO_FIRMWARE_TYPE_CONTROLS:
+        _set_audio_control(card, control, profile, "select firmware for")
+    for control in AUDIO_FIRMWARE_CONTROLS:
+        _set_audio_firmware_load(card, control, True)
+    time.sleep(1.0)
+
+
+def _i2c_register_arguments(address: str, register: int) -> list[str]:
+    return [f"0x{(register >> shift) & 0xff:02x}" for shift in (24, 16, 8, 0)]
+
+
+def _read_audio_dsp_register(address: str, register: int) -> int:
+    result = subprocess.run([
+        "/usr/bin/i2ctransfer", "-f", "-y", "1", f"w4@{address}",
+        *_i2c_register_arguments(address, register), "r4",
+    ], capture_output=True, text=True, timeout=5, env=_clean_subprocess_env())
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"could not read amplifier {address}")
+    values = []
+    for token in result.stdout.split():
+        if token.lower().startswith("0x"):
+            with contextlib.suppress(ValueError):
+                values.append(int(token, 16))
+    if len(values) != 4 or any(not 0 <= value <= 255 for value in values):
+        raise RuntimeError(f"invalid amplifier response at {address}: {result.stdout.strip()}")
+    return int.from_bytes(bytes(values), "big")
+
+
+def _write_audio_dsp_register(address: str, register: int, value: int) -> None:
+    data = [f"0x{byte:02x}" for byte in int(value).to_bytes(4, "big")]
+    result = subprocess.run([
+        "/usr/bin/i2ctransfer", "-f", "-y", "1", f"w8@{address}",
+        *_i2c_register_arguments(address, register), *data,
+    ], capture_output=True, text=True, timeout=5, env=_clean_subprocess_env())
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"could not write amplifier {address}")
+
+
+def _decode_audio_efi(blob: bytes) -> list[tuple[int, int, int, int, int]]:
+    expected_size = 4 + AUDIO_EFI_PAYLOAD_SIZE
+    if len(blob) != expected_size:
+        raise RuntimeError(f"unexpected audio calibration EFI size: {len(blob)}")
+    attributes = struct.unpack_from("<I", blob, 0)[0]
+    size, count = AUDIO_EFI_HEADER.unpack_from(blob, 4)
+    if attributes != AUDIO_EFI_ATTRIBUTES or size != AUDIO_EFI_PAYLOAD_SIZE or count != 2:
+        raise RuntimeError("unexpected audio calibration EFI header")
+    records = []
+    for index in range(count):
+        record = AUDIO_EFI_RECORD.unpack_from(blob, 4 + AUDIO_EFI_HEADER.size
+                                              + index * AUDIO_EFI_RECORD.size)
+        target, timestamp, _ambient, status, cal_r = record
+        if not target or not timestamp or status != 1 or not cal_r:
+            raise RuntimeError(f"invalid audio calibration EFI record {index}")
+        records.append(record)
+    return records
+
+
+def _build_audio_efi(original: bytes, values: tuple[int, int], ambient: int) -> bytes:
+    records = _decode_audio_efi(original)
+    if not -128 <= ambient <= 127:
+        raise RuntimeError("invalid ambient temperature")
+    if any(not 4096 <= value <= 32767 for value in values):
+        raise RuntimeError("measured speaker resistance is outside the safe range")
+    filetime = time.time_ns() // 100 + 116444736000000000
+    candidate = bytearray(original)
+    for index, (record, cal_r) in enumerate(zip(records, values)):
+        target = record[0]
+        AUDIO_EFI_RECORD.pack_into(candidate, 4 + AUDIO_EFI_HEADER.size
+                                   + index * AUDIO_EFI_RECORD.size,
+                                   target, filetime, ambient, 1, cal_r)
+    candidate_records = _decode_audio_efi(bytes(candidate))
+    if [record[0] for record in candidate_records] != [record[0] for record in records]:
+        raise RuntimeError("audio calibration target IDs changed unexpectedly")
+    return bytes(candidate)
+
+
+def _backup_audio_efi(original: bytes) -> Path:
+    AUDIO_CALIBRATION_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    digest = hashlib.sha256(original).hexdigest()[:12]
+    target = AUDIO_CALIBRATION_BACKUP_ROOT / f"CirrusSmartAmpCalibrationData-{stamp}-{digest}.bin"
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, original)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if target.read_bytes() != original:
+        raise RuntimeError("audio calibration backup verification failed")
+    return target
+
+
+def _write_audio_efi(path: Path, candidate: bytes, original: bytes) -> None:
+    def write_blob(blob: bytes) -> None:
+        descriptor = os.open(path, os.O_WRONLY)
+        try:
+            # efivarfs treats each write(2) as a complete SetVariable request.
+            # It has no fsync operation, so fsync would report EINVAL even
+            # after a successful firmware update.
+            written = os.write(descriptor, blob)
+            if written != len(blob):
+                raise OSError(f"short EFI write: {written}/{len(blob)}")
+        finally:
+            os.close(descriptor)
+
+    unlocked = subprocess.run(["/usr/bin/chattr", "-i", str(path)],
+                              capture_output=True, text=True, timeout=10,
+                              env=_clean_subprocess_env())
+    if unlocked.returncode:
+        raise RuntimeError(unlocked.stderr.strip() or "could not unlock audio calibration EFI")
+    write_error = None
+    try:
+        try:
+            write_blob(candidate)
+            if path.read_bytes() != candidate:
+                raise RuntimeError("audio calibration EFI readback mismatch")
+        except Exception as error:
+            write_error = error
+            with contextlib.suppress(Exception):
+                if path.read_bytes() != original:
+                    write_blob(original)
+    finally:
+        locked = subprocess.run(["/usr/bin/chattr", "+i", str(path)],
+                                capture_output=True, text=True, timeout=10,
+                                env=_clean_subprocess_env())
+    if locked.returncode:
+        raise RuntimeError(locked.stderr.strip() or "could not relock audio calibration EFI")
+    if write_error is not None:
+        raise RuntimeError(f"could not save audio calibration: {write_error}") from write_error
+
+
+def _measure_audio_calibration(card: int) -> tuple[int, int]:
+    for _side, address in AUDIO_AMPLIFIERS:
+        _write_audio_dsp_register(address, AUDIO_DSP_REGISTERS["cal_r"], 0)
+        _write_audio_dsp_register(address, AUDIO_DSP_REGISTERS["ambient"],
+                                  AUDIO_CALIBRATION_AMBIENT)
+        _write_audio_dsp_register(address, AUDIO_DSP_REGISTERS["status"], 0)
+        _write_audio_dsp_register(address, AUDIO_DSP_REGISTERS["checksum"], 0)
+
+    started = time.monotonic()
+    playback = subprocess.Popen([
+        "/usr/bin/aplay", "-q", "-D", f"hw:{card},0", "-f", "S16_LE",
+        "-c", "2", "-r", "48000", "/dev/zero",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+       env=_clean_subprocess_env())
+    values = None
+    try:
+        deadline = started + 4.0
+        while time.monotonic() < deadline:
+            measured = []
+            valid = True
+            for _side, address in AUDIO_AMPLIFIERS:
+                cal_r = _read_audio_dsp_register(address, AUDIO_DSP_REGISTERS["cal_r"])
+                status = _read_audio_dsp_register(address, AUDIO_DSP_REGISTERS["status"])
+                checksum = _read_audio_dsp_register(address, AUDIO_DSP_REGISTERS["checksum"])
+                measured.append(cal_r)
+                valid = valid and cal_r > 0 and status == 1 and checksum == cal_r + 1
+            if valid:
+                values = tuple(measured)
+                break
+            if playback.poll() is not None:
+                error = playback.stderr.read().strip() if playback.stderr else ""
+                raise RuntimeError(error or "audio calibration playback stopped unexpectedly")
+            time.sleep(0.1)
+        if values is None:
+            raise RuntimeError("speaker calibration did not complete on both channels")
+        remaining = started + 3.2 - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        return values
+    finally:
+        if playback.poll() is None:
+            playback.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                playback.wait(timeout=2)
+        if playback.poll() is None:
+            playback.kill()
+            playback.wait(timeout=2)
+
+
+def perform_audio_recalibration() -> dict:
+    with _audio_apply_lock:
+        if not supported_device() or not audio_fix_ready():
+            raise RuntimeError("apply the AYANEO audio fix successfully before recalibrating")
+        if not Path("/usr/bin/i2ctransfer").is_file() or not Path("/usr/bin/aplay").is_file():
+            raise RuntimeError("SteamOS audio calibration tools are unavailable")
+        efi_path = Path(AUDIO_CALIBRATION_EFI_GLOB)
+        if not efi_path.is_file():
+            raise RuntimeError("AYANEO speaker calibration EFI variable was not found")
+
+        _prepare_audio_calibration_firmware()
+        original = efi_path.read_bytes()
+        records = _decode_audio_efi(original)
+        previous = tuple(record[4] for record in records)
+        backup = _backup_audio_efi(original)
+        card = _audio_card_index()
+        if card is None:
+            raise RuntimeError("AYANEO CS35L41 audio controls were not found")
+
+        power_controls = {}
+        measured = None
+        with _audio_idle_session(card):
+            try:
+                for power in Path("/sys/bus/i2c/devices").glob(
+                        "i2c-CSC3551:00-cs35l41-hda.?/power/control"):
+                    power_controls[power] = power.read_text().strip()
+                    power.write_text("on")
+                _set_audio_firmware_type(card, 1)
+                measured = _measure_audio_calibration(card)
+                decky.logger.info(
+                    f"{LOG} measured speaker calibration "
+                    f"L={measured[0]} R={measured[1]} at {AUDIO_CALIBRATION_AMBIENT} C")
+                for value, old in zip(measured, previous):
+                    if abs(value - old) > max(2048, round(old * 0.25)):
+                        raise RuntimeError("measured speaker resistance changed by an unsafe amount")
+                candidate = _build_audio_efi(original, measured, AUDIO_CALIBRATION_AMBIENT)
+                _write_audio_efi(efi_path, candidate, original)
+            finally:
+                try:
+                    _set_audio_firmware_type(card, 0)
+                finally:
+                    for power, value in power_controls.items():
+                        with contextlib.suppress(OSError):
+                            power.write_text(value)
+
+        return {
+            "left": measured[0], "right": measured[1],
+            "ambient": AUDIO_CALIBRATION_AMBIENT,
+            "backup": str(backup),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "restart_required": True,
+        }
+
+
+def _systemctl(*arguments, check: bool = False):
+    return subprocess.run(["/usr/bin/systemctl", *arguments], check=check,
+                          capture_output=True, text=True, timeout=20,
+                          env=_clean_subprocess_env())
 
 
 def ac_online() -> bool:
@@ -150,7 +871,7 @@ def read_charge_bypass() -> bool:
     path = _ec_io_path()
     if path is None:
         raise RuntimeError("AYANEO EC access is unavailable")
-    with path.open("rb", buffering=0) as ec:
+    with _ec_lock, path.open("rb", buffering=0) as ec:
         ec.seek(EC_CHARGE_REGISTER)
         value = ec.read(1)
     if value not in (bytes([EC_CHARGE_AUTO]), bytes([EC_CHARGE_INHIBIT])):
@@ -165,7 +886,7 @@ def write_charge_bypass(enabled: bool) -> None:
     if path is None:
         raise RuntimeError("AYANEO EC charge control is unavailable")
     value = EC_CHARGE_INHIBIT if enabled else EC_CHARGE_AUTO
-    with path.open("r+b", buffering=0) as ec:
+    with _ec_lock, path.open("r+b", buffering=0) as ec:
         ec.seek(EC_CHARGE_REGISTER)
         if ec.write(bytes([value])) != 1:
             raise RuntimeError("AYANEO EC rejected the charge setting")
@@ -204,6 +925,52 @@ def both_modules_connected() -> bool:
     return (_read_ec_register(EC_MODULE_REGISTER) & EC_MODULE_MASK) == 0
 
 
+def module_presence() -> dict:
+    """Return each physical slot state from the AYANEO EC."""
+    value = _read_ec_register(EC_MODULE_REGISTER)
+    return {
+        "left": not bool(value & EC_MODULE_LEFT),
+        "right": not bool(value & EC_MODULE_RIGHT),
+    }
+
+
+def _module_info(side: str, code: int | None = None, status: str = "connected") -> dict:
+    labels = LEFT_MODULES if side == "left" else RIGHT_MODULES
+    if code is None:
+        label = {
+            "detecting": "Detecting...",
+            "activating": "Activating...",
+            "ejecting": "Ejecting...",
+            "unpowered": "Connected, unpowered",
+            "disconnected": "Disconnected",
+            "unavailable": "Unavailable",
+        }.get(status, status.replace("_", " ").title())
+        layout = ""
+    else:
+        label = labels.get(code, f"Unknown module (0x{code:02X})")
+        layout = MODULE_LAYOUTS[side].get(code, "Layout not yet documented")
+    return {
+        "code": code,
+        "label": label,
+        "layout": layout,
+        "status": status,
+        "connected": status in ("connected", "detecting", "activating", "unpowered"),
+    }
+
+
+def module_states_from_presence(presence: dict) -> tuple[dict, dict]:
+    """Mirror HHD's disconnected/unpowered status for incomplete module pairs."""
+    left = bool(presence.get("left"))
+    right = bool(presence.get("right"))
+    if left and right:
+        return _module_info("left", status="detecting"), _module_info("right", status="detecting")
+    if left:
+        return _module_info("left", status="unpowered"), _module_info("right", status="disconnected")
+    if right:
+        return _module_info("left", status="disconnected"), _module_info("right", status="unpowered")
+    return _module_info("left", status="disconnected"), _module_info("right", status="disconnected")
+
+
 def set_controller_power(enabled: bool) -> None:
     _write_ec_register(EC_CONTROLLER_POWER_REGISTER,
                        EC_CONTROLLER_POWER_ON if enabled else EC_CONTROLLER_POWER_OFF)
@@ -216,8 +983,8 @@ def _clamp(value, low, high):
 def normalize_tdp(raw) -> dict:
     source = raw if isinstance(raw, dict) else {}
     spl = _clamp(source.get("spl", DEFAULT_TDP["spl"]), 5, 35)
-    sppt = _clamp(source.get("sppt", DEFAULT_TDP["sppt"]), spl, 40)
-    fppt = _clamp(source.get("fppt", DEFAULT_TDP["fppt"]), sppt, 45)
+    sppt = _clamp(source.get("sppt", DEFAULT_TDP["sppt"]), spl, 37)
+    fppt = _clamp(source.get("fppt", DEFAULT_TDP["fppt"]), sppt, 37)
     return {"spl": spl, "sppt": sppt, "fppt": fppt}
 
 
@@ -232,6 +999,7 @@ def normalize_controller(raw) -> dict:
     mode = str(source.get("rgb_mode", "solid")).lower()
     return {
         "vibration": vibration if vibration in VIBRATION_VALUES else "high",
+        "ff_gain": _clamp(source.get("ff_gain", 100), 0, 100),
         "rgb_mode": mode if mode in RGB_MODES else "solid",
         "color": _hex_color(source.get("color")),
         "brightness": _clamp(source.get("brightness", 100), 0, 100),
@@ -245,12 +1013,69 @@ def _pad(data, length=65) -> bytes:
 AYA_CHECK = _pad([0, 0, 0, 0, 0x08])
 AYA_CUSTOM = _pad([0, 0, 0, 0, 0x0A, 0x02])
 AYA_SAVE = _pad([0, 0, 0, 0, 0x05])
+AYA_CUSTOM_REQUIRED_INDEX = 18
+
+
+def controller_requires_custom(response: bytes) -> bool:
+    # This status flag is not part of the one-byte-shifted RGB payload. Retail
+    # HX 370 hardware and HHD both expose it at response byte 18.
+    return len(response) > AYA_CUSTOM_REQUIRED_INDEX and \
+        response[AYA_CUSTOM_REQUIRED_INDEX] == 1
+
+
+def decode_module_layout(response: bytes) -> tuple[dict, dict]:
+    """Decode the module identifiers returned by AYANEO's AYA_CHECK command."""
+    if len(response) <= MODULE_INFO_RIGHT_INDEX:
+        raise RuntimeError("controller response does not contain Magic Module information")
+    left = response[MODULE_INFO_LEFT_INDEX]
+    right = response[MODULE_INFO_RIGHT_INDEX]
+    if not left or not right:
+        raise RuntimeError("controller has not identified both Magic Modules yet")
+    return _module_info("left", left), _module_info("right", right)
 
 
 def _checksum(command) -> bytes:
     data = bytearray(_pad(command))
     data[1:3] = sum(data[7:]).to_bytes(2, "little")
     return bytes(data)
+
+
+# AYANEO's 33-slot button table. These are USB HID keyboard usage IDs. Slots
+# 0x12/0x13 are the rear LC1/RC1 buttons (L/R); 0x10/0x11 preserve LC/RC as
+# F21/F22. The complete table must be initialized before individual slots emit.
+AYA3_BUTTON_TABLE = {
+    0x0C: (0x00, 0x00, 0x68),  # F13
+    0x0D: (0x00, 0x00, 0x69),  # F14
+    0x10: (0x00, 0x00, 0x70),  # F21 / LC
+    0x11: (0x00, 0x00, 0x71),  # F22 / RC
+    0x12: (0x02, 0x00, 0x0F),  # L / LC1
+    0x13: (0x02, 0x00, 0x15),  # R / RC1
+    0x16: (0x00, 0x00, 0x72),  # F23 / Guide
+    0x17: (0x02, 0x08, 0x07),  # Left Meta + D / legacy QAM
+    0x18: (0x00, 0x00, 0x6B),  # F16
+}
+AYA3_REAR_BUTTON_SLOTS = (0x12, 0x13)
+
+
+def button_table_command(slot: int, binding=None) -> bytes:
+    command = bytearray(65)
+    command[3:6] = bytes((0x0B, 0x07, slot))
+    if binding is not None:
+        mode, modifier, usage = binding
+        command[7] = mode
+        command[10] = modifier
+        command[12] = usage
+    return _checksum(command)
+
+
+def button_table_commands() -> tuple[bytes, ...]:
+    return tuple(button_table_command(slot, AYA3_BUTTON_TABLE.get(slot))
+                 for slot in range(0x21))
+
+
+def rear_button_command(slot: int, usage: int | None) -> bytes:
+    """Build an isolated rear-slot command for cleanup and protocol tests."""
+    return button_table_command(slot, (0x02, 0x00, usage) if usage is not None else None)
 
 
 def _rgb_bytes(config: dict):
@@ -264,7 +1089,7 @@ def _rgb_bytes(config: dict):
     return tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v))
 
 
-def controller_command(config: dict, eject: str | None = None) -> bytes:
+def controller_command(config: dict, eject: str | None = None, reset: bool = False) -> bytes:
     config = normalize_controller(config)
     mode = RGB_MODES[config["rgb_mode"]]
     r, g, b = _rgb_bytes(config)
@@ -273,7 +1098,8 @@ def controller_command(config: dict, eject: str | None = None) -> bytes:
     command[3:5] = bytes((0x21, 0x09))
     command[8:12] = bytes((mode, r, g, b))
     command[12:16] = bytes((mode, r, g, b))
-    command[20] = {None: 0x00, "left": 0x07, "right": 0x70, "both": 0x77}.get(eject, 0x00)
+    command[20] = (0x88 if reset else
+                   {None: 0x00, "left": 0x07, "right": 0x70, "both": 0x77}.get(eject, 0x00))
     command[22:25] = bytes((0x33, 0x22, vibration))
     command[32] = 1
     command[37:39] = bytes((0x64, 0x64))
@@ -303,6 +1129,68 @@ def _hid_exchange(fd, command: bytes, timeout=0.4) -> bytes:
     return b""
 
 
+def _switch_to_custom_mode_fd(fd, response: bytes | None = None) -> bool:
+    """Switch out of a TM-selected firmware mode and verify the transition."""
+    current = response if response is not None else _hid_exchange(fd, AYA_CHECK)
+    if not current:
+        raise RuntimeError("controller did not answer the mode check")
+    if not controller_requires_custom(current):
+        return False
+    if not _hid_exchange(fd, AYA_CUSTOM):
+        raise RuntimeError("controller rejected custom mode")
+    # The USB gamepad can briefly disappear while the controller changes mode.
+    # Poll the vendor interface instead of relying on a fixed multi-second wait.
+    for delay in (0.15, 0.35, 0.75, 1.25):
+        time.sleep(delay)
+        current = _hid_exchange(fd, AYA_CHECK)
+        if current and not controller_requires_custom(current):
+            return True
+    raise RuntimeError("controller did not enter custom mode")
+
+
+def read_module_layout() -> tuple[dict, dict]:
+    path = _vendor_hidraw()
+    with _controller_apply_lock:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            return decode_module_layout(_hid_exchange(fd, AYA_CHECK))
+        finally:
+            os.close(fd)
+
+
+def program_rear_buttons(enabled: bool, config: dict | None = None) -> None:
+    """Initialize AYANEO's button table and expose LC1/RC1 as L/R inputs."""
+    if not supported_device():
+        raise RuntimeError("rear button setup is restricted to AYANEO 3")
+    path = _vendor_hidraw()
+    with _controller_apply_lock:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            check = _hid_exchange(fd, AYA_CHECK)
+            _switch_to_custom_mode_fd(fd, check)
+            commands = (button_table_commands() if enabled else tuple(
+                rear_button_command(slot, None) for slot in AYA3_REAR_BUTTON_SLOTS))
+            acknowledged = 0
+            for command in commands:
+                if _hid_exchange(fd, command):
+                    acknowledged += 1
+            if acknowledged != len(commands):
+                raise RuntimeError(
+                    f"controller accepted only {acknowledged}/{len(commands)} button-table entries")
+            if enabled:
+                current = normalize_controller(
+                    config if config is not None else settings.getSetting("controller", DEFAULT_CONTROLLER))
+                if not _hid_exchange(fd, controller_command(current, reset=True)):
+                    raise RuntimeError("controller rejected button-table activation reset")
+                time.sleep(0.5)
+                if not _hid_exchange(fd, controller_command(current)):
+                    raise RuntimeError("controller rejected configuration restore")
+            if not _hid_exchange(fd, AYA_SAVE, timeout=1.5):
+                raise RuntimeError("controller did not save LC1/RC1 firmware bindings")
+        finally:
+            os.close(fd)
+
+
 def read_controller() -> dict:
     path = _vendor_hidraw()
     fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
@@ -323,23 +1211,40 @@ def read_controller() -> dict:
     r, g, b = (round(value * 255) for value in colorsys.hsv_to_rgb((h - 10 / 360) % 1.0, s, v))
     return {
         "vibration": reverse_vibration.get(response[23] >> 4, "high"),
+        "ff_gain": 100,
         "rgb_mode": reverse_modes.get(response[7], "solid"),
         "color": bytes((r, g, b)).hex(),
         "brightness": 100,
     }
 
 
-def apply_controller(config: dict) -> None:
+def apply_controller(config: dict, vibration_feedback: bool = False,
+                     previous_vibration: str | None = None,
+                     persist_firmware: bool = True) -> None:
+    config = normalize_controller(config)
+    feedback_level = config["vibration"]
     with _controller_apply_lock:
+        # Once Off is applied the firmware ignores force-feedback, so confirm
+        # that transition with the previous level immediately beforehand.
+        if (vibration_feedback and feedback_level == "off"
+                and previous_vibration in ("low", "medium", "high")):
+            play_vibration_test(previous_vibration, VIBRATION_CONFIRM_MS)
         path = _vendor_hidraw()
         fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
         try:
             check = _hid_exchange(fd, AYA_CHECK)
-            if len(check) > 17 and check[17] == 1:
-                _hid_exchange(fd, AYA_CUSTOM)
+            _switch_to_custom_mode_fd(fd, check)
             if not _hid_exchange(fd, controller_command(config)):
                 raise RuntimeError("controller rejected configuration")
-            _hid_exchange(fd, AYA_SAVE, timeout=1.5)
+            # The configuration command applies the new level immediately.
+            # Confirm it before the slower non-volatile save operation.
+            if vibration_feedback and feedback_level != "off":
+                play_vibration_test(feedback_level, VIBRATION_CONFIRM_MS)
+            # The plugin persists every setting itself. Firmware save is useful
+            # for ordinary RGB/config writes, but it adds a second, much longer
+            # controller-side confirmation when changing vibration strength.
+            if persist_firmware:
+                _hid_exchange(fd, AYA_SAVE, timeout=1.5)
         finally:
             os.close(fd)
 
@@ -355,8 +1260,7 @@ def eject_controller_modules(side: str, config: dict) -> None:
         started = time.monotonic()
         try:
             check = _hid_exchange(fd, AYA_CHECK)
-            if len(check) > 17 and check[17] == 1:
-                _hid_exchange(fd, AYA_CUSTOM)
+            _switch_to_custom_mode_fd(fd, check)
             if not _hid_exchange(fd, controller_command(config, side)):
                 raise RuntimeError("controller rejected the eject command")
             # Match HHD's module-release verification before cutting controller
@@ -372,6 +1276,56 @@ def eject_controller_modules(side: str, config: dict) -> None:
         if remaining > 0:
             time.sleep(remaining)
         set_controller_power(False)
+
+
+def reset_controller_modules(config: dict, restore_buttons: bool) -> None:
+    """Re-initialize both Magic Modules and restore all volatile controller state."""
+    if not supported_device():
+        raise RuntimeError("module reset is restricted to AYANEO 3")
+    if not both_modules_connected():
+        raise RuntimeError("insert both Magic Modules before resetting")
+    if not controller_powered():
+        set_controller_power(True)
+        time.sleep(0.75)
+    path = _vendor_hidraw()
+    with _controller_apply_lock:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            check = _hid_exchange(fd, AYA_CHECK)
+            _switch_to_custom_mode_fd(fd, check)
+            if not _hid_exchange(fd, controller_command(config, reset=True)):
+                raise RuntimeError("controller rejected the Magic Module reset")
+            time.sleep(0.5)
+            if not _hid_exchange(fd, controller_command(config)):
+                raise RuntimeError("controller did not return after the Magic Module reset")
+        finally:
+            os.close(fd)
+    if restore_buttons:
+        program_rear_buttons(True, config)
+    apply_controller(config)
+    set_vibration_gain(config["ff_gain"])
+
+
+def recover_tm_mode(config: dict, _restore_buttons: bool) -> bool:
+    """Undo a hardware TM mode change and restore the Companion configuration."""
+    if not both_modules_connected() or not controller_powered():
+        return False
+    path = _vendor_hidraw()
+    with _controller_apply_lock:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            check = _hid_exchange(fd, AYA_CHECK)
+            changed = _switch_to_custom_mode_fd(fd, check)
+        finally:
+            os.close(fd)
+    if not changed:
+        return False
+    # AYA_SAVE keeps the complete button table in controller NVRAM. Rewriting
+    # it here would send the 0x88 activation reset and cycle the physical Magic
+    # Module mechanisms after every accidental TM mode change.
+    apply_controller(config)
+    set_vibration_gain(config["ff_gain"])
+    return True
 
 
 def _event_has_rumble(node: str) -> bool:
@@ -397,10 +1351,30 @@ def _rumble_event_node() -> str | None:
             vendor = Path(f"/sys/class/input/{Path(node).name}/device/id/vendor").read_text().strip().lower()
         except OSError:
             vendor = ""
-        if vendor == "1c4f":
+        # The controller firmware exposes an Xbox 360-compatible xpad node
+        # (045e:028e). Never prefer InputPlumber's 28de virtual controller,
+        # because FF_GAIN must scale the physical device itself.
+        if vendor in ("045e", "1c4f"):
             return node
         fallback = fallback or node
     return fallback
+
+
+def set_vibration_gain(percent: int) -> None:
+    """Set Linux FF_GAIN on AYANEO's physical gamepad input device."""
+    gain = _clamp(percent, 0, 100)
+    node = _rumble_event_node()
+    if not node:
+        raise RuntimeError("No rumble-capable input device found")
+    now = time.time()
+    event = struct.pack("<qqHHi", int(now), int((now % 1) * 1_000_000),
+                        EV_FF, FF_GAIN, round(0xFFFF * gain / 100))
+    fd = os.open(node, os.O_RDWR)
+    try:
+        if os.write(fd, event) != len(event):
+            raise RuntimeError("Controller rejected FF_GAIN")
+    finally:
+        os.close(fd)
 
 
 def play_vibration_test(level: str, duration_ms: int = 500) -> None:
@@ -408,7 +1382,9 @@ def play_vibration_test(level: str, duration_ms: int = 500) -> None:
     import fcntl
     import time
 
-    strength = {"low": 0.33, "medium": 0.66, "high": 1.0}.get(level, 0.0)
+    # Keep confirmation levels perceptually distinct. Small rumble motors are
+    # strongly non-linear, so evenly spaced numeric values feel too similar.
+    strength = {"low": 0.20, "medium": 0.55, "high": 1.0}.get(level, 0.0)
     if strength <= 0:
         raise RuntimeError("Vibration is Off - select a strength first")
     node = _rumble_event_node()
@@ -662,12 +1638,53 @@ def patch_published_edid() -> bool:
         os.close(fd)
 
 
+def button_map_bytes() -> bytes:
+    """Return the aya7 extension with both native and legacy QAM inputs."""
+    return INPUT_MAP_SOURCE.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+
+
+def button_fix_installed() -> bool:
+    try:
+        return INPUT_MAP_TARGET.read_bytes() == button_map_bytes()
+    except OSError:
+        return False
+
+
+def install_button_fix() -> None:
+    """Extend native aya7 without replacing its APU-specific device profile."""
+    INPUT_MAP_TARGET.parent.mkdir(parents=True, exist_ok=True)
+    temporary = INPUT_MAP_TARGET.with_name(f".{INPUT_MAP_TARGET.name}.tmp")
+    temporary.write_bytes(button_map_bytes())
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, INPUT_MAP_TARGET)
+    # InputPlumber sorts maps globally by filename and the last duplicate ID
+    # wins. Matching the stock ayaneo_type7.yaml filename makes the /etc copy
+    # sort after /usr/share via directory priority.
+    # Remove the old full-device override. It hard-coded the 8840U USB path and
+    # unnecessarily replaced working native mappings on the HX 370 variant.
+    for legacy in (LEGACY_INPUT_DEVICE_TARGET, *LEGACY_INPUT_MAP_TARGETS):
+        try:
+            legacy.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def remove_button_fix() -> None:
+    for target in (INPUT_MAP_TARGET, LEGACY_INPUT_DEVICE_TARGET, *LEGACY_INPUT_MAP_TARGETS):
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class Plugin:
     _state = {}
     _restore_task = None
     _edid_task = None
     _ac_task = None
     _module_task = None
+    _tm_guard_task = None
+    _audio_task = None
     _active_app = ""
 
     @staticmethod
@@ -681,29 +1698,37 @@ class Plugin:
             state = dict(cls._state)
             state["tdp"] = dict(state["tdp"])
             state["controller"] = dict(state["controller"])
-            state["gpu_power_w"] = gpu_power_watts()
-            state["screen_installed"] = _is_our_display_script(LUA_TARGET)
-            try:
-                edid = PUBLISHED_EDID.read_bytes()
-                state["edid_game_nits"] = round(_published_edid_nits(edid) or 0)
-            except OSError:
-                state["edid_game_nits"] = 0
-            state["edid_patched"] = state["edid_game_nits"] == EDID_TARGET_NITS
-            state["button_fix_installed"] = (
-                INPUT_DEVICE_TARGET.exists() and INPUT_MAP_TARGET.exists()
-                and INPUT_DEVICE_TARGET.read_bytes() == INPUT_DEVICE_SOURCE.read_bytes()
-                and INPUT_MAP_TARGET.read_bytes() == INPUT_MAP_SOURCE.read_bytes())
-            try:
-                state["charge_bypass"] = read_charge_bypass()
-                state["charge_bypass_supported"] = True
-            except (OSError, RuntimeError):
-                state["charge_bypass_supported"] = False
-            try:
-                state["modules_connected"] = both_modules_connected()
-                state["module_eject_supported"] = True
-            except (OSError, RuntimeError):
-                state["module_eject_supported"] = False
-            return state
+            state["module_left"] = dict(state["module_left"])
+            state["module_right"] = dict(state["module_right"])
+        # Hardware reads can involve sysfs, debugfs and subprocesses. Keep them
+        # outside the shared state lock so the monitor loops and RPC writes do
+        # not stall behind the QAM's periodic refresh.
+        state["gpu_power_w"] = gpu_power_watts()
+        state["screen_installed"] = _is_our_display_script(LUA_TARGET)
+        try:
+            edid = PUBLISHED_EDID.read_bytes()
+            state["edid_game_nits"] = round(_published_edid_nits(edid) or 0)
+        except OSError:
+            state["edid_game_nits"] = 0
+        state["edid_patched"] = state["edid_game_nits"] == EDID_TARGET_NITS
+        state["button_fix_installed"] = button_fix_installed()
+        try:
+            state["charge_bypass"] = read_charge_bypass()
+            state["charge_bypass_supported"] = True
+        except (OSError, RuntimeError):
+            state["charge_bypass_supported"] = False
+        try:
+            presence = module_presence()
+            state["modules_connected"] = all(presence.values())
+            state["module_eject_supported"] = True
+            state["module_reset_supported"] = True
+            if not state["modules_connected"]:
+                state["module_left"], state["module_right"] = \
+                    module_states_from_presence(presence)
+        except (OSError, RuntimeError):
+            state["module_eject_supported"] = False
+            state["module_reset_supported"] = False
+        return state
 
     async def get_state(self):
         return await asyncio.to_thread(self._snapshot)
@@ -774,7 +1799,27 @@ class Plugin:
             self._save("controller", value)
         return await self.get_state()
 
-    async def test_vibration(self, duration_ms=500):
+    async def set_controller_with_vibration_feedback(self, raw):
+        value = normalize_controller(raw)
+        with _lock:
+            previous_vibration = Plugin._state["controller"]["vibration"]
+        await asyncio.to_thread(apply_controller, value, True, previous_vibration, False)
+        with _lock:
+            Plugin._state["controller"] = value
+            self._save("controller", value)
+        return await self.get_state()
+
+    async def set_vibration_gain(self, percent):
+        value = _clamp(percent, 0, 100)
+        await asyncio.to_thread(set_vibration_gain, value)
+        with _lock:
+            controller = dict(Plugin._state["controller"])
+            controller["ff_gain"] = value
+            Plugin._state["controller"] = controller
+            self._save("controller", controller)
+        return await self.get_state()
+
+    async def test_vibration(self, duration_ms=VIBRATION_TEST_MS):
         with _lock:
             level = Plugin._state["controller"]["vibration"]
         try:
@@ -793,6 +1838,73 @@ class Plugin:
             self._save("charge_bypass", value)
         return await self.get_state()
 
+    async def set_audio_fix(self, enabled):
+        value = bool(enabled)
+        with _lock:
+            previous = bool(Plugin._state.get("audio_fix_enabled", False))
+            Plugin._state["audio_fix_error"] = ""
+        try:
+            if value:
+                await asyncio.to_thread(apply_audio_fix)
+            else:
+                await asyncio.to_thread(remove_audio_fix)
+            installed = await asyncio.to_thread(audio_fix_installed)
+            ready = await asyncio.to_thread(audio_fix_ready) if value else False
+            if value and not ready:
+                raise RuntimeError("both AYANEO speaker DSPs did not enter the tuned profile")
+            with _lock:
+                Plugin._state["audio_fix_enabled"] = value
+                Plugin._state["audio_fix_installed"] = installed
+                Plugin._state["audio_calibration_available"] = value and ready
+                Plugin._state["audio_profile"] = "AYANEO v0.65" if value else "Generic fallback"
+                self._save("audio_fix_enabled", value)
+        except Exception as error:
+            installed = await asyncio.to_thread(audio_fix_installed)
+            ready = await asyncio.to_thread(audio_fix_ready) if installed else False
+            with _lock:
+                Plugin._state["audio_fix_enabled"] = previous
+                Plugin._state["audio_fix_error"] = str(error)
+                Plugin._state["audio_fix_installed"] = installed
+                Plugin._state["audio_calibration_available"] = previous and ready
+                Plugin._state["audio_profile"] = (
+                    "AYANEO v0.65" if ready else
+                    ("Installed, not active" if installed else "Generic fallback"))
+            raise
+        return await self.get_state()
+
+    async def reapply_audio_fix(self):
+        with _lock:
+            enabled = Plugin._state.get("audio_fix_enabled", False)
+        if not enabled:
+            raise RuntimeError("enable the AYANEO audio tuning first")
+        return await self.set_audio_fix(True)
+
+    async def recalibrate_audio(self):
+        with _lock:
+            available = bool(Plugin._state.get("audio_calibration_available", False))
+        if not available or not await asyncio.to_thread(audio_fix_ready):
+            raise RuntimeError("apply the AYANEO audio fix successfully before recalibrating")
+        try:
+            result = await asyncio.to_thread(perform_audio_recalibration)
+            summary = (
+                f"{result['timestamp']} · L {result['left']} · R {result['right']} · "
+                f"{result['ambient']} °C · Restart required")
+            with _lock:
+                Plugin._state["audio_calibration_available"] = True
+                Plugin._state["audio_calibration_last"] = summary
+                Plugin._state["audio_fix_error"] = ""
+                self._save("audio_calibration_last", summary)
+            decky.logger.info(
+                f"{LOG} saved speaker calibration L={result['left']} R={result['right']} "
+                f"backup={result['backup']}")
+        except Exception as error:
+            ready = await asyncio.to_thread(audio_fix_ready)
+            with _lock:
+                Plugin._state["audio_calibration_available"] = ready
+                Plugin._state["audio_fix_error"] = str(error)
+            raise
+        return await self.get_state()
+
     async def eject_modules(self, side):
         side = str(side or "").lower()
         with _lock:
@@ -803,7 +1915,40 @@ class Plugin:
         with _lock:
             Plugin._state["modules_reconnecting"] = True
             Plugin._state["modules_connected"] = False
+            if side in ("left", "both"):
+                Plugin._state["module_left"] = _module_info("left", status="ejecting")
+            if side in ("right", "both"):
+                Plugin._state["module_right"] = _module_info("right", status="ejecting")
         decky.logger.info(f"{LOG} ejected {side} controller module(s)")
+        return await self.get_state()
+
+    async def reset_modules(self):
+        with _lock:
+            if Plugin._state.get("modules_reconnecting"):
+                raise RuntimeError("insert both modules before resetting")
+            controller = dict(Plugin._state["controller"])
+            restore_buttons = Plugin._state.get("button_fix_installed", False)
+            Plugin._state["module_left"] = _module_info("left", status="activating")
+            Plugin._state["module_right"] = _module_info("right", status="activating")
+        try:
+            await asyncio.to_thread(reset_controller_modules, controller, restore_buttons)
+            left, right = await asyncio.to_thread(read_module_layout)
+            with _lock:
+                Plugin._state["module_left"] = left
+                Plugin._state["module_right"] = right
+                Plugin._state["modules_connected"] = True
+                Plugin._state["modules_reconnecting"] = False
+            decky.logger.info(f"{LOG} reset and re-detected both Magic Modules")
+        except Exception:
+            try:
+                presence = await asyncio.to_thread(module_presence)
+                left, right = module_states_from_presence(presence)
+                with _lock:
+                    Plugin._state["module_left"] = left
+                    Plugin._state["module_right"] = right
+            except Exception:
+                pass
+            raise
         return await self.get_state()
 
     async def set_screen_fix(self, enabled):
@@ -829,16 +1974,39 @@ class Plugin:
 
     async def set_button_fix(self, enabled):
         if enabled:
-            INPUT_DEVICE_TARGET.parent.mkdir(parents=True, exist_ok=True)
-            INPUT_MAP_TARGET.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(INPUT_DEVICE_SOURCE, INPUT_DEVICE_TARGET)
-            shutil.copyfile(INPUT_MAP_SOURCE, INPUT_MAP_TARGET)
+            with _lock:
+                controller = dict(Plugin._state["controller"])
+            await asyncio.to_thread(program_rear_buttons, True, controller)
+            await asyncio.to_thread(install_button_fix)
         else:
-            for source, target in ((INPUT_DEVICE_SOURCE, INPUT_DEVICE_TARGET),
-                                   (INPUT_MAP_SOURCE, INPUT_MAP_TARGET)):
-                if target.exists() and target.read_bytes() == source.read_bytes():
-                    target.unlink()
-        subprocess.run(["systemctl", "restart", "inputplumber"], check=True, timeout=15)
+            await asyncio.to_thread(program_rear_buttons, False)
+            await asyncio.to_thread(remove_button_fix)
+        await asyncio.to_thread(_systemctl, "restart", "inputplumber", check=True)
+        with _lock:
+            Plugin._state["button_fix_installed"] = bool(enabled)
+        return await self.get_state()
+
+    async def set_tm_guard(self, enabled):
+        value = bool(enabled)
+        with _lock:
+            Plugin._state["tm_guard_enabled"] = value
+            Plugin._state["tm_guard_status"] = "Monitoring" if value else "Disabled"
+            self._save("tm_guard_enabled", value)
+        if value:
+            with _lock:
+                controller = dict(Plugin._state["controller"])
+                restore_buttons = Plugin._state.get("button_fix_installed", False)
+            try:
+                changed = await asyncio.to_thread(recover_tm_mode, controller, restore_buttons)
+            except Exception as error:
+                with _lock:
+                    Plugin._state["tm_guard_status"] = "Waiting for controller"
+                decky.logger.debug(f"{LOG} TM Guard initial check pending: {error}")
+            else:
+                if changed:
+                    with _lock:
+                        Plugin._state["tm_guard_recoveries"] += 1
+                        Plugin._state["tm_guard_status"] = "Custom mode restored"
         return await self.get_state()
 
     async def _restore_hardware(self):
@@ -862,8 +2030,9 @@ class Plugin:
             if "controller" in pending:
                 try:
                     await asyncio.to_thread(apply_controller, controller)
+                    await asyncio.to_thread(set_vibration_gain, controller["ff_gain"])
                     pending.remove("controller")
-                    decky.logger.info(f"{LOG} restored RGB and vibration after startup")
+                    decky.logger.info(f"{LOG} restored RGB, firmware vibration and FF_GAIN after startup")
                 except Exception as error:
                     decky.logger.warning(f"{LOG} controller restore attempt failed: {error}")
             if "charge_bypass" in pending:
@@ -879,6 +2048,42 @@ class Plugin:
             if not pending:
                 return
         decky.logger.error(f"{LOG} could not restore after startup: {', '.join(sorted(pending))}")
+
+    async def _restore_audio(self):
+        """Load the device-specific tuning after ALSA exposes both DSP controls."""
+        for delay in (1, 2, 4, 8):
+            await asyncio.sleep(delay)
+            with _lock:
+                if not Plugin._state.get("audio_fix_enabled", False):
+                    return
+            try:
+                if await asyncio.to_thread(audio_fix_ready):
+                    with _lock:
+                        Plugin._state["audio_fix_supported"] = True
+                        Plugin._state["audio_fix_installed"] = True
+                        Plugin._state["audio_calibration_available"] = True
+                        Plugin._state["audio_profile"] = "AYANEO v0.65"
+                        Plugin._state["audio_fix_error"] = ""
+                    return
+                await asyncio.to_thread(apply_audio_fix)
+                if not await asyncio.to_thread(audio_fix_ready):
+                    raise RuntimeError("both AYANEO speaker DSPs did not enter the tuned profile")
+                with _lock:
+                    Plugin._state["audio_fix_supported"] = True
+                    Plugin._state["audio_fix_installed"] = True
+                    Plugin._state["audio_calibration_available"] = True
+                    Plugin._state["audio_profile"] = "AYANEO v0.65"
+                    Plugin._state["audio_fix_error"] = ""
+                decky.logger.info(f"{LOG} loaded AYANEO CS35L41 speaker tuning")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                with _lock:
+                    Plugin._state["audio_calibration_available"] = False
+                    Plugin._state["audio_fix_error"] = str(error)
+                decky.logger.warning(f"{LOG} audio tuning attempt failed: {error}")
+        decky.logger.error(f"{LOG} could not load AYANEO speaker tuning")
 
     async def _ac_loop(self):
         """Restore the active TDP after firmware reacts to charger changes."""
@@ -904,39 +2109,129 @@ class Plugin:
                     decky.logger.warning(f"{LOG} charger TDP restore failed: {error}")
 
     async def _module_loop(self):
-        """Power the controller back on after both replacement modules are seated."""
+        """Track module identity and restore the controller after a module swap."""
+        previous_connected = None
+        restore_pending = False
+        identify_pending = True
         while True:
             await asyncio.sleep(0.5)
             try:
                 powered = await asyncio.to_thread(controller_powered)
-                connected = await asyncio.to_thread(both_modules_connected)
+                presence = await asyncio.to_thread(module_presence)
+                connected = all(presence.values())
+                reconnected = previous_connected is False and connected
+                previous_connected = connected
                 with _lock:
                     Plugin._state["modules_connected"] = connected
-                    reconnecting = Plugin._state.get("modules_reconnecting", False)
-                if not powered and connected:
+                if not connected:
+                    left, right = module_states_from_presence(presence)
+                    with _lock:
+                        Plugin._state["module_left"] = left
+                        Plugin._state["module_right"] = right
+                    identify_pending = True
+                    continue
+                if not powered:
                     await asyncio.to_thread(set_controller_power, True)
-                    await asyncio.sleep(1)
+                    restore_pending = True
+                elif reconnected:
+                    # A manually removed module loses its LED state while the
+                    # base controller remains powered, so power state alone is
+                    # not enough to detect that RGB needs to be sent again.
+                    restore_pending = True
+                if restore_pending:
                     with _lock:
-                        Plugin._state["modules_reconnecting"] = False
-                        controller = dict(Plugin._state["controller"])
+                        Plugin._state["module_left"] = _module_info("left", status="activating")
+                        Plugin._state["module_right"] = _module_info("right", status="activating")
+                with _lock:
+                    controller = dict(Plugin._state["controller"])
+                last_error = None
+                if restore_pending:
+                    for delay in (0.5, 1.0, 2.0, 3.0):
+                        await asyncio.sleep(delay)
+                        try:
+                            if not await asyncio.to_thread(both_modules_connected):
+                                break
+                            # Rear-button mappings are persisted with AYA_SAVE.
+                            # Reprogramming them here would also issue the 0x88
+                            # physical module reset on every reconnection.
+                            await asyncio.to_thread(apply_controller, controller)
+                            await asyncio.to_thread(set_vibration_gain, controller["ff_gain"])
+                            restore_pending = False
+                            identify_pending = True
+                            with _lock:
+                                Plugin._state["modules_reconnecting"] = False
+                            decky.logger.info(
+                                f"{LOG} modules connected; restored RGB, vibration and FF_GAIN")
+                            break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            last_error = error
+                if restore_pending and last_error:
+                    decky.logger.warning(f"{LOG} controller setting restore failed: {last_error}")
+                if identify_pending and not restore_pending:
                     try:
-                        await asyncio.to_thread(apply_controller, controller)
+                        left, right = await asyncio.to_thread(read_module_layout)
+                        with _lock:
+                            Plugin._state["module_left"] = left
+                            Plugin._state["module_right"] = right
+                        identify_pending = False
+                        decky.logger.info(
+                            f"{LOG} modules detected: left {left['label']} (0x{left['code']:02X}), "
+                            f"right {right['label']} (0x{right['code']:02X})")
                     except Exception as error:
-                        decky.logger.warning(f"{LOG} controller setting restore failed: {error}")
-                    decky.logger.info(f"{LOG} replacement modules connected; controller powered on")
-                elif reconnecting and powered:
-                    # Recover if firmware powered the controller itself.
-                    with _lock:
-                        Plugin._state["modules_reconnecting"] = False
+                        decky.logger.debug(f"{LOG} module identification pending: {error}")
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 decky.logger.debug(f"{LOG} module monitor unavailable: {error}")
 
+    async def _tm_guard_loop(self):
+        """Return from accidental hardware TM mode changes without touching LC/RC."""
+        while True:
+            await asyncio.sleep(TM_GUARD_INTERVAL)
+            with _lock:
+                enabled = Plugin._state.get("tm_guard_enabled", False)
+                reconnecting = Plugin._state.get("modules_reconnecting", False)
+                controller = dict(Plugin._state["controller"])
+                restore_buttons = Plugin._state.get("button_fix_installed", False)
+            if not enabled:
+                continue
+            if reconnecting:
+                with _lock:
+                    Plugin._state["tm_guard_status"] = "Waiting for modules"
+                continue
+            try:
+                changed = await asyncio.to_thread(recover_tm_mode, controller, restore_buttons)
+                with _lock:
+                    if changed:
+                        Plugin._state["tm_guard_recoveries"] += 1
+                        Plugin._state["tm_guard_status"] = "Custom mode restored"
+                    else:
+                        Plugin._state["tm_guard_status"] = "Monitoring"
+                if changed:
+                    decky.logger.info(f"{LOG} TM Guard restored custom controller mode")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                with _lock:
+                    Plugin._state["tm_guard_status"] = "Waiting for controller"
+                decky.logger.debug(f"{LOG} TM Guard waiting: {error}")
+
     async def _main(self):
         await asyncio.to_thread(settings.read)
         is_supported = await asyncio.to_thread(supported_device)
         saved_controller = normalize_controller(settings.getSetting("controller", DEFAULT_CONTROLLER))
+        # Treat an existing map as an enabled toggle and migrate it in place
+        # when a newer package extends the aya7 mapping.
+        key_binding_installed = any(path.exists() for path in (
+            INPUT_MAP_TARGET, *LEGACY_INPUT_MAP_TARGETS, LEGACY_INPUT_DEVICE_TARGET))
+        if key_binding_installed:
+            await asyncio.to_thread(install_button_fix)
+        audio_enabled = bool(settings.getSetting("audio_fix_enabled", True))
+        tm_guard_enabled = bool(settings.getSetting("tm_guard_enabled", True))
+        audio_installed = await asyncio.to_thread(audio_fix_installed)
+        audio_ready = await asyncio.to_thread(audio_fix_ready) if audio_installed else False
         charge_control = await asyncio.to_thread(ensure_charge_control) if is_supported else None
         try:
             charge_bypass = await asyncio.to_thread(read_charge_bypass) if charge_control else False
@@ -953,13 +2248,27 @@ class Plugin:
             "screen_installed": _is_our_display_script(LUA_TARGET),
             "edid_patched": False,
             "edid_game_nits": 0,
-            "button_fix_installed": False,
+            "button_fix_installed": key_binding_installed,
             "charge_bypass_supported": charge_control is not None,
             "charge_bypass": charge_bypass,
             "module_eject_supported": charge_control is not None,
+            "module_reset_supported": charge_control is not None,
             "modules_reconnecting": False,
             "modules_connected": True,
+            "module_left": _module_info("left", status="detecting"),
+            "module_right": _module_info("right", status="detecting"),
+            "tm_guard_enabled": tm_guard_enabled,
+            "tm_guard_status": "Monitoring" if tm_guard_enabled else "Disabled",
+            "tm_guard_recoveries": 0,
             "gpu_power_w": None,
+            "audio_fix_supported": await asyncio.to_thread(audio_fix_supported),
+            "audio_fix_enabled": audio_enabled,
+            "audio_fix_installed": audio_installed,
+            "audio_calibration_available": audio_enabled and audio_ready,
+            "audio_calibration_last": settings.getSetting("audio_calibration_last", ""),
+            "audio_profile": "AYANEO v0.65" if audio_ready else
+                             ("Pending" if audio_enabled else "Generic fallback"),
+            "audio_fix_error": "",
         }
         Plugin._active_app = ""
         if is_supported:
@@ -967,25 +2276,26 @@ class Plugin:
             Plugin._edid_task = asyncio.create_task(self._edid_loop())
             Plugin._ac_task = asyncio.create_task(self._ac_loop())
             Plugin._module_task = asyncio.create_task(self._module_loop())
+            Plugin._tm_guard_task = asyncio.create_task(self._tm_guard_loop())
+            if audio_enabled:
+                Plugin._audio_task = asyncio.create_task(self._restore_audio())
         decky.logger.info(f"{LOG} started on {Plugin._state['device']}")
 
     async def _unload(self):
-        if Plugin._restore_task:
-            Plugin._restore_task.cancel()
-            await asyncio.wait([Plugin._restore_task], timeout=1.0)
-            Plugin._restore_task = None
-        if Plugin._edid_task:
-            Plugin._edid_task.cancel()
-            await asyncio.wait([Plugin._edid_task], timeout=1.0)
-            Plugin._edid_task = None
-        if Plugin._ac_task:
-            Plugin._ac_task.cancel()
-            await asyncio.wait([Plugin._ac_task], timeout=1.0)
-            Plugin._ac_task = None
-        if Plugin._module_task:
-            Plugin._module_task.cancel()
-            await asyncio.wait([Plugin._module_task], timeout=1.0)
-            Plugin._module_task = None
+        tasks = [task for task in (
+            Plugin._audio_task, Plugin._restore_task, Plugin._edid_task,
+            Plugin._ac_task, Plugin._module_task, Plugin._tm_guard_task,
+        ) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=1.0)
+        Plugin._audio_task = None
+        Plugin._restore_task = None
+        Plugin._edid_task = None
+        Plugin._ac_task = None
+        Plugin._module_task = None
+        Plugin._tm_guard_task = None
         try:
             if not await asyncio.to_thread(controller_powered):
                 await asyncio.to_thread(set_controller_power, True)
@@ -994,6 +2304,10 @@ class Plugin:
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
+        try:
+            await asyncio.to_thread(remove_audio_fix, False)
+        except Exception as error:
+            decky.logger.warning(f"{LOG} could not remove audio firmware path: {error}")
         if settings.getSetting("charge_bypass", False):
             try:
                 await asyncio.to_thread(write_charge_bypass, False)
@@ -1002,8 +2316,9 @@ class Plugin:
                 decky.logger.warning(f"{LOG} could not restore charging before uninstall: {error}")
         if _is_our_display_script(LUA_TARGET):
             LUA_TARGET.unlink()
-        for source, target in ((INPUT_DEVICE_SOURCE, INPUT_DEVICE_TARGET),
-                               (INPUT_MAP_SOURCE, INPUT_MAP_TARGET)):
-            if target.exists() and source.exists() and target.read_bytes() == source.read_bytes():
-                target.unlink()
-        subprocess.run(["systemctl", "restart", "inputplumber"], check=False)
+        try:
+            await asyncio.to_thread(program_rear_buttons, False)
+        except Exception as error:
+            decky.logger.warning(f"{LOG} could not clear LC1/RC1 bindings: {error}")
+        remove_button_fix()
+        await asyncio.to_thread(_systemctl, "restart", "inputplumber")

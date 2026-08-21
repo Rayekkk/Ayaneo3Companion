@@ -4,8 +4,10 @@ set -Eeuo pipefail
 
 PLUGIN_NAME="Ayaneo3Companion"
 PLUGIN_ROOT="/home/deck/homebrew/plugins"
-DEVICE_TARGET="/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml"
-MAP_TARGET="/etc/inputplumber/capability_maps.d/ayaneo3-companion.yaml"
+MAP_TARGET="/etc/inputplumber/capability_maps.d/ayaneo_type7.yaml"
+LEGACY_DEVICE_TARGET="/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml"
+LEGACY_MAP_TARGET_1="/etc/inputplumber/capability_maps.d/01-ayaneo3-companion-aya7.yaml"
+LEGACY_MAP_TARGET_2="/etc/inputplumber/capability_maps.d/ayaneo3-companion.yaml"
 
 die() {
   printf 'Error: %s\n' "$*" >&2
@@ -14,7 +16,7 @@ die() {
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   printf 'Usage: %s [Ayaneo3Companion-version.zip]\n' "${0##*/}"
-  printf 'Installs AYANEO 3 Companion and its InputPlumber QAM mapping without using QAM.\n'
+  printf 'Installs AYANEO 3 Companion and its AYANEO 3 key bindings without using QAM.\n'
   exit 0
 fi
 
@@ -50,7 +52,6 @@ python3 -m zipfile -e "$archive" "$work_dir"
 source_dir="$work_dir/$PLUGIN_NAME"
 [[ -f "$source_dir/plugin.json" ]] || die "invalid plugin archive"
 [[ -f "$source_dir/main.py" && -f "$source_dir/dist/index.js" ]] || die "plugin files are incomplete"
-[[ -f "$source_dir/assets/01-ayaneo3-companion.yaml" ]] || die "InputPlumber device definition is missing"
 [[ -f "$source_dir/assets/ayaneo3-companion.yaml" ]] || die "InputPlumber capability map is missing"
 
 version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$source_dir/plugin.json")"
@@ -62,10 +63,10 @@ loader_stopped=true
 sudo install -d -m 755 "$PLUGIN_ROOT/$PLUGIN_NAME"
 sudo cp -a "$source_dir/." "$PLUGIN_ROOT/$PLUGIN_NAME/"
 sudo chown -R root:root "$PLUGIN_ROOT/$PLUGIN_NAME"
-sudo install -D -m 644 "$source_dir/assets/01-ayaneo3-companion.yaml" "$DEVICE_TARGET"
+sudo rm -f -- "$LEGACY_DEVICE_TARGET" "$LEGACY_MAP_TARGET_1" "$LEGACY_MAP_TARGET_2"
 sudo install -D -m 644 "$source_dir/assets/ayaneo3-companion.yaml" "$MAP_TARGET"
 sudo systemctl restart inputplumber.service
 sudo systemctl start plugin_loader.service
 loader_stopped=false
 
-printf 'Installed AYANEO 3 Companion %s. Return to Game Mode and use the QAM button.\n' "$version"
+printf 'Installed AYANEO 3 Companion %s. Return to Game Mode and enable Fix Key Binding if needed.\n' "$version"
