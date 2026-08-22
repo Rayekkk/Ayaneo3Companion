@@ -1654,7 +1654,7 @@ def _cta_luminance_code(nits: float) -> int:
 
 
 def patch_ayaneo_edid(data: bytes, nits: float = EDID_TARGET_NITS):
-    """Return an AYANEO 3 EDID with CTA MaxCLL corrected, or None."""
+    """Return an AYANEO 3 EDID with CTA MaxCLL set to the advertised peak."""
     if (len(data) < 256 or len(data) % 128 or
             data[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00" or
             data[8:12] != b"\x07\x21\x13\x01"):
@@ -1707,7 +1707,7 @@ def _published_edid_nits(data: bytes):
 
 
 def patch_published_edid() -> bool:
-    """Safely correct gamescope's user-owned EDID copy in place."""
+    """Safely normalize gamescope's user-owned EDID copy in place."""
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(PUBLISHED_EDID, flags)
@@ -1726,7 +1726,7 @@ def patch_published_edid() -> bool:
             os.write(fd, patched)
             os.ftruncate(fd, len(patched))
             os.fsync(fd)
-            decky.logger.info(f"{LOG} patched published EDID MaxCLL to {EDID_TARGET_NITS} nits")
+            decky.logger.info(f"{LOG} normalized published EDID MaxCLL to {EDID_TARGET_NITS} nits")
         return True
     finally:
         os.close(fd)
@@ -2066,7 +2066,7 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                decky.logger.warning(f"{LOG} EDID correction failed: {error}")
+                decky.logger.warning(f"{LOG} EDID verification failed: {error}")
             await asyncio.sleep(1)
 
     async def set_button_fix(self, enabled):

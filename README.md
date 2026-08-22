@@ -34,7 +34,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lig
 | **Smart amp tuning** | Loads the official AYANEO 3 CS35L41 profile for both speakers instead of the generic fallback |
 | **Speaker calibration** | Recalibrates both smart amplifiers with validation, EFI readback and automatic backup |
 | **OLED definition** | Gamma 2.2 gamescope definition with 60/90/120/144 Hz modes |
-| **HDR metadata** | Corrects the gamescope EDID copy so games receive the panel's 800 nit peak |
+| **HDR metadata** | Sets gamescope's EDID copy to AYANEO's advertised 800 nit maximum |
 | **Persistent settings** | Restores settings after startup, follows games with the QAM closed and re-applies TDP after charger changes |
 
 ---
@@ -100,7 +100,7 @@ overview. Closing and reopening QAM always returns to this overview.
   Native F24 and legacy Meta+D QAM events are both recognized automatically.
   TM Guard is enabled by default; disable it temporarily when deliberately
   selecting another hardware mode with the physical TM button.
-- Open **OLED display** to install the gamescope definition and monitor the EDID correction.
+- Open **OLED display** to install the gamescope definition and verify its HDR metadata.
 
 ## How it works
 
@@ -139,8 +139,9 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
   format without changing either amplifier ID. The original variable is saved
   under `/var/lib/ayaneo3-companion/audio-calibration` before every write. A
   full restart is required before the driver applies the new values.
-- The display definition matches `AYA / 0x0113 / AYAOLED_FHD`. A runtime
-  correction updates only the CTA MaxCLL byte in gamescope's EDID copy.
+- The display definition matches `AYA / 0x0113 / AYAOLED_FHD`. A runtime check
+  normalizes only the CTA MaxCLL byte to AYANEO's advertised 800 nit maximum if
+  the bridge or another tool publishes a different value.
 
 ## Building
 

@@ -1,12 +1,13 @@
 -- AYANEO 3 OLED, EDID AYA / 0x0113 / AYAOLED_FHD
 --
--- The EDID contains sRGB-like primaries even though AYANEO specifies the
--- physical panel as 110% DCI-P3. Use Display-P3/D65 as the closest documented
--- description of the panel until unit-specific measurements are available.
+-- Nominal RGB primaries from the DXQ7D0023 panel specification. Use D65 as the
+-- output white: the module's nominal 0.3000/0.3100 white is customer-adjustable
+-- and causes an incorrect warm cast in gamescope's PQ-to-Gamma-2.2 transform on
+-- this AYANEO unit. The bridge-provided sRGB-like primaries are also incorrect.
 local colorimetry = {
-    r = { x = 0.6800, y = 0.3200 },
-    g = { x = 0.2650, y = 0.6900 },
-    b = { x = 0.1500, y = 0.0600 },
+    r = { x = 0.6820, y = 0.3150 },
+    g = { x = 0.2400, y = 0.7160 },
+    b = { x = 0.1380, y = 0.0460 },
     w = { x = 0.3127, y = 0.3290 },
 }
 
@@ -19,6 +20,9 @@ gamescope.config.known_displays.ayaneo_ayaneo3_oled = {
     hdr = {
         supported = true,
         eotf = gamescope.eotf.gamma22,
+        -- AYANEO specifies 800 nits as the complete device's maximum global
+        -- and manual brightness. The bare module's nominal 1000-nit HBM mode
+        -- is not verified as active in this Gamma-2.2 output path.
         max_content_light_level = 800,
         max_frame_average_luminance = 400,
         min_content_light_level = 0.007,

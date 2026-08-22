@@ -370,11 +370,18 @@ class LogicTests(unittest.TestCase):
         fsync.assert_not_called()
 
     def test_display_script_is_gamma22(self):
+        script = main.LUA_SOURCE.read_text()
         self.assertTrue(main._is_our_display_script(main.LUA_SOURCE))
-        self.assertIn("gamescope.eotf.gamma22", main.LUA_SOURCE.read_text())
-        self.assertNotIn("gamescope.eotf.pq", main.LUA_SOURCE.read_text())
+        self.assertIn("gamescope.eotf.gamma22", script)
+        self.assertNotIn("gamescope.eotf.pq", script)
+        self.assertIn("max_content_light_level = 800", script)
+        self.assertIn("max_frame_average_luminance = 400", script)
+        self.assertIn("r = { x = 0.6820, y = 0.3150 }", script)
+        self.assertIn("g = { x = 0.2400, y = 0.7160 }", script)
+        self.assertIn("b = { x = 0.1380, y = 0.0460 }", script)
+        self.assertIn("w = { x = 0.3127, y = 0.3290 }", script)
 
-    def test_ayaneo_edid_maxcll_patch(self):
+    def test_ayaneo_edid_advertised_maxcll_patch(self):
         base = bytearray(128)
         base[:12] = b"\x00\xff\xff\xff\xff\xff\xff\x00\x07\x21\x13\x01"
         base[126] = 1

@@ -21,6 +21,10 @@ All notable changes to AYANEO 3 Companion, newest first.
 
 ### Changed
 
+- Use the DXQ7D0023 panel's nominal RGB primaries with a D65 output white
+  instead of an approximate Display-P3 description.
+- Use AYANEO's advertised 800-nit maximum for PQ-to-Gamma-2.2 scaling and for
+  the display metadata exposed to games.
 - Replace the long accordion-style QAM with a compact hardware overview and a
   dedicated Decky-native page for each section. Every row now shows its current
   state before it is opened.
@@ -37,6 +41,10 @@ All notable changes to AYANEO 3 Companion, newest first.
 
 ### Fixed
 
+- Remove the yellow HDR cast caused by treating the bare module's
+  customer-adjustable 0.300/0.310 white as the calibrated AYANEO output white.
+- Stop treating the bridge's unverified 993-nit CTA value as proof that the
+  bare module's 1000-nit HBM mode is active on the complete device.
 - Stop issuing the Magic Module `0x88` activation reset during every boot, TM
   Guard recovery and ordinary module reconnection. LC1/RC1 bindings already
   persist in controller NVRAM through `AYA_SAVE`.

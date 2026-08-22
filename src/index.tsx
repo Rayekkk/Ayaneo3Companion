@@ -638,7 +638,7 @@ const Content: FC = () => {
 
     {activeSection === "screen" && <PanelSection title="Display Definition">
       <PanelSectionRow><ToggleField label="Install Display Definition" description="Install the AYANEO 3 OLED HDR, colour and 60/90/120/144 Hz gamescope definition with Gamma 2.2 output." checked={state.screen_installed} disabled={busy} onChange={enabled => void run("screen", () => setScreenFix(enabled), "Display fix failed", enabled ? "Display definition installed. Restart Game Mode." : "Display definition removed. Restart Game Mode.")} /></PanelSectionRow>
-      <PanelSectionRow><Field label={state.edid_patched ? "EDID correction applied" : "EDID correction waiting"} description={state.edid_game_nits ? `Games see ${state.edid_game_nits} nits through the corrected EDID.` : "Waiting for gamescope to publish the display EDID."} /></PanelSectionRow>
+      <PanelSectionRow><Field label={state.edid_patched ? "EDID metadata normalized" : "EDID update waiting"} description={state.edid_game_nits ? `Games see AYANEO's advertised ${state.edid_game_nits}-nit maximum.` : "Waiting for gamescope to publish the display EDID."} /></PanelSectionRow>
       <PanelSectionRow><Field label="Restart required after changing" description="Restart Game Mode manually so gamescope reloads the display definition." /></PanelSectionRow>
     </PanelSection>}
 
