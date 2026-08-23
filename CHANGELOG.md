@@ -2,10 +2,12 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
-## Unreleased
+## 1.0.0 - 2026-08-23
 
 ### Added
 
+- Add an About page with the installed version and a secure GitHub release
+  updater shared with the other Rayek Decky plugins.
 - Show a live estimated time to full in Battery using UPower with a direct
   energy/power fallback. Battery polling runs only while that QAM page is open.
 - Identify every known left and right AYANEO 3 Magic Module, including its
@@ -28,8 +30,13 @@ All notable changes to AYANEO 3 Companion, newest first.
 - Replace the long accordion-style QAM with a compact hardware overview and a
   dedicated Decky-native page for each section. Every row now shows its current
   state before it is opened.
-- Use Decky's native dropdown for TDP presets and confirmation dialogs for
-  module ejection, module reset and speaker recalibration.
+- Replace the modal TDP dropdown with in-page preset buttons so choosing a
+  profile cannot close the section and Custom always reveals its sliders. The
+  preset list, Custom action and per-game summary now follow LeGoTDP's layout.
+- Keep Custom TDP changes behind an explicit Apply action and preserve the
+  selected preset plus exact SPL, SPPT and FPPT values in per-game profiles.
+- Use Decky's native confirmation dialogs for module ejection, module reset
+  and speaker recalibration.
 - Show action-specific loading indicators, inline result status and an RGB
   colour swatch instead of a raw hexadecimal value alone.
 - Order the QAM sections as TDP, Vibration, RGB, Battery, Magic Modules, Audio
@@ -41,10 +48,25 @@ All notable changes to AYANEO 3 Companion, newest first.
 
 ### Fixed
 
+- Recognize the AYANEO 3 EC's power-on value `0x00` as automatic charging,
+  matching Linux 6.19's `ayaneo-ec` driver, and prefer its standard
+  `charge_behaviour` ABI when a newer kernel provides it.
+- Enforce the AYANEO 3 device boundary in every privileged hardware path and
+  avoid device-specific EC/HID probes during unload on unsupported machines.
+- Serialize TDP changes, per-game profile switches and charger/startup
+  restoration so a delayed write cannot restore a stale power limit.
+- Recover both speaker DSPs and PipeWire outputs after every failed audio
+  tuning or recalibration transition.
+- Upgrade only Companion-owned gamescope and InputPlumber files; never replace
+  or remove another project's override at the same path.
+- Preserve the active plugin page when Decky's dropdown or confirmation overlay
+  temporarily hides QAM.
 - Remove the yellow HDR cast caused by treating the bare module's
   customer-adjustable 0.300/0.310 white as the calibrated AYANEO output white.
 - Stop treating the bridge's unverified 993-nit CTA value as proof that the
   bare module's 1000-nit HBM mode is active on the complete device.
+- Keep action controls within the QAM panel by stacking their title, description
+  and native full-width Decky button in Vibration, Magic Modules and Audio.
 - Stop issuing the Magic Module `0x88` activation reset during every boot, TM
   Guard recovery and ordinary module reconnection. LC1/RC1 bindings already
   persist in controller NVRAM through `AYA_SAVE`.

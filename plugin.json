@@ -5,9 +5,10 @@
   "api_version": 1,
   "main": "main.py",
   "bin": "dist/index.js",
-  "version": "0.7.0",
+  "version": "1.0.0",
   "publish": {
     "tags": ["utilities", "hardware", "performance"],
-    "description": "TDP, smart-amp audio, battery, controller and OLED support for AYANEO 3."
+    "description": "TDP, smart-amp audio, battery, controller and OLED support for AYANEO 3.",
+    "image": "https://raw.githubusercontent.com/Rayekkk/Ayaneo3Companion/main/Ayaneo3Companion.png"
   }
 }

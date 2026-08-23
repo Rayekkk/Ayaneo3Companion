@@ -23,15 +23,16 @@ jobs:
         with:
           python-version: "3.13"
       - name: Check the backend parses
-        run: python -m compileall -q main.py
+        run: python -m compileall -q main.py lego_updater.py
       - name: Backend tests
         run: python -m unittest discover -s tests -v
       - name: Check versions agree
         run: |
           plugin=$(python -c "import json;print(json.load(open('plugin.json'))['version'])")
           pkg=$(python -c "import json;print(json.load(open('package.json'))['version'])")
-          echo "plugin.json=$plugin package.json=$pkg"
-          test "$plugin" = "$pkg"
+          lock=$(python -c "import json;print(json.load(open('package-lock.json'))['version'])")
+          echo "plugin.json=$plugin package.json=$pkg package-lock.json=$lock"
+          test "$plugin" = "$pkg" && test "$plugin" = "$lock"
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
       - name: Type check

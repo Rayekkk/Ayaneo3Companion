@@ -54,6 +54,17 @@ source_dir="$work_dir/$PLUGIN_NAME"
 [[ -f "$source_dir/main.py" && -f "$source_dir/dist/index.js" ]] || die "plugin files are incomplete"
 [[ -f "$source_dir/assets/ayaneo3-companion.yaml" ]] || die "InputPlumber capability map is missing"
 
+# aya7 is a shared stock filename. Upgrade our marked/legacy map, but never
+# replace an override that belongs to the user or another project.
+if [[ -L "$MAP_TARGET" ]]; then
+  die "refusing to replace a symlinked InputPlumber map: $MAP_TARGET"
+fi
+if [[ -e "$MAP_TARGET" ]] \
+    && ! grep -Fxq '# Managed by AYANEO 3 Companion' "$MAP_TARGET" \
+    && ! grep -Fxq 'name: AYANEO 3 Companion' "$MAP_TARGET"; then
+  die "another aya7 InputPlumber override already exists: $MAP_TARGET"
+fi
+
 version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$source_dir/plugin.json")"
 printf 'Installing AYANEO 3 Companion %s...\n' "$version"
 

@@ -1,3 +1,4 @@
+-- Managed by AYANEO 3 Companion
 -- AYANEO 3 OLED, EDID AYA / 0x0113 / AYAOLED_FHD
 --
 -- Nominal RGB primaries from the DXQ7D0023 panel specification. Use D65 as the

@@ -18,6 +18,7 @@ import ssl
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -31,6 +32,26 @@ from settings import SettingsManager
 
 LOG = "[ayaneo3companion]"
 PLUGIN_DIR = Path(decky.DECKY_PLUGIN_DIR)
+if str(PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_DIR))
+
+# Decky aliases its own updater module to the bare name ``updater`` before a
+# plugin is loaded, so use the collision-proof module name shared by the other
+# Rayek plugins.
+from lego_updater import Updater  # noqa: E402
+
+GITHUB_RELEASES_URL = (
+    "https://api.github.com/repos/Rayekkk/Ayaneo3Companion/releases/latest"
+)
+updater = Updater(
+    releases_url=GITHUB_RELEASES_URL,
+    user_agent="Ayaneo3Companion",
+    log_prefix=LOG,
+    plugin_dir=str(PLUGIN_DIR),
+    asset_name_template="Ayaneo3Companion-{version}.zip",
+    logger=decky.logger,
+)
+
 BIN_DIR = PLUGIN_DIR / "bin"
 RYZENADJ = BIN_DIR / "ryzenadj"
 RYZENADJ_LIB = BIN_DIR / "libryzenadj.so"
@@ -51,10 +72,18 @@ _ssl_ctx = None
 
 LUA_SOURCE = PLUGIN_DIR / "assets" / "ayaneo.ayaneo3.oled.lua"
 LUA_TARGET = Path("/etc/gamescope/scripts/00-gamescope/displays/ayaneo.ayaneo3.oled.lua")
+DISPLAY_SCRIPT_MARKER = b"-- Managed by AYANEO 3 Companion\n"
+LEGACY_DISPLAY_SCRIPT_SHA256 = frozenset({
+    "f52b721078df6336855c543da325a908477382cd8f313d395a7eabf1ad9f0b21",
+})
 PUBLISHED_EDID = Path("/home/deck/.config/gamescope/edid.bin")
 EDID_TARGET_NITS = 800
 INPUT_MAP_SOURCE = PLUGIN_DIR / "assets" / "ayaneo3-companion.yaml"
 INPUT_MAP_TARGET = Path("/etc/inputplumber/capability_maps.d/ayaneo_type7.yaml")
+INPUT_MAP_MARKER = b"# Managed by AYANEO 3 Companion\n"
+LEGACY_INPUT_MAP_SHA256 = frozenset({
+    "a01579e9efc1a9e785412c3c9f6f6882814e97ba112cc76c4c530f37a8b44402",
+})
 LEGACY_INPUT_DEVICE_TARGET = Path("/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml")
 LEGACY_INPUT_MAP_TARGETS = (
     Path("/etc/inputplumber/capability_maps.d/01-ayaneo3-companion-aya7.yaml"),
@@ -200,6 +229,7 @@ PRESETS = {
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
 _lock = threading.RLock()
 _tdp_apply_lock = threading.Lock()
+_tdp_mutation_lock = threading.RLock()
 _ec_lock = threading.Lock()
 _controller_apply_lock = threading.Lock()
 _audio_apply_lock = threading.Lock()
@@ -213,6 +243,12 @@ def _dmi(name: str) -> str:
 
 def supported_device() -> bool:
     return _dmi("sys_vendor").upper() == "AYANEO" and _dmi("product_name").upper() == "AYANEO 3"
+
+
+def require_supported_device(action: str = "hardware control") -> None:
+    """Enforce the AYANEO 3 boundary in the privileged backend."""
+    if not supported_device():
+        raise RuntimeError(f"{action} is restricted to AYANEO 3")
 
 
 def _audio_firmware_source() -> Path | None:
@@ -345,7 +381,11 @@ def _deck_audio_command(arguments: list[str], timeout: float = 8.0):
 
 
 def _suspend_audio_outputs() -> list[str]:
-    result = _deck_audio_command(["/usr/bin/pactl", "list", "short", "sinks"])
+    try:
+        result = _deck_audio_command(["/usr/bin/pactl", "list", "short", "sinks"])
+    except Exception as error:
+        decky.logger.warning(f"{LOG} could not list PipeWire sinks: {error}")
+        return []
     if result.returncode:
         decky.logger.warning(f"{LOG} could not list PipeWire sinks: {result.stderr.strip()}")
         return []
@@ -355,7 +395,11 @@ def _suspend_audio_outputs() -> list[str]:
         if len(fields) < 2:
             continue
         name = fields[1]
-        changed = _deck_audio_command(["/usr/bin/pactl", "suspend-sink", name, "1"])
+        try:
+            changed = _deck_audio_command(["/usr/bin/pactl", "suspend-sink", name, "1"])
+        except Exception as error:
+            decky.logger.warning(f"{LOG} could not suspend sink {name}: {error}")
+            continue
         if changed.returncode == 0:
             suspended.append(name)
         else:
@@ -417,9 +461,13 @@ def _audio_idle_session(card: int):
         _wait_for_audio_idle(card)
         yield
     finally:
-        if services_stopped:
-            _set_audio_services(True)
-        _resume_audio_outputs(suspended)
+        # A failed PipeWire restart must never skip the best-effort sink resume.
+        # The restart exception still propagates after this inner finally.
+        try:
+            if services_stopped:
+                _set_audio_services(True)
+        finally:
+            _resume_audio_outputs(suspended)
 
 
 def _reload_audio_dsps_unlocked(card: int) -> None:
@@ -497,6 +545,7 @@ def _apply_audio_fix_locked() -> None:
 
 
 def apply_audio_fix() -> None:
+    require_supported_device("audio tuning")
     with _audio_apply_lock:
         _apply_audio_fix_locked()
 
@@ -525,6 +574,7 @@ def _remove_audio_fix_locked(reload_dsp: bool = True) -> None:
 
 
 def remove_audio_fix(reload_dsp: bool = True) -> None:
+    require_supported_device("audio tuning")
     with _audio_apply_lock:
         _remove_audio_fix_locked(reload_dsp)
 
@@ -532,7 +582,7 @@ def remove_audio_fix(reload_dsp: bool = True) -> None:
 def _download_audio_calibration() -> bytes:
     request = urllib.request.Request(
         _checked_download_url(AUDIO_CALIBRATION_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.6.1"},
+        headers={"User-Agent": f"Ayaneo3Companion/{updater.plugin_version()}"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
@@ -577,14 +627,26 @@ def _prepare_audio_calibration_firmware() -> tuple[Path, Path]:
 
 
 def _set_audio_firmware_type(card: int, profile: int) -> None:
-    for control in AUDIO_FIRMWARE_CONTROLS:
-        _set_audio_firmware_load(card, control, False)
-    time.sleep(0.3)
-    for control in AUDIO_FIRMWARE_TYPE_CONTROLS:
-        _set_audio_control(card, control, profile, "select firmware for")
-    for control in AUDIO_FIRMWARE_CONTROLS:
-        _set_audio_firmware_load(card, control, True)
-    time.sleep(1.0)
+    disabled = []
+    try:
+        for control in AUDIO_FIRMWARE_CONTROLS:
+            _set_audio_firmware_load(card, control, False)
+            disabled.append(control)
+        time.sleep(0.3)
+        for control in AUDIO_FIRMWARE_TYPE_CONTROLS:
+            _set_audio_control(card, control, profile, "select firmware for")
+        for control in tuple(disabled):
+            _set_audio_firmware_load(card, control, True)
+            disabled.remove(control)
+        time.sleep(1.0)
+    finally:
+        # Calibration changes both amplifiers as one operation. If any control
+        # fails halfway through, make a final attempt to leave every DSP loaded.
+        for control in disabled:
+            try:
+                _set_audio_firmware_load(card, control, True)
+            except Exception as error:
+                decky.logger.error(f"{LOG} could not recover {control}: {error}")
 
 
 def _i2c_register_arguments(address: str, register: int) -> list[str]:
@@ -761,8 +823,9 @@ def _measure_audio_calibration(card: int) -> tuple[int, int]:
 
 
 def perform_audio_recalibration() -> dict:
+    require_supported_device("audio recalibration")
     with _audio_apply_lock:
-        if not supported_device() or not audio_fix_ready():
+        if not audio_fix_ready():
             raise RuntimeError("apply the AYANEO audio fix successfully before recalibrating")
         if not Path("/usr/bin/i2ctransfer").is_file() or not Path("/usr/bin/aplay").is_file():
             raise RuntimeError("SteamOS audio calibration tools are unavailable")
@@ -939,6 +1002,33 @@ def _ec_io_path() -> Path | None:
     return paths[0] if paths else None
 
 
+def _charge_behaviour_path() -> Path | None:
+    """Return the kernel charge-control ABI when ayaneo-ec provides it."""
+    try:
+        candidates = sorted(POWER_SUPPLY_ROOT.iterdir())
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            if (candidate / "type").read_text().strip() != "Battery":
+                continue
+            path = candidate / "charge_behaviour"
+            if path.exists():
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _read_charge_behaviour(path: Path) -> bool:
+    value = path.read_text().strip()
+    if "[" in value and "]" in value:
+        value = value.split("[", 1)[1].split("]", 1)[0].strip()
+    if value not in ("auto", "inhibit-charge"):
+        raise RuntimeError(f"unexpected charge_behaviour value: {value or 'empty'}")
+    return value == "inhibit-charge"
+
+
 def ensure_charge_control() -> Path | None:
     """Load SteamOS' signed generic EC driver with writes enabled."""
     path = _ec_io_path()
@@ -961,24 +1051,52 @@ def ensure_charge_control() -> Path | None:
     return path if writable else None
 
 
+def ensure_charge_bypass_control() -> Path | None:
+    """Select the upstream charge ABI or the signed raw-EC fallback."""
+    behaviour = _charge_behaviour_path()
+    if behaviour is not None:
+        try:
+            _read_charge_behaviour(behaviour)
+            return behaviour
+        except (OSError, RuntimeError) as error:
+            decky.logger.warning(f"{LOG} cannot use charge_behaviour: {error}")
+            return None
+    return ensure_charge_control()
+
+
 def read_charge_bypass() -> bool:
+    behaviour = _charge_behaviour_path()
+    if behaviour is not None:
+        return _read_charge_behaviour(behaviour)
+
     path = _ec_io_path()
     if path is None:
         raise RuntimeError("AYANEO EC access is unavailable")
     with _ec_lock, path.open("rb", buffering=0) as ec:
         ec.seek(EC_CHARGE_REGISTER)
         value = ec.read(1)
-    if value not in (bytes([EC_CHARGE_AUTO]), bytes([EC_CHARGE_INHIBIT])):
-        raise RuntimeError(f"unexpected AYANEO charge register value: {value.hex() or 'empty'}")
+    if len(value) != 1:
+        raise RuntimeError("could not read AYANEO charge register")
+    # This matches the upstream ayaneo-ec driver: only 0x55 means inhibit;
+    # firmware defaults such as 0x00 are ordinary automatic charging until a
+    # userspace tool explicitly writes 0xaa or 0x55.
     return value[0] == EC_CHARGE_INHIBIT
 
 
 def write_charge_bypass(enabled: bool) -> None:
     if not supported_device():
         raise RuntimeError("charge bypass is restricted to AYANEO 3")
-    path = ensure_charge_control()
+    path = ensure_charge_bypass_control()
     if path is None:
         raise RuntimeError("AYANEO EC charge control is unavailable")
+
+    behaviour = _charge_behaviour_path()
+    if behaviour is not None:
+        behaviour.write_text("inhibit-charge\n" if enabled else "auto\n")
+        if read_charge_bypass() != enabled:
+            raise RuntimeError("kernel charge control did not retain the setting")
+        return
+
     value = EC_CHARGE_INHIBIT if enabled else EC_CHARGE_AUTO
     with _ec_lock, path.open("r+b", buffering=0) as ec:
         ec.seek(EC_CHARGE_REGISTER)
@@ -1001,6 +1119,7 @@ def _read_ec_register(register: int) -> int:
 
 
 def _write_ec_register(register: int, value: int) -> None:
+    require_supported_device("embedded-controller writes")
     path = ensure_charge_control()
     if path is None:
         raise RuntimeError("AYANEO EC write access is unavailable")
@@ -1080,6 +1199,17 @@ def normalize_tdp(raw) -> dict:
     sppt = _clamp(source.get("sppt", DEFAULT_TDP["sppt"]), spl, 37)
     fppt = _clamp(source.get("fppt", DEFAULT_TDP["fppt"]), sppt, 37)
     return {"spl": spl, "sppt": sppt, "fppt": fppt}
+
+
+def tdp_preset(raw, stored=None) -> str:
+    """Keep the explicit UI choice, falling back to value-based migration."""
+    if stored in (*PRESETS.keys(), "Custom"):
+        return stored
+    value = normalize_tdp(raw)
+    for name, limits in PRESETS.items():
+        if value == limits:
+            return name
+    return "Custom"
 
 
 def _hex_color(value) -> str:
@@ -1315,6 +1445,7 @@ def read_controller() -> dict:
 def apply_controller(config: dict, vibration_feedback: bool = False,
                      previous_vibration: str | None = None,
                      persist_firmware: bool = True) -> None:
+    require_supported_device("controller configuration")
     config = normalize_controller(config)
     feedback_level = config["vibration"]
     with _controller_apply_lock:
@@ -1402,6 +1533,7 @@ def reset_controller_modules(config: dict, restore_buttons: bool) -> None:
 
 def recover_tm_mode(config: dict, _restore_buttons: bool) -> bool:
     """Undo a hardware TM mode change and restore the Companion configuration."""
+    require_supported_device("TM Guard")
     if not both_modules_connected() or not controller_powered():
         return False
     path = _vendor_hidraw()
@@ -1456,6 +1588,7 @@ def _rumble_event_node() -> str | None:
 
 def set_vibration_gain(percent: int) -> None:
     """Set Linux FF_GAIN on AYANEO's physical gamepad input device."""
+    require_supported_device("vibration control")
     gain = _clamp(percent, 0, 100)
     node = _rumble_event_node()
     if not node:
@@ -1473,6 +1606,7 @@ def set_vibration_gain(percent: int) -> None:
 
 def play_vibration_test(level: str, duration_ms: int = 500) -> None:
     """Play one FF_RUMBLE effect without changing the saved firmware level."""
+    require_supported_device("vibration control")
     import fcntl
     import time
 
@@ -1552,7 +1686,7 @@ def _ssl_context():
 def _download_archive(target: Path) -> None:
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": "Ayaneo3Companion/0.4.4"},
+        headers={"User-Agent": f"Ayaneo3Companion/{updater.plugin_version()}"},
     )
     with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
         _checked_download_url(response.geturl())
@@ -1600,6 +1734,7 @@ def tdp_backend() -> str:
 
 
 def _apply_tdp_unlocked(config: dict) -> None:
+    require_supported_device("TDP control")
     values = normalize_tdp(config)
     card = _powerstation_card()
     if card:
@@ -1641,12 +1776,43 @@ def gpu_power_watts():
     return None
 
 
-def _is_our_display_script(path: Path) -> bool:
+def _normalized_file_bytes(path: Path) -> bytes | None:
     try:
-        return (path.read_bytes().replace(b"\r\n", b"\n") ==
-                LUA_SOURCE.read_bytes().replace(b"\r\n", b"\n"))
+        return path.read_bytes().replace(b"\r\n", b"\n")
     except OSError:
+        return None
+
+
+def _display_script_owned(path: Path) -> bool:
+    data = _normalized_file_bytes(path)
+    if data is None:
         return False
+    return (data.startswith(DISPLAY_SCRIPT_MARKER) or
+            hashlib.sha256(data).hexdigest() in LEGACY_DISPLAY_SCRIPT_SHA256)
+
+
+def _is_our_display_script(path: Path) -> bool:
+    data = _normalized_file_bytes(path)
+    source = _normalized_file_bytes(LUA_SOURCE)
+    return data is not None and source is not None and data == source
+
+
+def install_display_script() -> None:
+    """Install or upgrade only a display definition owned by this plugin."""
+    require_supported_device("display definition")
+    if LUA_TARGET.is_symlink():
+        raise RuntimeError("refusing to replace a symlinked gamescope definition")
+    if LUA_TARGET.exists() and not _display_script_owned(LUA_TARGET):
+        raise RuntimeError("another AYANEO 3 gamescope definition already exists")
+    LUA_TARGET.parent.mkdir(parents=True, exist_ok=True)
+    temporary = LUA_TARGET.with_name(f".{LUA_TARGET.name}.tmp")
+    try:
+        temporary.write_bytes(LUA_SOURCE.read_bytes())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, LUA_TARGET)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
 
 
 def _cta_luminance_code(nits: float) -> int:
@@ -1737,6 +1903,17 @@ def button_map_bytes() -> bytes:
     return INPUT_MAP_SOURCE.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
 
 
+def button_map_owned(path: Path) -> bool:
+    """Recognise current, marked and known legacy Companion maps."""
+    if path in (LEGACY_INPUT_DEVICE_TARGET, *LEGACY_INPUT_MAP_TARGETS):
+        return path.exists()
+    data = _normalized_file_bytes(path)
+    if data is None:
+        return False
+    return (INPUT_MAP_MARKER in data[:256] or
+            hashlib.sha256(data).hexdigest() in LEGACY_INPUT_MAP_SHA256)
+
+
 def button_fix_installed() -> bool:
     try:
         return INPUT_MAP_TARGET.read_bytes() == button_map_bytes()
@@ -1746,6 +1923,11 @@ def button_fix_installed() -> bool:
 
 def install_button_fix() -> None:
     """Extend native aya7 without replacing its APU-specific device profile."""
+    require_supported_device("key-binding setup")
+    if INPUT_MAP_TARGET.is_symlink():
+        raise RuntimeError("refusing to replace a symlinked InputPlumber map")
+    if INPUT_MAP_TARGET.exists() and not button_map_owned(INPUT_MAP_TARGET):
+        raise RuntimeError("another aya7 InputPlumber override already exists")
     INPUT_MAP_TARGET.parent.mkdir(parents=True, exist_ok=True)
     temporary = INPUT_MAP_TARGET.with_name(f".{INPUT_MAP_TARGET.name}.tmp")
     temporary.write_bytes(button_map_bytes())
@@ -1757,18 +1939,14 @@ def install_button_fix() -> None:
     # Remove the old full-device override. It hard-coded the 8840U USB path and
     # unnecessarily replaced working native mappings on the HX 370 variant.
     for legacy in (LEGACY_INPUT_DEVICE_TARGET, *LEGACY_INPUT_MAP_TARGETS):
-        try:
+        if button_map_owned(legacy):
             legacy.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def remove_button_fix() -> None:
     for target in (INPUT_MAP_TARGET, LEGACY_INPUT_DEVICE_TARGET, *LEGACY_INPUT_MAP_TARGETS):
-        try:
+        if button_map_owned(target):
             target.unlink()
-        except FileNotFoundError:
-            pass
 
 
 class Plugin:
@@ -1787,6 +1965,15 @@ class Plugin:
         settings.commit()
 
     @classmethod
+    def _reapply_current_tdp(cls):
+        """Apply the newest committed TDP without racing an RPC or app change."""
+        with _tdp_mutation_lock:
+            with _lock:
+                target = dict(cls._state["tdp"])
+            apply_tdp(target)
+            return target
+
+    @classmethod
     def _snapshot(cls):
         with _lock:
             state = dict(cls._state)
@@ -1794,6 +1981,14 @@ class Plugin:
             state["controller"] = dict(state["controller"])
             state["module_left"] = dict(state["module_left"])
             state["module_right"] = dict(state["module_right"])
+        if not state.get("supported", False):
+            # Never probe AYANEO-specific EC or HID registers merely because a
+            # privileged Decky RPC was called on another machine.
+            state["gpu_power_w"] = None
+            state["charge_bypass_supported"] = False
+            state["module_eject_supported"] = False
+            state["module_reset_supported"] = False
+            return state
         # Hardware reads can involve sysfs, debugfs and subprocesses. Keep them
         # outside the shared state lock so the monitor loops and RPC writes do
         # not stall behind the QAM's periodic refresh.
@@ -1830,63 +2025,126 @@ class Plugin:
     async def get_battery_status(self):
         return await asyncio.to_thread(battery_status)
 
-    async def set_tdp(self, raw):
+    async def get_version(self):
+        return {"version": updater.plugin_version()}
+
+    async def check_for_updates(self):
+        return await asyncio.to_thread(updater.check)
+
+    async def perform_update(self):
+        return await asyncio.to_thread(updater.download_latest)
+
+    async def set_tdp(self, raw, preset=None):
         value = normalize_tdp(raw)
-        await asyncio.to_thread(apply_tdp, value)
-        with _lock:
-            Plugin._state["tdp"] = value
-            self._save("tdp", value)
+        profile_name = tdp_preset(value, preset)
+
+        def mutate():
+            with _tdp_mutation_lock:
+                apply_tdp(value)
+                with _lock:
+                    Plugin._state["tdp"] = value
+                    Plugin._state["tdp_preset"] = profile_name
+                    settings.setSetting("tdp", value)
+                    settings.setSetting("tdp_preset", profile_name)
+                    settings.commit()
+
+        await asyncio.to_thread(mutate)
         return await self.get_state()
 
     async def get_game_profile(self, app_id):
-        profiles = settings.getSetting("game_profiles", {})
-        value = profiles.get(str(app_id)) if isinstance(profiles, dict) else None
-        return {"exists": isinstance(value, dict),
-                "profile": normalize_tdp(value) if isinstance(value, dict) else {}}
-
-    async def set_game_profile(self, app_id, raw):
-        app_id = str(app_id or "")
-        if not app_id or app_id != Plugin._active_app:
-            raise RuntimeError("game is no longer active")
-        value = normalize_tdp(raw)
-        await asyncio.to_thread(apply_tdp, value)
         with _lock:
             profiles = settings.getSetting("game_profiles", {})
-            profiles = dict(profiles) if isinstance(profiles, dict) else {}
-            profiles[app_id] = value
-            settings.setSetting("game_profiles", profiles)
-            settings.commit()
-            Plugin._state["tdp"] = value
+        value = profiles.get(str(app_id)) if isinstance(profiles, dict) else None
+        return {"exists": isinstance(value, dict),
+                "profile": normalize_tdp(value) if isinstance(value, dict) else {},
+                "preset": tdp_preset(value, value.get("preset"))
+                if isinstance(value, dict) else ""}
+
+    async def set_game_profile(self, app_id, raw, preset=None):
+        app_id = str(app_id or "")
+        value = normalize_tdp(raw)
+        profile_name = tdp_preset(value, preset)
+
+        def mutate():
+            with _tdp_mutation_lock:
+                with _lock:
+                    if not app_id or app_id != Plugin._active_app:
+                        raise RuntimeError("game is no longer active")
+                apply_tdp(value)
+                with _lock:
+                    # set_active_app uses the same mutation lock, so this also
+                    # documents the invariant before committing the profile.
+                    if app_id != Plugin._active_app:
+                        raise RuntimeError("game is no longer active")
+                    profiles = settings.getSetting("game_profiles", {})
+                    profiles = dict(profiles) if isinstance(profiles, dict) else {}
+                    profiles[app_id] = {**value, "preset": profile_name}
+                    settings.setSetting("game_profiles", profiles)
+                    settings.commit()
+                    Plugin._state["tdp"] = value
+                    Plugin._state["tdp_preset"] = profile_name
+
+        await asyncio.to_thread(mutate)
         return await self.get_state()
 
     async def delete_game_profile(self, app_id):
         app_id = str(app_id or "")
-        profiles = settings.getSetting("game_profiles", {})
-        profiles = dict(profiles) if isinstance(profiles, dict) else {}
-        profiles.pop(app_id, None)
-        target = normalize_tdp(settings.getSetting("tdp", DEFAULT_TDP))
-        if app_id and app_id == Plugin._active_app:
-            await asyncio.to_thread(apply_tdp, target)
-        with _lock:
-            settings.setSetting("game_profiles", profiles)
-            settings.commit()
-            if app_id == Plugin._active_app:
-                Plugin._state["tdp"] = target
+
+        def mutate():
+            with _tdp_mutation_lock:
+                with _lock:
+                    profiles = settings.getSetting("game_profiles", {})
+                    profiles = dict(profiles) if isinstance(profiles, dict) else {}
+                    profiles.pop(app_id, None)
+                    target = normalize_tdp(settings.getSetting("tdp", DEFAULT_TDP))
+                    profile_name = tdp_preset(
+                        target, settings.getSetting("tdp_preset", None))
+                    active = bool(app_id and app_id == Plugin._active_app)
+                if active:
+                    apply_tdp(target)
+                with _lock:
+                    settings.setSetting("game_profiles", profiles)
+                    settings.commit()
+                    if active:
+                        Plugin._state["tdp"] = target
+                        Plugin._state["tdp_preset"] = profile_name
+
+        await asyncio.to_thread(mutate)
         return await self.get_state()
 
     async def set_active_app(self, app_id):
         app_id = str(app_id or "")
-        if app_id == Plugin._active_app:
+        if not supported_device():
+            with _lock:
+                Plugin._active_app = app_id
             return
-        profiles = settings.getSetting("game_profiles", {})
-        profile = profiles.get(app_id) if app_id and isinstance(profiles, dict) else None
-        target = normalize_tdp(profile if isinstance(profile, dict)
-                               else settings.getSetting("tdp", DEFAULT_TDP))
-        await asyncio.to_thread(apply_tdp, target)
-        with _lock:
-            Plugin._active_app = app_id
-            Plugin._state["tdp"] = target
-        decky.logger.info(f"{LOG} applied {'game ' + app_id if profile else 'global'} TDP")
+
+        def mutate():
+            with _tdp_mutation_lock:
+                with _lock:
+                    if app_id == Plugin._active_app:
+                        return None
+                    profiles = settings.getSetting("game_profiles", {})
+                    profile = (profiles.get(app_id)
+                               if app_id and isinstance(profiles, dict) else None)
+                    target = normalize_tdp(
+                        profile if isinstance(profile, dict)
+                        else settings.getSetting("tdp", DEFAULT_TDP))
+                    profile_name = tdp_preset(
+                        target,
+                        profile.get("preset") if isinstance(profile, dict)
+                        else settings.getSetting("tdp_preset", None))
+                apply_tdp(target)
+                with _lock:
+                    Plugin._active_app = app_id
+                    Plugin._state["tdp"] = target
+                    Plugin._state["tdp_preset"] = profile_name
+                return isinstance(profile, dict)
+
+        used_profile = await asyncio.to_thread(mutate)
+        if used_profile is not None:
+            decky.logger.info(
+                f"{LOG} applied {'game ' + app_id if used_profile else 'global'} TDP")
 
     async def set_controller(self, raw):
         value = normalize_controller(raw)
@@ -2050,10 +2308,9 @@ class Plugin:
 
     async def set_screen_fix(self, enabled):
         if enabled:
-            LUA_TARGET.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(LUA_SOURCE, LUA_TARGET)
+            await asyncio.to_thread(install_display_script)
             await asyncio.to_thread(patch_published_edid)
-        elif _is_our_display_script(LUA_TARGET):
+        elif _display_script_owned(LUA_TARGET):
             LUA_TARGET.unlink()
         return await self.get_state()
 
@@ -2115,11 +2372,10 @@ class Plugin:
         for delay in (1, 2, 4, 8):
             await asyncio.sleep(delay)
             with _lock:
-                tdp = dict(Plugin._state["tdp"])
                 controller = dict(Plugin._state["controller"])
             if "tdp" in pending:
                 try:
-                    await asyncio.to_thread(apply_tdp, tdp)
+                    await asyncio.to_thread(Plugin._reapply_current_tdp)
                     pending.remove("tdp")
                     decky.logger.info(f"{LOG} restored TDP after startup")
                 except Exception as error:
@@ -2196,10 +2452,8 @@ class Plugin:
             # one immediate write is not enough. These intervals total 6 s.
             for delay in (0.5, 1.0, 1.5, 3.0):
                 await asyncio.sleep(delay)
-                with _lock:
-                    target = dict(Plugin._state["tdp"])
                 try:
-                    await asyncio.to_thread(apply_tdp, target)
+                    await asyncio.to_thread(Plugin._reapply_current_tdp)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -2318,38 +2572,57 @@ class Plugin:
     async def _main(self):
         await asyncio.to_thread(settings.read)
         is_supported = await asyncio.to_thread(supported_device)
+        try:
+            await asyncio.to_thread(updater.ssl_context)
+        except Exception as error:
+            decky.logger.warning(f"{LOG} updater TLS initialization failed: {error}")
         saved_controller = normalize_controller(settings.getSetting("controller", DEFAULT_CONTROLLER))
         # Treat an existing map as an enabled toggle and migrate it in place
         # when a newer package extends the aya7 mapping.
-        key_binding_installed = any(path.exists() for path in (
+        key_binding_installed = any(button_map_owned(path) for path in (
             INPUT_MAP_TARGET, *LEGACY_INPUT_MAP_TARGETS, LEGACY_INPUT_DEVICE_TARGET))
-        if key_binding_installed:
-            await asyncio.to_thread(install_button_fix)
+        if is_supported and key_binding_installed:
+            try:
+                await asyncio.to_thread(install_button_fix)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} key-binding migration failed: {error}")
+            key_binding_installed = await asyncio.to_thread(button_fix_installed)
+        screen_installed = _display_script_owned(LUA_TARGET)
+        if is_supported and screen_installed and not _is_our_display_script(LUA_TARGET):
+            try:
+                await asyncio.to_thread(install_display_script)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} display-definition migration failed: {error}")
+            screen_installed = _is_our_display_script(LUA_TARGET)
         audio_enabled = bool(settings.getSetting("audio_fix_enabled", True))
         tm_guard_enabled = bool(settings.getSetting("tm_guard_enabled", True))
-        audio_installed = await asyncio.to_thread(audio_fix_installed)
+        audio_installed = await asyncio.to_thread(audio_fix_installed) if is_supported else False
         audio_ready = await asyncio.to_thread(audio_fix_ready) if audio_installed else False
-        charge_control = await asyncio.to_thread(ensure_charge_control) if is_supported else None
+        ec_control = await asyncio.to_thread(ensure_charge_control) if is_supported else None
+        charge_control = await asyncio.to_thread(ensure_charge_bypass_control) if is_supported else None
         try:
             charge_bypass = await asyncio.to_thread(read_charge_bypass) if charge_control else False
         except (OSError, RuntimeError):
             charge_control = None
             charge_bypass = False
+        saved_tdp = normalize_tdp(settings.getSetting("tdp", DEFAULT_TDP))
         Plugin._state = {
             "supported": is_supported,
             "device": _dmi("product_name") or "unknown",
-            "tdp_backend": await asyncio.to_thread(tdp_backend),
-            "tdp": normalize_tdp(settings.getSetting("tdp", DEFAULT_TDP)),
+            "version": updater.plugin_version(),
+            "tdp_backend": await asyncio.to_thread(tdp_backend) if is_supported else "Unavailable",
+            "tdp": saved_tdp,
+            "tdp_preset": tdp_preset(saved_tdp, settings.getSetting("tdp_preset", None)),
             "presets": PRESETS,
             "controller": saved_controller,
-            "screen_installed": _is_our_display_script(LUA_TARGET),
+            "screen_installed": screen_installed,
             "edid_patched": False,
             "edid_game_nits": 0,
             "button_fix_installed": key_binding_installed,
             "charge_bypass_supported": charge_control is not None,
             "charge_bypass": charge_bypass,
-            "module_eject_supported": charge_control is not None,
-            "module_reset_supported": charge_control is not None,
+            "module_eject_supported": ec_control is not None,
+            "module_reset_supported": ec_control is not None,
             "modules_reconnecting": False,
             "modules_connected": True,
             "module_left": _module_info("left", status="detecting"),
@@ -2358,7 +2631,8 @@ class Plugin:
             "tm_guard_status": "Monitoring" if tm_guard_enabled else "Disabled",
             "tm_guard_recoveries": 0,
             "gpu_power_w": None,
-            "audio_fix_supported": await asyncio.to_thread(audio_fix_supported),
+            "audio_fix_supported": (
+                await asyncio.to_thread(audio_fix_supported) if is_supported else False),
             "audio_fix_enabled": audio_enabled,
             "audio_fix_installed": audio_installed,
             "audio_calibration_available": audio_enabled and audio_ready,
@@ -2393,29 +2667,35 @@ class Plugin:
         Plugin._ac_task = None
         Plugin._module_task = None
         Plugin._tm_guard_task = None
-        try:
-            if not await asyncio.to_thread(controller_powered):
-                await asyncio.to_thread(set_controller_power, True)
-        except Exception as error:
-            decky.logger.warning(f"{LOG} could not restore controller power on unload: {error}")
+        with _lock:
+            was_supported = bool(Plugin._state.get("supported", False))
+        if was_supported and await asyncio.to_thread(supported_device):
+            try:
+                if not await asyncio.to_thread(controller_powered):
+                    await asyncio.to_thread(set_controller_power, True)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} could not restore controller power on unload: {error}")
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
-        try:
-            await asyncio.to_thread(remove_audio_fix, False)
-        except Exception as error:
-            decky.logger.warning(f"{LOG} could not remove audio firmware path: {error}")
-        if settings.getSetting("charge_bypass", False):
+        is_supported = await asyncio.to_thread(supported_device)
+        if is_supported:
+            try:
+                await asyncio.to_thread(remove_audio_fix, False)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} could not remove audio firmware path: {error}")
+        if is_supported and settings.getSetting("charge_bypass", False):
             try:
                 await asyncio.to_thread(write_charge_bypass, False)
                 decky.logger.info(f"{LOG} restored automatic charging before uninstall")
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not restore charging before uninstall: {error}")
-        if _is_our_display_script(LUA_TARGET):
+        if _display_script_owned(LUA_TARGET):
             LUA_TARGET.unlink()
-        try:
-            await asyncio.to_thread(program_rear_buttons, False)
-        except Exception as error:
-            decky.logger.warning(f"{LOG} could not clear LC1/RC1 bindings: {error}")
+        if is_supported:
+            try:
+                await asyncio.to_thread(program_rear_buttons, False)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} could not clear LC1/RC1 bindings: {error}")
         remove_button_fix()
         await asyncio.to_thread(_systemctl, "restart", "inputplumber")

@@ -3,30 +3,34 @@
 // https://github.com/Rayekkk/Ayaneo3Companion
 
 import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
-import { ButtonItem, ConfirmModal, DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, Router, showModal, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
-import { FC, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { ButtonItem, ConfirmModal, DropdownItem, Field, gamepadDialogClasses, gamepadSliderClasses, PanelSection, PanelSectionRow, Router, showModal, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
+import { FC, ReactElement, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { FaChevronRight } from "react-icons/fa";
 
 type Vibration = "off" | "low" | "medium" | "high";
 type RgbMode = "off" | "solid" | "pulse" | "rainbow";
 type Preset = "Minimum" | "Low power" | "Balanced" | "Performance" | "Max" | "Custom";
-type SectionKey = "tdp" | "vibration" | "rgb" | "battery" | "modules" | "audio" | "buttons" | "screen";
+type SectionKey = "tdp" | "vibration" | "rgb" | "battery" | "modules" | "audio" | "buttons" | "screen" | "about";
 type ActionKey = "tdp" | "profile" | "vibration" | "battery" | "modules" | "audio" | "buttons" | "screen";
 interface Tdp { spl: number; sppt: number; fppt: number }
 interface Tuning { spl: number; spptOff: number; fpptOff: number }
 interface Controller { vibration: Vibration; ff_gain: number; rgb_mode: RgbMode; color: string; brightness: number }
 interface Hsv { hue: number; saturation: number; brightness: number }
 interface RunningGame { appId: string; name: string }
-interface GameProfile { exists: boolean; profile: Tdp }
+interface GameProfile { exists: boolean; profile: Tdp; preset?: Preset }
 interface ModuleInfo { code: number | null; label: string; layout: string; status: string; connected: boolean }
 interface BatteryStatus { available: boolean; percent: number | null; status: string; seconds_to_full: number | null; power_w: number | null; source: "UPower" | "sysfs" | "none" }
-interface State { supported: boolean; device: string; tdp_backend: string; tdp: Tdp; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
+interface UpdateInfo { current_version?: string; latest_version?: string; update_available?: boolean; download_url?: string | null; asset_name?: string | null; error?: string }
+interface State { supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
 
 const getState = callable<[], State>("get_state");
 const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
-const setTdp = callable<[Tdp], State>("set_tdp");
+const getVersion = callable<[], { version: string }>("get_version");
+const checkForUpdates = callable<[], UpdateInfo>("check_for_updates");
+const performUpdate = callable<[], { success: boolean; path?: string; error?: string }>("perform_update");
+const setTdp = callable<[Tdp, Preset], State>("set_tdp");
 const getGameProfile = callable<[string], GameProfile>("get_game_profile");
-const setGameProfile = callable<[string, Tdp], State>("set_game_profile");
+const setGameProfile = callable<[string, Tdp, Preset], State>("set_game_profile");
 const deleteGameProfile = callable<[string], State>("delete_game_profile");
 const setActiveApp = callable<[string], void>("set_active_app");
 const setController = callable<[Controller], State>("set_controller");
@@ -47,7 +51,6 @@ const VIBRATION_LEVELS: Vibration[] = ["off", "low", "medium", "high"];
 const VIBRATION_TEST_MS = 500;
 const VIBRATION_APPLY_DELAY_MS = 150;
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
-const presetOptions = PRESET_ORDER.map(data => ({ data, label: data }));
 const titleCase = (value: string) => value ? value[0].toUpperCase() + value.slice(1) : value;
 const formatDuration = (seconds: number): string => {
   const minutes = Math.max(1, Math.round(seconds / 60));
@@ -56,6 +59,10 @@ const formatDuration = (seconds: number): string => {
   if (!hours) return `${minutes} min`;
   return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`;
 };
+const tdpStatusStyle = (message: string) => ({
+  fontSize: "12px",
+  color: message.startsWith("Error") ? "var(--gpColor-Red, #f87171)" : "var(--gpColor-Green, #4ade80)",
+});
 
 type GameListener = (game: RunningGame | null) => void;
 class AppWatcher {
@@ -172,6 +179,13 @@ function detectPreset(tdp: Tdp, presets: Record<string, Tdp>): Preset {
   return "Custom";
 }
 
+function profileLabel(tdp: Tdp, stored: Preset | undefined, presets: Record<string, Tdp>): string {
+  const selected = stored ?? detectPreset(tdp, presets);
+  return selected === "Custom"
+    ? `Custom (${tdp.spl} +${tdp.sppt - tdp.spl}/+${tdp.fppt - tdp.spl})`
+    : selected;
+}
+
 const finite = (value: number, fallback: number) => Number.isFinite(value) ? value : fallback;
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 const spptOffsetMax = (spl: number) => Math.max(0, 37 - spl);
@@ -217,9 +231,119 @@ const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBac
   </PanelSection>
 );
 
+const StackedAction: FC<{
+  title: string; description: string; disabled?: boolean; onClick: () => void; children: ReactNode;
+}> = ({ title, description, disabled, onClick, children }) => (
+  <PanelSectionRow>
+    <div style={{ width: "100%", maxWidth: "100%", minWidth: 0, boxSizing: "border-box" }}>
+      <div className={gamepadDialogClasses.FieldLabel} style={{ marginBottom: "6px" }}>{title}</div>
+      <div className={gamepadDialogClasses.FieldDescription} style={{ marginBottom: "8px", overflowWrap: "anywhere" }}>{description}</div>
+      <div style={{ width: "100%", maxWidth: "100%", minWidth: 0 }}>
+        <ButtonItem layout="below" bottomSeparator="none" disabled={disabled} onClick={onClick}>{children}</ButtonItem>
+      </div>
+    </div>
+  </PanelSectionRow>
+);
+
+const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }) => {
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadPath, setDownloadPath] = useState<string | null>(null);
+  const [version, setVersion] = useState(initialVersion);
+
+  useEffect(() => {
+    let active = true;
+    getVersion()
+      .then(result => { if (active && result.version) setVersion(result.version); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  const notifyFailure = (title: string, error: unknown) => {
+    const body = error instanceof Error ? error.message : String(error ?? "Unknown error");
+    try { toaster.toast({ title, body, duration: 4000 }); }
+    catch { console.error(`[ayaneo3companion] ${title}: ${body}`); }
+  };
+
+  const check = useCallback(async () => {
+    setChecking(true);
+    setUpdateInfo(null);
+    setDownloadPath(null);
+    try {
+      setUpdateInfo(await checkForUpdates());
+    } catch (error) {
+      notifyFailure("Update check failed", error);
+      setUpdateInfo({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  const download = useCallback(async () => {
+    setDownloading(true);
+    try {
+      const result = await performUpdate();
+      if (result.success && result.path) setDownloadPath(result.path);
+      else {
+        setUpdateInfo(current => ({ ...(current ?? {}), error: result.error ?? "Unknown error" }));
+        notifyFailure("Download failed", result.error ?? "Unknown error");
+      }
+    } catch (error) {
+      notifyFailure("Download failed", error);
+    } finally {
+      setDownloading(false);
+    }
+  }, []);
+
+  const versionTag = (value: string) => (
+    <span style={{ fontWeight: 700, color: "var(--gpColor-White, #fff)", background: "rgba(102,192,244,.18)", borderRadius: "4px", padding: "1px 6px" }}>
+      v{value}
+    </span>
+  );
+
+  return <PanelSection title="Updates">
+    <PanelSectionRow>
+      <div style={{ width: "100%", minWidth: 0, fontSize: "12px", color: "var(--gpColor-TextMuted, rgba(255,255,255,.6))", overflowWrap: "anywhere" }}>
+        Installed: {versionTag((updateInfo?.current_version ?? version) || "?")}
+        {updateInfo?.latest_version && !updateInfo.error && <>
+          {" · "}Latest: {versionTag(updateInfo.latest_version)}
+        </>}
+      </div>
+    </PanelSectionRow>
+    {updateInfo?.error && <PanelSectionRow>
+      <div style={{ width: "100%", minWidth: 0, padding: "8px", boxSizing: "border-box", borderRadius: "4px", background: "rgba(248,113,113,.14)", color: "var(--gpColor-Red, #f87171)", overflowWrap: "anywhere" }}>
+        {updateInfo.error}
+      </div>
+    </PanelSectionRow>}
+    {updateInfo && !updateInfo.error && !updateInfo.update_available && !downloadPath && <PanelSectionRow>
+      <div style={{ fontSize: "12px", color: "var(--gpColor-Green, #4ade80)" }}>Up to date</div>
+    </PanelSectionRow>}
+    {updateInfo?.update_available && updateInfo.download_url && updateInfo.asset_name && !downloadPath && <StackedAction
+      title={`Version ${updateInfo.latest_version} is available`}
+      description="Download the exact GitHub release ZIP to the SteamOS Downloads folder."
+      disabled={downloading || checking}
+      onClick={() => void download()}
+    >{downloading ? <Spinner /> : `Download v${updateInfo.latest_version}`}</StackedAction>}
+    {downloadPath && <PanelSectionRow>
+      <Field
+        label="Update downloaded"
+        description={<span>Saved to <span style={{ fontFamily: "monospace", overflowWrap: "anywhere" }}>{downloadPath}</span><br /><br />To install: Decky → Settings → Developer → Uninstall AYANEO 3 Companion → Install Plugin from ZIP. Settings and per-game profiles are preserved.</span>}
+      />
+    </PanelSectionRow>}
+    <StackedAction
+      title="Check for Updates"
+      description="Compare the installed version with the latest GitHub release."
+      disabled={checking || downloading}
+      onClick={() => void check()}
+    >{checking ? <Spinner /> : "Check"}</StackedAction>
+  </PanelSection>;
+};
+
 const Content: FC = () => {
   const visible = useQuickAccessVisible();
   const wasVisible = useRef(false);
+  const transientOverlay = useRef(false);
   const presetInitialized = useRef(false);
   const tdpDirty = useRef(false);
   const controllerDirty = useRef(false);
@@ -240,6 +364,7 @@ const Content: FC = () => {
   const [rgbEdit, setRgbEdit] = useState<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
   const [game, setGame] = useState<RunningGame | null>(AppWatcher.currentGame());
   const [perGame, setPerGame] = useState(false);
+  const [savedGamePreset, setSavedGamePreset] = useState<Preset | undefined>(undefined);
   const [battery, setBattery] = useState<BatteryStatus | null>(null);
   const gameRequest = useRef(0);
   const busy = pendingAction !== null;
@@ -262,9 +387,10 @@ const Content: FC = () => {
     const request = ++gameRequest.current;
     if (!game) {
       setPerGame(false);
+      setSavedGamePreset(undefined);
       void getState().then(next => {
         if (request !== gameRequest.current || AppWatcher.currentGame()) return;
-        setState(next); setPreset(detectPreset(next.tdp, next.presets));
+        setState(next); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
       });
       return;
     }
@@ -272,12 +398,15 @@ const Content: FC = () => {
       if (request !== gameRequest.current || AppWatcher.currentGame()?.appId !== game.appId) return;
       setPerGame(profile.exists);
       if (profile.exists) {
-        setPreset(detectPreset(profile.profile, state?.presets ?? {}));
+        const stored = profile.preset ?? detectPreset(profile.profile, state?.presets ?? {});
+        setSavedGamePreset(stored);
+        setPreset(stored);
         setState(current => current ? { ...current, tdp: profile.profile } : current);
       } else {
+        setSavedGamePreset(undefined);
         void getState().then(next => {
           if (request !== gameRequest.current || AppWatcher.currentGame()?.appId !== game.appId) return;
-          setState(next); setPreset(detectPreset(next.tdp, next.presets));
+          setState(next); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
         });
       }
     }).catch(error => console.error("[ayaneo3companion] game profile lookup failed", error));
@@ -295,18 +424,22 @@ const Content: FC = () => {
           controller: controllerDirty.current || ffGainDirty.current ? current.controller : next.controller,
         };
       });
-      if (!presetInitialized.current) { presetInitialized.current = true; setPreset(detectPreset(next.tdp, next.presets)); }
+      if (!presetInitialized.current) { presetInitialized.current = true; setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets)); }
     } catch { /* backend may still be starting */ }
   }, []);
 
   useEffect(() => {
     if (visible && !wasVisible.current) {
-      setActiveSection(null);
-      setStatus(null);
+      if (transientOverlay.current) {
+        transientOverlay.current = false;
+      } else {
+        setActiveSection(null);
+        setStatus(null);
+      }
     }
     wasVisible.current = visible;
-    refresh();
     if (!visible) return;
+    refresh();
     const timer = setInterval(refresh, 1500);
     return () => clearInterval(timer);
   }, [refresh, visible]);
@@ -343,6 +476,15 @@ const Content: FC = () => {
     } finally { pendingActionRef.current = null; setPendingAction(null); }
   };
 
+  const openDropdown = (showMenu: () => void) => {
+    transientOverlay.current = true;
+    showMenu();
+  };
+  const openModal = (modal: ReactElement) => {
+    transientOverlay.current = true;
+    showModal(modal);
+  };
+
   if (!state) return <PanelSection><PanelSectionRow><Spinner /></PanelSectionRow></PanelSection>;
   if (!state.supported) return <PanelSection title="Unsupported device"><PanelSectionRow><Field label={state.device} description="AYANEO 3 is required." /></PanelSectionRow></PanelSection>;
 
@@ -367,13 +509,37 @@ const Content: FC = () => {
     const nextFppt = clamp(value, 0, maxFpptOffset);
     setCustomTdp(absolute(normalise({ ...tuning, fpptOff: nextFppt, spptOff: Math.min(tuning.spptOff, nextFppt) })));
   };
-  const choosePreset = (name: Preset) => {
+  const choosePreset = async (name: Preset) => {
+    if (pendingActionRef.current) return;
+    const previousPreset = preset;
+    const previousTdp = tdp;
+    const previousSavedPreset = savedGamePreset;
     setPreset(name); setStatus(null);
     if (name === "Custom") return;
+
     tdpDirty.current = false;
-    const value = state.presets[name]; setState(current => current ? { ...current, tdp: value } : current);
-    void run("tdp", () => perGame && game ? setGameProfile(game.appId, value) : setTdp(value), "TDP preset failed",
-      perGame && game ? `${name} saved for ${game.name}.` : `${name} applied.`);
+    const value = state.presets[name];
+    setState(current => current ? { ...current, tdp: value } : current);
+    pendingActionRef.current = "tdp";
+    setPendingAction("tdp");
+    try {
+      const next = await (perGame && game
+        ? setGameProfile(game.appId, value, name)
+        : setTdp(value, name));
+      setState(next);
+      if (perGame && game) setSavedGamePreset(name);
+      setStatus(perGame && game ? `${name} saved for ${game.name}.` : `${name} applied.`);
+    } catch (error) {
+      setPreset(previousPreset);
+      setSavedGamePreset(previousSavedPreset);
+      setState(current => current ? { ...current, tdp: previousTdp } : current);
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`Error: ${message}`);
+      toaster.toast({ title: "TDP preset failed", body: message });
+    } finally {
+      pendingActionRef.current = null;
+      setPendingAction(null);
+    }
   };
   const togglePerGame = async (enabled: boolean) => {
     if (!game || pendingActionRef.current) return;
@@ -384,16 +550,20 @@ const Content: FC = () => {
       if (enabled) {
         const profile = await getGameProfile(game.appId);
         if (profile.exists) {
-          setPreset(detectPreset(profile.profile, state.presets));
+          const stored = profile.preset ?? detectPreset(profile.profile, state.presets);
+          setSavedGamePreset(stored);
+          setPreset(stored);
           setState(current => current ? { ...current, tdp: profile.profile } : current);
-          setStatus(`Using the saved profile for ${game.name}.`);
+          setStatus(`Profile applied for ${game.name}.`);
         } else {
-          setStatus(`Choose a preset or Custom settings for ${game.name}.`);
+          setSavedGamePreset(undefined);
+          setStatus(`No saved profile for ${game.name}. Use Custom or choose a preset to create one.`);
         }
       } else {
         const next = await deleteGameProfile(game.appId);
-        setState(next); setPreset(detectPreset(next.tdp, next.presets));
-        setStatus(`Global TDP restored for ${game.name}.`);
+        setSavedGamePreset(undefined);
+        setState(next); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
+        setStatus("Switched to global settings.");
       }
     } catch (error) {
       setPerGame(!enabled);
@@ -530,6 +700,9 @@ const Content: FC = () => {
     <PanelSection title="Device">
       <PanelSectionRow><Field label={state.device} description={`TDP backend: ${state.tdp_backend}`} /></PanelSectionRow>
     </PanelSection>
+    <PanelSection title="Plugin">
+      <SectionLink title="About" description={`AYANEO 3 Companion · v${state.version}`} onClick={() => openSection("about")} />
+    </PanelSection>
   </PageShell>;
 
   return <PageShell>
@@ -540,24 +713,56 @@ const Content: FC = () => {
         <PanelSectionRow><Field label={`${tdp.spl} / ${tdp.sppt} / ${tdp.fppt} W`} description={`SPL / SPPT / FPPT · ${state.gpu_power_w == null ? "power unavailable" : `${state.gpu_power_w.toFixed(1)} W currently`} · ${state.tdp_backend}`} /></PanelSectionRow>
       </PanelSection>
       <PanelSection title="Game Profile">
-        <PanelSectionRow><ToggleField label="Per Game Profile" description={game ? game.name : "No game running"} checked={perGame} disabled={!game || busy} onChange={enabled => void togglePerGame(enabled)} /></PanelSectionRow>
+        <PanelSectionRow><ToggleField
+          label="Per Game Profile"
+          description={game ? (perGame ? (
+            <span style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+              <span>{game.name}</span>
+              <span>
+                <span style={{ fontSize: "11px", color: "var(--gpColor-TextMuted, rgba(255,255,255,0.5))" }}>Profile: </span>
+                <span style={{ fontSize: "11px", fontWeight: "bold", color: "var(--gpColor-White, #fff)", background: "rgba(74,222,128,0.25)", borderRadius: "4px", padding: "1px 6px" }}>
+                  {profileLabel(tdp, savedGamePreset, state.presets)}
+                </span>
+              </span>
+            </span>
+          ) : game.name) : "No game running"}
+          checked={perGame}
+          disabled={!game || busy}
+          onChange={enabled => void togglePerGame(enabled)}
+        /></PanelSectionRow>
       </PanelSection>
       <PanelSection title="Preset">
-        <PanelSectionRow><DropdownItem label="Power Profile" description={perGame && game ? `Saved for ${game.name}` : "Global profile"} selectedOption={preset} rgOptions={presetOptions} disabled={busy} onChange={option => choosePreset(option.data as Preset)} /></PanelSectionRow>
+        {PRESET_ORDER.map(name => <PanelSectionRow key={name}>
+          <ButtonItem
+            layout="below"
+            disabled={preset === name || busy}
+            onClick={() => void choosePreset(name)}
+          >
+            {preset === name ? `> ${name}` : name}
+          </ButtonItem>
+        </PanelSectionRow>)}
+        {status && preset !== "Custom" && <PanelSectionRow><div style={tdpStatusStyle(status)}>{status}</div></PanelSectionRow>}
       </PanelSection>
       {preset === "Custom" && <>
         <PanelSection title="TDP Limits">
-          <PanelSectionRow><SliderField label={`SPL (TDP) · ${tuning.spl} W`} value={tuning.spl} min={5} max={35} step={1} onChange={setSpl} description="Sustained power limit" /></PanelSectionRow>
-          <PanelSectionRow><SliderField key={`sppt-${tuning.spl}-${maxSpptOffset}`} label={`SPPT · ${tuning.spl + spptOff} W`} value={spptOff} min={0} max={maxSpptOffset || 1} step={1} disabled={maxSpptOffset === 0} onChange={setSpptOff} description={maxSpptOffset === 0 ? "No slow-boost headroom remains" : `+${spptOff} W above SPL · maximum 37 W`} /></PanelSectionRow>
+          <PanelSectionRow><SliderField label={`SPL (TDP) - ${tuning.spl} W`} value={tuning.spl} min={5} max={35} step={1} onChange={setSpl} description="Sustained power limit - the main TDP dial" /></PanelSectionRow>
+          <PanelSectionRow><SliderField key={`sppt-${tuning.spl}-${maxSpptOffset}`} label={`SPPT +${spptOff} W  =  ${tuning.spl + spptOff} W`} value={spptOff} min={0} max={maxSpptOffset || 1} step={1} disabled={maxSpptOffset === 0} onChange={setSpptOff} description={maxSpptOffset === 0 ? "No headroom left at this SPL" : `Slow limit headroom above SPL (max +${maxSpptOffset} W here)`} /></PanelSectionRow>
           {state.tdp_backend !== "PowerStation"
-            ? <PanelSectionRow><SliderField key={`fppt-${tuning.spl}-${maxFpptOffset}`} label={`FPPT · ${tuning.spl + fpptOff} W`} value={fpptOff} min={0} max={maxFpptOffset || 1} step={1} disabled={maxFpptOffset === 0} onChange={setFpptOff} description={maxFpptOffset === 0 ? "No fast-boost headroom remains" : `+${fpptOff} W above SPL · maximum 37 W`} /></PanelSectionRow>
+            ? <PanelSectionRow><SliderField key={`fppt-${tuning.spl}-${maxFpptOffset}`} label={`FPPT +${fpptOff} W  =  ${tuning.spl + fpptOff} W`} value={fpptOff} min={0} max={maxFpptOffset || 1} step={1} disabled={maxFpptOffset === 0} onChange={setFpptOff} description={maxFpptOffset === 0 ? "No headroom left at this SPL" : `Fast limit headroom above SPL (max +${maxFpptOffset} W here)`} /></PanelSectionRow>
             : <PanelSectionRow><Field label="FPPT managed automatically" description="PowerStation derives the fast limit from SPL and SPPT." /></PanelSectionRow>}
         </PanelSection>
-        <PanelSection title="Apply">
+        <PanelSection title="Action">
           <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => {
-            tdpDirty.current = false;
-            void run("tdp", () => perGame && game ? setGameProfile(game.appId, tdp) : setTdp(tdp), "TDP apply failed", perGame && game ? `Custom settings saved for ${game.name}.` : "Custom settings applied.");
+            void run("tdp", async () => {
+              const next = await (perGame && game
+                ? setGameProfile(game.appId, tdp, "Custom")
+                : setTdp(tdp, "Custom"));
+              tdpDirty.current = false;
+              if (perGame && game) setSavedGamePreset("Custom");
+              return next;
+            }, "TDP apply failed", perGame && game ? `Custom settings saved for ${game.name}.` : "Custom settings applied.");
           }}>{pendingAction === "tdp" ? "Applying..." : perGame && game ? `Apply & Save for ${game.name}` : "Apply TDP"}</ButtonItem></PanelSectionRow>
+          {status && <PanelSectionRow><div style={tdpStatusStyle(status)}>{status}</div></PanelSectionRow>}
         </PanelSection>
       </>}
     </>}
@@ -565,14 +770,14 @@ const Content: FC = () => {
     {activeSection === "vibration" && <PanelSection title="Vibration">
       <PanelSectionRow><SliderField label={`Firmware Strength · ${titleCase(state.controller.vibration)}`} description="Off · Low · Medium · High" value={VIBRATION_LEVELS.indexOf(state.controller.vibration)} min={0} max={3} step={1} notchCount={4} notchTicksVisible validValues="steps" minimumDpadGranularity={1} showValue={false} onChange={setVibrationLevel} /></PanelSectionRow>
       <PanelSectionRow><SliderField label="FF Gain" description="Scales force-feedback effects from games and vibration tests." value={state.controller.ff_gain} min={0} max={100} step={10} notchCount={11} notchTicksVisible validValues="steps" minimumDpadGranularity={10} showValue valueSuffix="%" onChange={setFfGain} /></PanelSectionRow>
-      <PanelSectionRow><ButtonItem label="Test Vibration" description="Play a short 500 ms rumble pulse." layout="inline" disabled={busy || state.controller.vibration === "off" || state.controller.ff_gain === 0} onClick={() => void runVibrationTest()}>{pendingAction === "vibration" ? <Spinner /> : "Test"}</ButtonItem></PanelSectionRow>
+      <StackedAction title="Test Vibration" description="Play a short 500 ms rumble pulse." disabled={busy || state.controller.vibration === "off" || state.controller.ff_gain === 0} onClick={() => void runVibrationTest()}>{pendingAction === "vibration" ? <Spinner /> : "Test"}</StackedAction>
       <PanelSectionRow><Field label="Two-stage control" description="Firmware Strength selects the controller's base level; FF Gain scales Linux force-feedback effects from 0 to 100%." /></PanelSectionRow>
     </PanelSection>}
 
     {activeSection === "rgb" && <PanelSection title="LED Settings">
       <PanelSectionRow><ToggleField label="Enable LED Control" checked={state.controller.rgb_mode !== "off"} onChange={enabled => applyController({ rgb_mode: enabled ? lastRgbMode.current : "off" })} /></PanelSectionRow>
       {state.controller.rgb_mode !== "off" && <>
-        <PanelSectionRow><DropdownItem label="LED Mode" selectedOption={state.controller.rgb_mode} rgOptions={rgbOptions.filter(option => option.data !== "off")} onChange={option => applyController({ rgb_mode: option.data as RgbMode })} /></PanelSectionRow>
+        <PanelSectionRow><DropdownItem label="LED Mode" selectedOption={state.controller.rgb_mode} rgOptions={rgbOptions.filter(option => option.data !== "off")} onMenuWillOpen={openDropdown} onChange={option => applyController({ rgb_mode: option.data as RgbMode })} /></PanelSectionRow>
         <PanelSectionRow><Field label={`#${state.controller.color.toUpperCase()}`} description={`${titleCase(state.controller.rgb_mode)} · ${rgbEdit.brightness}% brightness`}><span style={{ display: "block", width: "28px", height: "28px", borderRadius: "50%", background: `#${state.controller.color}`, border: "2px solid rgba(255,255,255,.55)" }} /></Field></PanelSectionRow>
         <PanelSectionRow><SlowSliderField label="Hue" value={rgbEdit.hue} min={0} max={359} valueSuffix="°" className="AyaneoRgbHue" onChange={hue => previewRgb({ ...rgbEdit, hue })} onChangeEnd={hue => commitRgb({ ...rgbEdit, hue })} /></PanelSectionRow>
         <PanelSectionRow><SlowSliderField label="Saturation" value={rgbEdit.saturation} min={0} max={100} valueSuffix="%" className="AyaneoRgbSaturation" onChange={saturation => previewRgb({ ...rgbEdit, saturation })} onChangeEnd={saturation => commitRgb({ ...rgbEdit, saturation })} /></PanelSectionRow>
@@ -599,8 +804,8 @@ const Content: FC = () => {
             /></PanelSectionRow>}
       </PanelSection>
       <PanelSection title="Charge Control">
-        <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "Charge bypass is unavailable on this kernel."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={enabled => void run("battery", () => setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")} /></PanelSectionRow>
-        <PanelSectionRow><Field label={state.charge_bypass ? "Bypass active" : "Automatic charging"} description="State read directly from the AYANEO embedded controller." /></PanelSectionRow>
+        <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "AYANEO charge control is not exposed by the current system."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={enabled => void run("battery", () => setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")} /></PanelSectionRow>
+        <PanelSectionRow><Field label={state.charge_bypass ? "Bypass active" : "Automatic charging"} description="State verified through the AYANEO kernel or embedded-controller interface." /></PanelSectionRow>
       </PanelSection>
     </>}
 
@@ -611,10 +816,10 @@ const Content: FC = () => {
       </PanelSection>
       <PanelSection title="Controller Eject">
         <PanelSectionRow><Field label={state.modules_reconnecting ? "Waiting for both modules" : state.modules_connected ? "Both modules connected" : "Module disconnected"} description="After ejection, insert both modules to initialise the controller again." /></PanelSectionRow>
-        {(["left", "right", "both"] as const).map(side => <PanelSectionRow key={side}><ButtonItem label={`Eject ${titleCase(side)}`} description={side === "both" ? "Release both controller modules." : `Release the ${side} controller module.`} layout="inline" disabled={busy || state.modules_reconnecting || !state.module_eject_supported} onClick={() => showModal(<ConfirmModal strTitle={`Eject ${titleCase(side)}`} strDescription={`Release ${side === "both" ? "both controller modules" : `the ${side} controller module`}?`} strOKButtonText="Eject" bDestructiveWarning onOK={() => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`)} />)}>{pendingAction === "modules" ? <Spinner /> : "Eject"}</ButtonItem></PanelSectionRow>)}
+        {(["left", "right", "both"] as const).map(side => <StackedAction key={side} title={`Eject ${titleCase(side)}`} description={side === "both" ? "Release both controller modules." : `Release the ${side} controller module.`} disabled={busy || state.modules_reconnecting || !state.module_eject_supported} onClick={() => openModal(<ConfirmModal strTitle={`Eject ${titleCase(side)}`} strDescription={`Release ${side === "both" ? "both controller modules" : `the ${side} controller module`}?`} strOKButtonText="Eject" bDestructiveWarning onOK={() => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`)} />)}>{pendingAction === "modules" ? <Spinner /> : "Eject"}</StackedAction>)}
       </PanelSection>
       <PanelSection title="Recovery">
-        <PanelSectionRow><ButtonItem label="Reset Magic Modules" description="Reinitialise both modules and restore RGB, vibration, FF Gain and rear-button mappings." layout="inline" disabled={busy || !state.modules_connected || !state.module_reset_supported} onClick={() => showModal(<ConfirmModal strTitle="Reset Magic Modules" strDescription="The controller will briefly disconnect while both modules are reinitialised." strOKButtonText="Reset" onOK={() => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected.")} />)}>{pendingAction === "modules" ? <Spinner /> : "Reset"}</ButtonItem></PanelSectionRow>
+        <StackedAction title="Reset Magic Modules" description="Reinitialise both modules and restore RGB, vibration, FF Gain and rear-button mappings." disabled={busy || !state.modules_connected || !state.module_reset_supported} onClick={() => openModal(<ConfirmModal strTitle="Reset Magic Modules" strDescription="The controller will briefly disconnect while both modules are reinitialised." strOKButtonText="Reset" onOK={() => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected.")} />)}>{pendingAction === "modules" ? <Spinner /> : "Reset"}</StackedAction>
       </PanelSection>
     </>}
 
@@ -622,11 +827,11 @@ const Content: FC = () => {
       <PanelSection title="Smart Amp Tuning">
         <PanelSectionRow><ToggleField label="AYANEO Speaker Tuning" description={state.audio_fix_supported ? "Load the official AYANEO 3 profile for both CS35L41 smart amplifiers." : "The required SteamOS firmware or CS35L41 controls are unavailable."} checked={state.audio_fix_enabled} disabled={busy || !state.audio_fix_supported} onChange={enabled => void run("audio", () => setAudioFix(enabled), "Audio fix failed", enabled ? "AYANEO speaker tuning enabled." : "Generic audio profile restored.")} /></PanelSectionRow>
         <PanelSectionRow><Field label={state.audio_fix_installed ? state.audio_profile : state.audio_profile === "Pending" ? "Applying..." : "Not applied"} description={state.audio_fix_error || (state.audio_fix_installed ? "Both speaker DSPs use the device-specific v0.65 tuning." : "SteamOS is using the generic Cirrus speaker profile.")} /></PanelSectionRow>
-        <PanelSectionRow><ButtonItem label="Reapply Audio Fix" description="Reload the tuning if audio was reset by the system." layout="inline" disabled={busy || !state.audio_fix_enabled || !state.audio_fix_supported} onClick={() => void run("audio", () => reapplyAudioFix(), "Audio fix failed", "AYANEO speaker tuning reapplied.")}>{pendingAction === "audio" ? <Spinner /> : "Apply"}</ButtonItem></PanelSectionRow>
+        <StackedAction title="Reapply Audio Fix" description="Reload the tuning if audio was reset by the system." disabled={busy || !state.audio_fix_enabled || !state.audio_fix_supported} onClick={() => void run("audio", () => reapplyAudioFix(), "Audio fix failed", "AYANEO speaker tuning reapplied.")}>{pendingAction === "audio" ? <Spinner /> : "Apply"}</StackedAction>
       </PanelSection>
       {state.audio_calibration_available && <PanelSection title="Speaker Calibration">
         <PanelSectionRow><Field label={state.audio_calibration_last || "Factory calibration active"} description="Measures both speakers, validates the result and saves it to EFI. The previous calibration is backed up first." /></PanelSectionRow>
-        <PanelSectionRow><ButtonItem label="Recalibrate Audio" description="Requires a quiet room and a clear surface." layout="inline" disabled={busy} onClick={() => showModal(<ConfirmModal strTitle="Recalibrate Speakers" strDescription="Place the console on a clear surface in a quiet room. A calibration signal will play and the result will be written to EFI." strOKButtonText="Recalibrate" bDestructiveWarning onOK={() => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it.")} />)}>{pendingAction === "audio" ? <Spinner /> : "Start"}</ButtonItem></PanelSectionRow>
+        <StackedAction title="Recalibrate Audio" description="Requires a quiet room and a clear surface." disabled={busy} onClick={() => openModal(<ConfirmModal strTitle="Recalibrate Speakers" strDescription="Place the console on a clear surface in a quiet room. A calibration signal will play and the result will be written to EFI." strOKButtonText="Recalibrate" bDestructiveWarning onOK={() => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it.")} />)}>{pendingAction === "audio" ? <Spinner /> : "Start"}</StackedAction>
       </PanelSection>}
     </>}
 
@@ -642,7 +847,15 @@ const Content: FC = () => {
       <PanelSectionRow><Field label="Restart required after changing" description="Restart Game Mode manually so gamescope reloads the display definition." /></PanelSectionRow>
     </PanelSection>}
 
-    {status && <PanelSection title="Status"><PanelSectionRow><Field label={status.startsWith("Error:") ? "Action failed" : "Done"} description={status.replace(/^Error:\s*/, "")} /></PanelSectionRow></PanelSection>}
+    {activeSection === "about" && <>
+      <PanelSection title="AYANEO 3 Companion">
+        <PanelSectionRow><Field label={`Version ${state.version}`} description="Native AYANEO 3 hardware controls for Decky Loader." /></PanelSectionRow>
+        <PanelSectionRow><Field label="Rayek" description="BSD-3-Clause open-source plugin." /></PanelSectionRow>
+      </PanelSection>
+      <UpdateSection initialVersion={state.version} />
+    </>}
+
+    {status && activeSection !== "tdp" && <PanelSection title="Status"><PanelSectionRow><Field label={status.startsWith("Error:") ? "Action failed" : "Done"} description={status.replace(/^Error:\s*/, "")} /></PanelSectionRow></PanelSection>}
   </PageShell>;
 };
 

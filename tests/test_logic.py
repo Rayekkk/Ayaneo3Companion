@@ -1,4 +1,4 @@
-import asyncio, hashlib, os, struct, sys, tempfile, unittest
+import asyncio, hashlib, json, os, struct, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
@@ -66,12 +66,13 @@ class LogicTests(unittest.TestCase):
             path = Path(directory) / "io"
             path.write_bytes(bytes(256))
             old_path = main._ec_io_path
-            old_ensure = main.ensure_charge_control
+            old_ensure = main.ensure_charge_bypass_control
             old_supported = main.supported_device
             try:
                 main._ec_io_path = lambda: path
-                main.ensure_charge_control = lambda: path
+                main.ensure_charge_bypass_control = lambda: path
                 main.supported_device = lambda: True
+                self.assertFalse(main.read_charge_bypass())
                 main.write_charge_bypass(True)
                 self.assertTrue(main.read_charge_bypass())
                 self.assertEqual(path.read_bytes()[main.EC_CHARGE_REGISTER], main.EC_CHARGE_INHIBIT)
@@ -80,14 +81,66 @@ class LogicTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes()[main.EC_CHARGE_REGISTER], main.EC_CHARGE_AUTO)
             finally:
                 main._ec_io_path = old_path
-                main.ensure_charge_control = old_ensure
+                main.ensure_charge_bypass_control = old_ensure
                 main.supported_device = old_supported
+
+    def test_charge_bypass_prefers_kernel_charge_behaviour(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            battery = root / "BAT0"
+            battery.mkdir()
+            (battery / "type").write_text("Battery\n")
+            behaviour = battery / "charge_behaviour"
+            behaviour.write_text("[auto] inhibit-charge\n")
+            with mock.patch.object(main, "POWER_SUPPLY_ROOT", root), \
+                 mock.patch.object(main, "supported_device", return_value=True), \
+                 mock.patch.object(main, "_ec_io_path") as ec_path:
+                self.assertEqual(main.ensure_charge_bypass_control(), behaviour)
+                self.assertFalse(main.read_charge_bypass())
+                main.write_charge_bypass(True)
+                self.assertTrue(main.read_charge_bypass())
+                main.write_charge_bypass(False)
+                self.assertFalse(main.read_charge_bypass())
+            ec_path.assert_not_called()
 
     def test_tdp_clamps_and_orders(self):
         self.assertEqual(main.normalize_tdp({"spl": 2, "sppt": 1, "fppt": 99}), {"spl": 5, "sppt": 5, "fppt": 37})
         self.assertEqual(main.normalize_tdp({"spl": 35, "sppt": 99, "fppt": 99}), {"spl": 35, "sppt": 37, "fppt": 37})
         self.assertEqual(main.PRESETS["Minimum"], {"spl": 5, "sppt": 8, "fppt": 10})
         self.assertEqual(main.PRESETS["Max"], {"spl": 32, "sppt": 35, "fppt": 37})
+        self.assertEqual(main.tdp_preset(main.PRESETS["Balanced"]), "Balanced")
+        self.assertEqual(main.tdp_preset(main.PRESETS["Balanced"], "Custom"), "Custom")
+
+    def test_custom_game_profile_persists_exact_limits_and_is_reapplied(self):
+        custom = {"spl": 17, "sppt": 23, "fppt": 31}
+        previous_settings = dict(main.settings.data)
+        previous_active_app = main.Plugin._active_app
+        previous_state = main.Plugin._state
+        main.settings.data = {"tdp": dict(main.DEFAULT_TDP)}
+        main.Plugin._active_app = "480"
+        main.Plugin._state = {"tdp": dict(main.DEFAULT_TDP)}
+        try:
+            with mock.patch.object(main, "apply_tdp") as apply, \
+                 mock.patch.object(main, "supported_device", return_value=True), \
+                 mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={"tdp": custom})):
+                plugin = main.Plugin()
+                asyncio.run(plugin.set_game_profile("480", custom, "Custom"))
+                apply.assert_called_once_with(custom)
+                self.assertEqual(main.settings.data["game_profiles"]["480"], {**custom, "preset": "Custom"})
+                self.assertEqual(asyncio.run(plugin.get_game_profile("480")), {
+                    "exists": True, "profile": custom, "preset": "Custom",
+                })
+
+                apply.reset_mock()
+                main.Plugin._active_app = ""
+                asyncio.run(plugin.set_active_app("480"))
+                apply.assert_called_once_with(custom)
+                self.assertEqual(main.Plugin._state["tdp"], custom)
+                self.assertEqual(main.Plugin._state["tdp_preset"], "Custom")
+        finally:
+            main.settings.data = previous_settings
+            main.Plugin._active_app = previous_active_app
+            main.Plugin._state = previous_state
 
     def test_controller_normalization(self):
         value = main.normalize_controller({"vibration": "wat", "ff_gain": 999, "rgb_mode": "wat", "color": "oops", "brightness": 999})
@@ -96,6 +149,7 @@ class LogicTests(unittest.TestCase):
     def test_ff_gain_event(self):
         writes = []
         with mock.patch.object(main, "_rumble_event_node", return_value="/dev/input/event5"), \
+             mock.patch.object(main, "supported_device", return_value=True), \
              mock.patch.object(main.os, "open", return_value=7), \
              mock.patch.object(main.os, "write", side_effect=lambda _fd, data: writes.append(data) or len(data)), \
              mock.patch.object(main.os, "close"), \
@@ -251,6 +305,7 @@ class LogicTests(unittest.TestCase):
             return bytes(64)
 
         with mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
+             mock.patch.object(main, "supported_device", return_value=True), \
              mock.patch.object(main.os, "open", return_value=7), \
              mock.patch.object(main.os, "close"), \
              mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
@@ -435,5 +490,249 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(response[17], 0)
         self.assertEqual(response[18], 1)
         self.assertTrue(main.controller_requires_custom(response))
+
+    def test_unsupported_device_blocks_privileged_hardware_writes(self):
+        controller = dict(main.DEFAULT_CONTROLLER)
+        operations = (
+            (main._write_ec_register, (0x10, 0x01)),
+            (main.apply_tdp, (main.DEFAULT_TDP,)),
+            (main.apply_controller, (controller,)),
+            (main.set_vibration_gain, (50,)),
+            (main.play_vibration_test, ("high", 100)),
+            (main.write_charge_bypass, (True,)),
+            (main.program_rear_buttons, (True, controller)),
+            (main.install_display_script, ()),
+            (main.install_button_fix, ()),
+            (main.apply_audio_fix, ()),
+            (main.remove_audio_fix, ()),
+            (main.perform_audio_recalibration, ()),
+        )
+        with mock.patch.object(main, "supported_device", return_value=False), \
+             mock.patch.object(main.subprocess, "run") as run:
+            for operation, arguments in operations:
+                with self.subTest(operation=operation.__name__):
+                    with self.assertRaises(RuntimeError):
+                        operation(*arguments)
+        run.assert_not_called()
+
+    def test_unload_does_not_probe_or_write_controller_after_device_mismatch(self):
+        previous_state = main.Plugin._state
+        task_names = (
+            "_audio_task", "_restore_task", "_edid_task", "_ac_task",
+            "_module_task", "_tm_guard_task",
+        )
+        previous_tasks = {name: getattr(main.Plugin, name) for name in task_names}
+        main.Plugin._state = {"supported": True}
+        for name in task_names:
+            setattr(main.Plugin, name, None)
+        try:
+            with mock.patch.object(main, "supported_device", return_value=False), \
+                 mock.patch.object(main, "controller_powered") as powered, \
+                 mock.patch.object(main, "set_controller_power") as set_power:
+                asyncio.run(main.Plugin()._unload())
+            powered.assert_not_called()
+            set_power.assert_not_called()
+        finally:
+            main.Plugin._state = previous_state
+            for name, value in previous_tasks.items():
+                setattr(main.Plugin, name, value)
+
+    def test_unsupported_state_snapshot_skips_ayaneo_hardware_probes(self):
+        previous_state = main.Plugin._state
+        main.Plugin._state = {
+            "supported": False,
+            "tdp": dict(main.DEFAULT_TDP),
+            "controller": dict(main.DEFAULT_CONTROLLER),
+            "module_left": main._module_info("left"),
+            "module_right": main._module_info("right"),
+            "gpu_power_w": None,
+            "charge_bypass_supported": False,
+            "module_eject_supported": False,
+            "module_reset_supported": False,
+        }
+        try:
+            with mock.patch.object(main, "gpu_power_watts") as gpu, \
+                 mock.patch.object(main, "read_charge_bypass") as charge, \
+                 mock.patch.object(main, "module_presence") as modules:
+                snapshot = main.Plugin._snapshot()
+            self.assertFalse(snapshot["supported"])
+            gpu.assert_not_called()
+            charge.assert_not_called()
+            modules.assert_not_called()
+        finally:
+            main.Plugin._state = previous_state
+
+    def test_display_definition_upgrades_owned_legacy_file_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.lua"
+            target = root / "target.lua"
+            current = main.LUA_SOURCE.read_bytes()
+            legacy = current.replace(main.DISPLAY_SCRIPT_MARKER, b"", 1)
+            self.assertIn(hashlib.sha256(legacy).hexdigest(), main.LEGACY_DISPLAY_SCRIPT_SHA256)
+            source.write_bytes(current)
+            target.write_bytes(legacy)
+            with mock.patch.object(main, "LUA_SOURCE", source), \
+                 mock.patch.object(main, "LUA_TARGET", target), \
+                 mock.patch.object(main, "supported_device", return_value=True):
+                self.assertTrue(main._display_script_owned(target))
+                main.install_display_script()
+                self.assertEqual(target.read_bytes(), current)
+                target.write_bytes(b"-- belongs to somebody else\n")
+                with self.assertRaises(RuntimeError):
+                    main.install_display_script()
+                self.assertEqual(target.read_bytes(), b"-- belongs to somebody else\n")
+
+    def test_input_map_upgrades_owned_legacy_file_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.yaml"
+            target = root / "ayaneo_type7.yaml"
+            current = main.INPUT_MAP_SOURCE.read_bytes()
+            legacy = current.replace(main.INPUT_MAP_MARKER, b"", 1)
+            self.assertIn(hashlib.sha256(legacy).hexdigest(), main.LEGACY_INPUT_MAP_SHA256)
+            source.write_bytes(current)
+            target.write_bytes(legacy)
+            legacy_device = root / "legacy-device.yaml"
+            legacy_map_a = root / "legacy-a.yaml"
+            legacy_map_b = root / "legacy-b.yaml"
+            with mock.patch.object(main, "INPUT_MAP_SOURCE", source), \
+                 mock.patch.object(main, "INPUT_MAP_TARGET", target), \
+                 mock.patch.object(main, "LEGACY_INPUT_DEVICE_TARGET", legacy_device), \
+                 mock.patch.object(main, "LEGACY_INPUT_MAP_TARGETS", (legacy_map_a, legacy_map_b)), \
+                 mock.patch.object(main, "supported_device", return_value=True):
+                self.assertTrue(main.button_map_owned(target))
+                main.install_button_fix()
+                self.assertEqual(target.read_bytes(), current)
+                target.write_bytes(b"name: External aya7 override\n")
+                with self.assertRaises(RuntimeError):
+                    main.install_button_fix()
+                self.assertEqual(target.read_bytes(), b"name: External aya7 override\n")
+
+    def test_audio_idle_session_resumes_sinks_when_pipewire_restart_fails(self):
+        def services(running):
+            if running:
+                raise RuntimeError("restart failed")
+
+        with mock.patch.object(main, "_audio_playback_active", side_effect=[True, True]), \
+             mock.patch.object(main, "_suspend_audio_outputs", return_value=["sink"]), \
+             mock.patch.object(main, "_wait_for_audio_idle"), \
+             mock.patch.object(main, "_set_audio_services", side_effect=services), \
+             mock.patch.object(main, "_resume_audio_outputs") as resume:
+            with self.assertRaisesRegex(RuntimeError, "restart failed"):
+                with main._audio_idle_session(1):
+                    pass
+        resume.assert_called_once_with(["sink"])
+
+    def test_audio_firmware_type_recovers_both_dsps_after_partial_failure(self):
+        loads = []
+        with mock.patch.object(main, "_set_audio_firmware_load",
+                               side_effect=lambda _card, control, enabled: loads.append((control, enabled))), \
+             mock.patch.object(main, "_set_audio_control", side_effect=RuntimeError("type failed")), \
+             mock.patch.object(main.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "type failed"):
+                main._set_audio_firmware_type(1, 2)
+        self.assertEqual(loads, [
+            (main.AUDIO_FIRMWARE_CONTROLS[0], False),
+            (main.AUDIO_FIRMWARE_CONTROLS[1], False),
+            (main.AUDIO_FIRMWARE_CONTROLS[0], True),
+            (main.AUDIO_FIRMWARE_CONTROLS[1], True),
+        ])
+
+    def test_tdp_game_change_cannot_be_overwritten_by_delayed_profile_write(self):
+        profile_a = {"spl": 17, "sppt": 22, "fppt": 29}
+        profile_b = {"spl": 30, "sppt": 32, "fppt": 35, "preset": "Performance"}
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        previous_settings = dict(main.settings.data)
+        previous_active_app = main.Plugin._active_app
+        previous_state = main.Plugin._state
+        main.settings.data = {
+            "tdp": dict(main.DEFAULT_TDP),
+            "tdp_preset": "Balanced",
+            "game_profiles": {"200": profile_b},
+        }
+        main.Plugin._active_app = "100"
+        main.Plugin._state = {"tdp": dict(main.DEFAULT_TDP), "tdp_preset": "Balanced"}
+
+        def apply(value):
+            calls.append(dict(value))
+            if value["spl"] == profile_a["spl"]:
+                started.set()
+                if not release.wait(2):
+                    raise RuntimeError("test synchronization timed out")
+
+        async def scenario():
+            first = asyncio.create_task(
+                main.Plugin().set_game_profile("100", profile_a, "Custom"))
+            self.assertTrue(await asyncio.to_thread(started.wait, 2))
+            second = asyncio.create_task(main.Plugin().set_active_app("200"))
+            await asyncio.sleep(0.05)
+            self.assertFalse(second.done())
+            release.set()
+            await asyncio.gather(first, second)
+
+        try:
+            with mock.patch.object(main, "supported_device", return_value=True), \
+                 mock.patch.object(main, "apply_tdp", side_effect=apply), \
+                 mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})):
+                asyncio.run(scenario())
+            self.assertEqual(calls, [profile_a, {"spl": 30, "sppt": 32, "fppt": 35}])
+            self.assertEqual(main.Plugin._active_app, "200")
+            self.assertEqual(main.Plugin._state["tdp"], {"spl": 30, "sppt": 32, "fppt": 35})
+            self.assertEqual(main.Plugin._state["tdp_preset"], "Performance")
+        finally:
+            release.set()
+            main.settings.data = previous_settings
+            main.Plugin._active_app = previous_active_app
+            main.Plugin._state = previous_state
+
+    def test_updater_accepts_only_the_exact_release_asset(self):
+        class Response:
+            def __init__(self, payload):
+                self.payload = json.dumps(payload).encode()
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, *_): return self.payload
+            def geturl(self): return main.GITHUB_RELEASES_URL
+            def close(self): pass
+
+        release = {
+            "tag_name": "v1.1.0",
+            "assets": [{
+                "name": "Ayaneo3Companion-1.1.0.zip",
+                "browser_download_url": (
+                    "https://github.com/Rayekkk/Ayaneo3Companion/releases/download/"
+                    "v1.1.0/Ayaneo3Companion-1.1.0.zip"),
+            }],
+        }
+        with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
+            info = main.updater.check()
+        self.assertEqual(info["current_version"], "1.0.0")
+        self.assertEqual(info["latest_version"], "1.1.0")
+        self.assertTrue(info["update_available"])
+        self.assertEqual(info["asset_name"], "Ayaneo3Companion-1.1.0.zip")
+
+        release["assets"][0]["name"] = "source.zip"
+        with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
+            info = main.updater.check()
+        self.assertIn("Ayaneo3Companion-1.1.0.zip", info["error"])
+
+    def test_release_version_and_package_inventory_agree(self):
+        root = main.PLUGIN_DIR
+        manifest = json.loads((root / "plugin.json").read_text())
+        package = json.loads((root / "package.json").read_text())
+        lock = json.loads((root / "package-lock.json").read_text())
+        self.assertEqual(
+            {manifest["version"], package["version"], lock["version"],
+             lock["packages"][""]["version"]},
+            {"1.0.0"},
+        )
+        package_script = (root / "scripts" / "package.mjs").read_text()
+        self.assertIn('"lego_updater.py"', package_script)
+        self.assertIn("THIRD_PARTY_LICENSES", package_script)
+        self.assertIn("THIRD_PARTY_SOURCES", package_script)
+        self.assertIn("Decky Loader API 1.1.3", (root / "NOTICE").read_text())
 
 if __name__ == "__main__": unittest.main()
