@@ -1,8 +1,9 @@
 <div align="center">
 
-# AYANEO 3 Companion
+<img src="https://raw.githubusercontent.com/Rayekkk/Ayaneo3Companion/main/Ayaneo3Companion.png" alt="AYANEO 3 Companion" width="760">
 
-[![Build](https://img.shields.io/github/actions/workflow/status/Rayekkk/Ayaneo3Companion/build.yml?branch=main&style=for-the-badge&label=build&labelColor=141417)](https://github.com/Rayekkk/Ayaneo3Companion/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/Rayekkk/Ayaneo3Companion?style=for-the-badge&label=release&color=C2410C&labelColor=141417)](https://github.com/Rayekkk/Ayaneo3Companion/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Rayekkk/Ayaneo3Companion/total?style=for-the-badge&label=downloads&color=15803D&labelColor=141417)](https://github.com/Rayekkk/Ayaneo3Companion/releases)
 [![Device](https://img.shields.io/badge/device-AYANEO_3_OLED-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/github/license/Rayekkk/Ayaneo3Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
@@ -10,7 +11,7 @@
 **The missing AYANEO 3 hardware controls in one Steam overlay panel.**
 TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lighting, rear buttons and OLED display support.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Building](#building)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Development](#development)
 
 </div>
 
@@ -36,6 +37,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lig
 | **OLED definition** | Gamma 2.2 gamescope definition with 60/90/120/144 Hz modes |
 | **HDR metadata** | Sets gamescope's EDID copy to AYANEO's advertised 800 nit maximum |
 | **Persistent settings** | Restores settings after startup, follows games with the QAM closed and re-applies TDP after charger changes |
+| **Updater** | Shows the installed version and downloads the exact matching GitHub release ZIP from the About page |
 
 ---
 
@@ -51,19 +53,52 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lig
 The controller protocol and display identity were verified on retail hardware.
 Other AYANEO models are deliberately rejected by the device checks.
 
+> [!NOTE]
+> AYANEO 3 Companion is deliberately hardware-specific. It has been tested on
+> both AYANEO 3 OLED processor variants, but it does not attempt to control other
+> AYANEO handhelds that happen to expose similar interfaces.
+
 ---
 
 ## Installation
 
-No release archive is published yet. Build the plugin from source, then install
-the generated zip through **Decky → Settings → Developer → Install Plugin from ZIP**.
+**1.** Install [Decky Loader](https://decky.xyz) if you haven't already.
+**2.** Download `Ayaneo3Companion-x.x.x.zip` from the [Releases](https://github.com/Rayekkk/Ayaneo3Companion/releases) page.
+**3.** In Gaming Mode, open the **Quick Access Menu**.
+**4.** Open the Decky menu, scroll to the bottom, then **Developer → Install Plugin from ZIP**.
+**5.** Select the downloaded zip.
+
+<details>
+<summary><b>Building from source</b></summary>
+
+<br>
+
+Requires Node.js 18+ and Python 3.10+.
+
+```bash
+git clone https://github.com/Rayekkk/Ayaneo3Companion
+cd Ayaneo3Companion
+
+npm install
+npm run typecheck
+npm run build
+python -m unittest discover -s tests -v
+npm run package    # produces Ayaneo3Companion-<version>.zip
+```
+
+Then install the resulting zip through Decky's **Install Plugin from ZIP**, which is the
+supported path and avoids permission problems.
+
+</details>
+
+### Fresh installation without QAM
 
 On a fresh installation where the QAM button is not available yet, copy
 `bootstrap.sh` and the plugin ZIP to the console, then run:
 
 ```bash
 chmod +x bootstrap.sh
-./bootstrap.sh Ayaneo3Companion-0.7.0.zip
+./bootstrap.sh Ayaneo3Companion-1.0.0.zip
 ```
 
 The bootstrap installer checks the device, installs the plugin directly and
@@ -74,6 +109,8 @@ executable and double-click it.
 
 The display and button sections install persistent system definitions. Restart
 Game Mode when the panel asks for it.
+
+---
 
 ## Usage
 
@@ -87,7 +124,8 @@ overview. Closing and reopening QAM always returns to this overview.
   10% steps or play a short test.
 - Open **RGB** to select an animation and tune Hue, Saturation and Brightness.
 - Open **Battery** to enable or disable charge bypass. The displayed state is
-  read back from the embedded controller rather than inferred from ACPI.
+  read back from the kernel charge-control interface when available, or directly
+  from the embedded controller on older kernels; it is never inferred from ACPI.
 - Open **Magic Modules** to identify the installed module type and layout,
   eject either side or both, or run Quick Reset. Insert both modules after
   replacement so the plugin can power and identify the controller again.
@@ -101,6 +139,8 @@ overview. Closing and reopening QAM always returns to this overview.
   TM Guard is enabled by default; disable it temporarily when deliberately
   selecting another hardware mode with the physical TM button.
 - Open **OLED display** to install the gamescope definition and verify its HDR metadata.
+- Open **About** at the bottom of the overview to see the installed version,
+  check GitHub releases and download a newer plugin ZIP when one is available.
 
 ## How it works
 
@@ -109,9 +149,10 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
 
 - On Bazzite, TDP is written through `org.shadowblip.PowerStation`. On SteamOS,
   the plugin downloads the pinned RyzenAdj build and writes SPL/SPPT/FPPT directly.
-- Charge bypass uses the AYANEO 3 EC charge-control register exposed through
-  the kernel's signed `ec_sys` module. The plugin verifies every write and
-  restores automatic charging before uninstalling.
+- Charge bypass prefers the upstream AYANEO `charge_behaviour` kernel ABI. On
+  older SteamOS kernels it falls back to the same AYANEO 3 EC register used by
+  Linux 6.19's `ayaneo-ec` driver. The plugin verifies every write and restores
+  automatic charging before uninstalling.
 - Magic Module identity and upper/lower layout come from AYANEO's vendor HID status,
   with the same known-module table used by HHD. Release uses the vendor eject
   command; after the latch motors finish, the plugin power-cycles the controller
@@ -143,13 +184,13 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
   normalizes only the CTA MaxCLL byte to AYANEO's advertised 800 nit maximum if
   the bridge or another tool publishes a different value.
 
-## Building
+---
 
-Requires Node.js 18+ and Python 3.10+.
+## Development
+
+The complete verification sequence is:
 
 ```bash
-git clone https://github.com/Rayekkk/Ayaneo3Companion
-cd Ayaneo3Companion
 npm ci
 npm run typecheck
 npm run build
@@ -157,6 +198,12 @@ python -m unittest discover -s tests -v
 npm run package
 ```
 
+The backend tests run without AYANEO hardware. Device-specific paths are isolated
+behind hardware checks and are also exercised on both retail processor variants
+before release.
+
+---
+
 ## License
 
-BSD-3-Clause. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+BSD 3-Clause. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
