@@ -2,6 +2,33 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## [1.0.1] - 2026-08-24
+
+### Added
+
+- A persistent CPU Boost switch on the TDP page, using Linux CPUFreq's
+  kernel-wide boost control and restoring the saved choice after startup.
+
+### Fixed
+
+- AYANEO vendor-HID commands retry the complete transaction after an unanswered
+  request instead of repeatedly waiting on a command that was already lost.
+- A timed-out Magic Module eject leaves controller power enabled, preventing an
+  incomplete latch movement from being interrupted by the power cut.
+- Detect the proposed kernel `hid-ayaneo` sysfs interface and block competing
+  direct-HID commands instead of racing the kernel driver.
+- Keep a successfully changed OLED display definition enabled when gamescope's
+  temporary EDID file cannot be normalized during the same RPC. The background
+  monitor retries EDID normalization without reporting the switch as failed.
+- Move display-definition removal off Decky's event loop and refuse to remove
+  definitions not owned by AYANEO 3 Companion.
+
+### Internal
+
+- Backend tests up to 55 from 48, covering CPU Boost persistence, complete HID
+  transaction retries, kernel-driver arbitration, safe Magic Module eject
+  timeouts and OLED display-definition ownership.
+
 ## 1.0.0 - 2026-08-23
 
 ### Added

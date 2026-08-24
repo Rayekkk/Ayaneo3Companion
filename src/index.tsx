@@ -11,7 +11,7 @@ type Vibration = "off" | "low" | "medium" | "high";
 type RgbMode = "off" | "solid" | "pulse" | "rainbow";
 type Preset = "Minimum" | "Low power" | "Balanced" | "Performance" | "Max" | "Custom";
 type SectionKey = "tdp" | "vibration" | "rgb" | "battery" | "modules" | "audio" | "buttons" | "screen" | "about";
-type ActionKey = "tdp" | "profile" | "vibration" | "battery" | "modules" | "audio" | "buttons" | "screen";
+type ActionKey = "tdp" | "profile" | "cpu_boost" | "vibration" | "battery" | "modules" | "audio" | "buttons" | "screen";
 interface Tdp { spl: number; sppt: number; fppt: number }
 interface Tuning { spl: number; spptOff: number; fpptOff: number }
 interface Controller { vibration: Vibration; ff_gain: number; rgb_mode: RgbMode; color: string; brightness: number }
@@ -21,7 +21,7 @@ interface GameProfile { exists: boolean; profile: Tdp; preset?: Preset }
 interface ModuleInfo { code: number | null; label: string; layout: string; status: string; connected: boolean }
 interface BatteryStatus { available: boolean; percent: number | null; status: string; seconds_to_full: number | null; power_w: number | null; source: "UPower" | "sysfs" | "none" }
 interface UpdateInfo { current_version?: string; latest_version?: string; update_available?: boolean; download_url?: string | null; asset_name?: string | null; error?: string }
-interface State { supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
+interface State { supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; cpu_boost_supported: boolean; cpu_boost: boolean; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
 
 const getState = callable<[], State>("get_state");
 const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
@@ -29,6 +29,7 @@ const getVersion = callable<[], { version: string }>("get_version");
 const checkForUpdates = callable<[], UpdateInfo>("check_for_updates");
 const performUpdate = callable<[], { success: boolean; path?: string; error?: string }>("perform_update");
 const setTdp = callable<[Tdp, Preset], State>("set_tdp");
+const setCpuBoost = callable<[boolean], State>("set_cpu_boost");
 const getGameProfile = callable<[string], GameProfile>("get_game_profile");
 const setGameProfile = callable<[string, Tdp, Preset], State>("set_game_profile");
 const deleteGameProfile = callable<[string], State>("delete_game_profile");
@@ -509,6 +510,21 @@ const Content: FC = () => {
     const nextFppt = clamp(value, 0, maxFpptOffset);
     setCustomTdp(absolute(normalise({ ...tuning, fpptOff: nextFppt, spptOff: Math.min(tuning.spptOff, nextFppt) })));
   };
+  const toggleCpuBoost = async (enabled: boolean) => {
+    if (pendingActionRef.current) return;
+    pendingActionRef.current = "cpu_boost";
+    setPendingAction("cpu_boost");
+    try {
+      setState(await setCpuBoost(enabled));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toaster.toast({ title: "CPU Boost failed", body: message });
+      await refresh();
+    } finally {
+      pendingActionRef.current = null;
+      setPendingAction(null);
+    }
+  };
   const choosePreset = async (name: Preset) => {
     if (pendingActionRef.current) return;
     const previousPreset = preset;
@@ -711,6 +727,15 @@ const Content: FC = () => {
     {activeSection === "tdp" && <>
       <PanelSection title="Current TDP">
         <PanelSectionRow><Field label={`${tdp.spl} / ${tdp.sppt} / ${tdp.fppt} W`} description={`SPL / SPPT / FPPT · ${state.gpu_power_w == null ? "power unavailable" : `${state.gpu_power_w.toFixed(1)} W currently`} · ${state.tdp_backend}`} /></PanelSectionRow>
+      </PanelSection>
+      <PanelSection title="CPU">
+        <PanelSectionRow><ToggleField
+          label="CPU Boost"
+          description={state.cpu_boost_supported ? "Allow the CPU to boost above its base frequency when performance and power limits permit." : "CPU Boost control is unavailable on this kernel."}
+          checked={state.cpu_boost}
+          disabled={busy || !state.cpu_boost_supported}
+          onChange={enabled => void toggleCpuBoost(enabled)}
+        /></PanelSectionRow>
       </PanelSection>
       <PanelSection title="Game Profile">
         <PanelSectionRow><ToggleField

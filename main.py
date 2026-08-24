@@ -58,6 +58,7 @@ RYZENADJ_LIB = BIN_DIR / "libryzenadj.so"
 RYZENADJ_URL = "https://github.com/FlyGoat/RyzenAdj/releases/download/v0.19.0/ryzenadj-manylinux_2_28-x86_64.tar.gz"
 RYZENADJ_ARCHIVE_SHA256 = "d04547f111c6af3e40d3f210468adb884561618ddade0b640d90e50c88d03444"
 RYZENADJ_BINARY_SHA256 = "18a61170efec95d2366355b9dd5c75a961a9e8008d42e3471f4f414a6faec471"
+CPU_BOOST_PATH = Path("/sys/devices/system/cpu/cpufreq/boost")
 ALLOWED_DOWNLOAD_HOSTS = frozenset({
     "github.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com",
 })
@@ -202,6 +203,8 @@ MODULE_LAYOUTS = {
 MODULE_INFO_LEFT_INDEX = 32
 MODULE_INFO_RIGHT_INDEX = 33
 TM_GUARD_INTERVAL = 0.5
+HID_COMMAND_ATTEMPTS = 3
+HID_AYANEO_DRIVER_NAMES = frozenset({"hid-ayaneo", "hid_ayaneo"})
 
 VIBRATION_VALUES = {"off": 0x04, "low": 0x01, "medium": 0x02, "high": 0x03}
 RGB_MODES = {"off": 0xFF, "solid": 0x01, "pulse": 0x02, "rainbow": 0x03}
@@ -230,6 +233,7 @@ settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGI
 _lock = threading.RLock()
 _tdp_apply_lock = threading.Lock()
 _tdp_mutation_lock = threading.RLock()
+_cpu_boost_lock = threading.Lock()
 _ec_lock = threading.Lock()
 _controller_apply_lock = threading.Lock()
 _audio_apply_lock = threading.Lock()
@@ -1330,23 +1334,54 @@ def controller_command(config: dict, eject: str | None = None, reset: bool = Fal
     return _checksum(command)
 
 
+def _hid_driver_name(device_path: Path) -> str:
+    try:
+        return (device_path / "driver").resolve(strict=True).name.lower()
+    except OSError:
+        return ""
+
+
+def _kernel_hid_ayaneo_active(device_path: Path) -> bool:
+    """Detect the kernel driver before issuing unsynchronized raw commands."""
+    if _hid_driver_name(device_path) in HID_AYANEO_DRIVER_NAMES:
+        return True
+    # Keep detection compatible with development versions whose driver name may
+    # still change while retaining the proposed sysfs ABI.
+    return all((device_path / name).exists()
+               for name in ("module_left", "module_right", "eject", "reset"))
+
+
 def _vendor_hidraw() -> str:
     for sys_path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        device_path = Path(sys_path).resolve() / "device"
         try:
-            descriptor = (Path(sys_path).resolve() / "device" / "report_descriptor").read_bytes()
-            uevent = (Path(sys_path).resolve() / "device" / "uevent").read_text()
+            descriptor = (device_path / "report_descriptor").read_bytes()
+            uevent = (device_path / "uevent").read_text()
         except OSError:
             continue
         if descriptor.startswith(b"\x06\x00\xff\x09\x01") and "HID_ID=0003:00001C4F:00000002" in uevent:
+            if _kernel_hid_ayaneo_active(device_path):
+                raise RuntimeError(
+                    "kernel hid-ayaneo is active; direct controller commands are disabled "
+                    "to prevent conflicting HID transactions"
+                )
             return "/dev/" + Path(sys_path).name
     raise RuntimeError("AYANEO vendor HID interface not found")
 
 
 def _hid_exchange(fd, command: bytes, timeout=0.4) -> bytes:
-    os.write(fd, command)
-    for _ in range(3):
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if ready:
+    """Send a command and retry the complete transaction if it is unanswered."""
+    for _ in range(HID_COMMAND_ATTEMPTS):
+        if os.write(fd, command) != len(command):
+            continue
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                break
             response = os.read(fd, 64)
             if len(response) > 3 and response[3] == command[4]:
                 return response
@@ -1490,11 +1525,17 @@ def eject_controller_modules(side: str, config: dict) -> None:
                 raise RuntimeError("controller rejected the eject command")
             # Match HHD's module-release verification before cutting controller
             # power so the stepper motor can finish moving the latch.
+            completed = False
             for _ in range(20):
-                response = _hid_exchange(fd, AYA_CHECK)
                 time.sleep(0.4)
+                response = _hid_exchange(fd, AYA_CHECK)
                 if len(response) > 19 and response[19] & ~0x11 == 0:
+                    completed = True
                     break
+            if not completed:
+                raise TimeoutError(
+                    "Magic Module eject timed out; controller power was left on"
+                )
         finally:
             os.close(fd)
         remaining = 3.0 - (time.monotonic() - started)
@@ -1733,6 +1774,30 @@ def tdp_backend() -> str:
     return "PowerStation" if _powerstation_card() else "RyzenAdj"
 
 
+def read_cpu_boost() -> bool:
+    """Read the kernel-wide CPU frequency boost permission."""
+    try:
+        value = CPU_BOOST_PATH.read_text().strip()
+    except OSError as error:
+        raise RuntimeError("CPU Boost is unavailable on this kernel") from error
+    if value not in ("0", "1"):
+        raise RuntimeError(f"unexpected CPU Boost value: {value or 'empty'}")
+    return value == "1"
+
+
+def write_cpu_boost(enabled: bool) -> None:
+    """Set CPU Boost through CPUFreq's global sysfs control and verify it."""
+    require_supported_device("CPU Boost")
+    expected = bool(enabled)
+    with _cpu_boost_lock:
+        try:
+            CPU_BOOST_PATH.write_text("1" if expected else "0")
+        except OSError as error:
+            raise RuntimeError("could not change CPU Boost on this kernel") from error
+        if read_cpu_boost() != expected:
+            raise RuntimeError("kernel did not keep the requested CPU Boost state")
+
+
 def _apply_tdp_unlocked(config: dict) -> None:
     require_supported_device("TDP control")
     values = normalize_tdp(config)
@@ -1813,6 +1878,18 @@ def install_display_script() -> None:
     finally:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
+
+
+def remove_display_script() -> None:
+    """Remove only the display definition owned by this plugin."""
+    require_supported_device("display definition")
+    if LUA_TARGET.is_symlink():
+        raise RuntimeError("refusing to remove a symlinked gamescope definition")
+    if not LUA_TARGET.exists():
+        return
+    if not _display_script_owned(LUA_TARGET):
+        raise RuntimeError("another AYANEO 3 gamescope definition is installed")
+    LUA_TARGET.unlink()
 
 
 def _cta_luminance_code(nits: float) -> int:
@@ -1985,6 +2062,8 @@ class Plugin:
             # Never probe AYANEO-specific EC or HID registers merely because a
             # privileged Decky RPC was called on another machine.
             state["gpu_power_w"] = None
+            state["cpu_boost_supported"] = False
+            state["cpu_boost"] = False
             state["charge_bypass_supported"] = False
             state["module_eject_supported"] = False
             state["module_reset_supported"] = False
@@ -1993,6 +2072,11 @@ class Plugin:
         # outside the shared state lock so the monitor loops and RPC writes do
         # not stall behind the QAM's periodic refresh.
         state["gpu_power_w"] = gpu_power_watts()
+        try:
+            state["cpu_boost"] = read_cpu_boost()
+            state["cpu_boost_supported"] = True
+        except RuntimeError:
+            state["cpu_boost_supported"] = False
         state["screen_installed"] = _is_our_display_script(LUA_TARGET)
         try:
             edid = PUBLISHED_EDID.read_bytes()
@@ -2049,6 +2133,16 @@ class Plugin:
                     settings.commit()
 
         await asyncio.to_thread(mutate)
+        return await self.get_state()
+
+    async def set_cpu_boost(self, enabled):
+        value = enabled is True
+        await asyncio.to_thread(write_cpu_boost, value)
+        with _lock:
+            Plugin._state["cpu_boost"] = value
+            Plugin._state["cpu_boost_supported"] = True
+            settings.setSetting("cpu_boost", value)
+            settings.commit()
         return await self.get_state()
 
     async def get_game_profile(self, app_id):
@@ -2307,11 +2401,21 @@ class Plugin:
         return await self.get_state()
 
     async def set_screen_fix(self, enabled):
-        if enabled:
-            await asyncio.to_thread(install_display_script)
-            await asyncio.to_thread(patch_published_edid)
-        elif _display_script_owned(LUA_TARGET):
-            LUA_TARGET.unlink()
+        try:
+            if enabled:
+                await asyncio.to_thread(install_display_script)
+                try:
+                    await asyncio.to_thread(patch_published_edid)
+                except Exception as error:
+                    # The Lua definition is already installed. The EDID file is
+                    # recreated by gamescope and the monitor loop will retry it,
+                    # so a transient race here must not roll back the UI switch.
+                    decky.logger.warning(f"{LOG} initial EDID normalization deferred: {error}")
+            else:
+                await asyncio.to_thread(remove_display_script)
+        except Exception as error:
+            decky.logger.error(f"{LOG} display definition change failed: {error}")
+            raise
         return await self.get_state()
 
     async def _edid_loop(self):
@@ -2366,9 +2470,12 @@ class Plugin:
     async def _restore_hardware(self):
         """Reapply persisted volatile hardware settings once boot services settle."""
         saved_bypass = settings.getSetting("charge_bypass", None)
+        saved_cpu_boost = settings.getSetting("cpu_boost", None)
         pending = {"tdp", "controller"}
         if isinstance(saved_bypass, bool):
             pending.add("charge_bypass")
+        if isinstance(saved_cpu_boost, bool):
+            pending.add("cpu_boost")
         for delay in (1, 2, 4, 8):
             await asyncio.sleep(delay)
             with _lock:
@@ -2398,6 +2505,16 @@ class Plugin:
                     decky.logger.info(f"{LOG} restored charge bypass after startup")
                 except Exception as error:
                     decky.logger.warning(f"{LOG} charge bypass restore attempt failed: {error}")
+            if "cpu_boost" in pending:
+                try:
+                    await asyncio.to_thread(write_cpu_boost, saved_cpu_boost)
+                    with _lock:
+                        Plugin._state["cpu_boost"] = saved_cpu_boost
+                        Plugin._state["cpu_boost_supported"] = True
+                    pending.remove("cpu_boost")
+                    decky.logger.info(f"{LOG} restored CPU Boost after startup")
+                except Exception as error:
+                    decky.logger.warning(f"{LOG} CPU Boost restore attempt failed: {error}")
             if not pending:
                 return
         decky.logger.error(f"{LOG} could not restore after startup: {', '.join(sorted(pending))}")
@@ -2606,6 +2723,12 @@ class Plugin:
             charge_control = None
             charge_bypass = False
         saved_tdp = normalize_tdp(settings.getSetting("tdp", DEFAULT_TDP))
+        try:
+            cpu_boost = await asyncio.to_thread(read_cpu_boost) if is_supported else False
+            cpu_boost_supported = is_supported
+        except RuntimeError:
+            cpu_boost = False
+            cpu_boost_supported = False
         Plugin._state = {
             "supported": is_supported,
             "device": _dmi("product_name") or "unknown",
@@ -2614,6 +2737,8 @@ class Plugin:
             "tdp": saved_tdp,
             "tdp_preset": tdp_preset(saved_tdp, settings.getSetting("tdp_preset", None)),
             "presets": PRESETS,
+            "cpu_boost_supported": cpu_boost_supported,
+            "cpu_boost": cpu_boost,
             "controller": saved_controller,
             "screen_installed": screen_installed,
             "edid_patched": False,
@@ -2690,8 +2815,17 @@ class Plugin:
                 decky.logger.info(f"{LOG} restored automatic charging before uninstall")
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not restore charging before uninstall: {error}")
-        if _display_script_owned(LUA_TARGET):
-            LUA_TARGET.unlink()
+        if is_supported and settings.getSetting("cpu_boost", True) is False:
+            try:
+                await asyncio.to_thread(write_cpu_boost, True)
+                decky.logger.info(f"{LOG} restored CPU Boost before uninstall")
+            except Exception as error:
+                decky.logger.warning(f"{LOG} could not restore CPU Boost before uninstall: {error}")
+        if is_supported and _display_script_owned(LUA_TARGET):
+            try:
+                await asyncio.to_thread(remove_display_script)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} could not remove display definition: {error}")
         if is_supported:
             try:
                 await asyncio.to_thread(program_rear_buttons, False)

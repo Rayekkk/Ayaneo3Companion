@@ -111,6 +111,31 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(main.tdp_preset(main.PRESETS["Balanced"]), "Balanced")
         self.assertEqual(main.tdp_preset(main.PRESETS["Balanced"], "Custom"), "Custom")
 
+    def test_cpu_boost_sysfs_round_trip_and_persistence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "boost"
+            path.write_text("1\n")
+            previous_settings = dict(main.settings.data)
+            previous_state = main.Plugin._state
+            main.settings.data = {}
+            main.Plugin._state = {"cpu_boost": True, "cpu_boost_supported": True}
+            try:
+                with mock.patch.object(main, "CPU_BOOST_PATH", path), \
+                     mock.patch.object(main, "supported_device", return_value=True), \
+                     mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(
+                         return_value={"cpu_boost": False, "cpu_boost_supported": True})):
+                    self.assertTrue(main.read_cpu_boost())
+                    state = asyncio.run(main.Plugin().set_cpu_boost(False))
+                    self.assertFalse(main.read_cpu_boost())
+                    self.assertEqual(path.read_text(), "0")
+                    self.assertFalse(main.settings.data["cpu_boost"])
+                    self.assertFalse(state["cpu_boost"])
+                    main.write_cpu_boost(True)
+                    self.assertTrue(main.read_cpu_boost())
+            finally:
+                main.settings.data = previous_settings
+                main.Plugin._state = previous_state
+
     def test_custom_game_profile_persists_exact_limits_and_is_reapplied(self):
         custom = {"spl": 17, "sppt": 23, "fppt": 31}
         previous_settings = dict(main.settings.data)
@@ -217,11 +242,56 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(packet[24], 0x10)
         self.assertEqual(int.from_bytes(packet[1:3], "little"), sum(packet[7:]))
 
+    def test_hid_exchange_retries_the_complete_command(self):
+        command = main.AYA_CHECK
+        response = bytearray(64)
+        response[3] = command[4]
+        with mock.patch.object(main.os, "write", return_value=len(command)) as write, \
+             mock.patch.object(main.select, "select", side_effect=[([], [], []), ([7], [], [])]), \
+             mock.patch.object(main.os, "read", return_value=bytes(response)):
+            self.assertEqual(main._hid_exchange(7, command), bytes(response))
+        self.assertEqual(write.call_count, 2)
+
+    def test_hid_exchange_stops_after_three_unanswered_attempts(self):
+        with mock.patch.object(main.os, "write", return_value=len(main.AYA_CHECK)) as write, \
+             mock.patch.object(main.select, "select", return_value=([], [], [])):
+            self.assertEqual(main._hid_exchange(7, main.AYA_CHECK), b"")
+        self.assertEqual(write.call_count, main.HID_COMMAND_ATTEMPTS)
+
+    def test_vendor_hidraw_rejects_active_kernel_driver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hidraw = Path(directory) / "hidraw7"
+            device = hidraw / "device"
+            device.mkdir(parents=True)
+            (device / "report_descriptor").write_bytes(b"\x06\x00\xff\x09\x01")
+            (device / "uevent").write_text("HID_ID=0003:00001C4F:00000002\n")
+            for name in ("module_left", "module_right", "eject", "reset"):
+                (device / name).touch()
+            with mock.patch.object(main.glob, "glob", return_value=[str(hidraw)]):
+                with self.assertRaisesRegex(RuntimeError, "kernel hid-ayaneo is active"):
+                    main._vendor_hidraw()
+
     def test_magic_module_eject_commands(self):
         config = {"vibration": "low", "rgb_mode": "solid", "color": "ff0000", "brightness": 50}
         self.assertEqual(main.controller_command(config, "left")[20], 0x07)
         self.assertEqual(main.controller_command(config, "right")[20], 0x70)
         self.assertEqual(main.controller_command(config, "both")[20], 0x77)
+
+    def test_magic_module_eject_timeout_keeps_controller_powered(self):
+        config = {"vibration": "low", "rgb_mode": "solid", "color": "ff0000", "brightness": 50}
+        busy = bytearray(64)
+        busy[19] = 0x02
+        with mock.patch.object(main, "supported_device", return_value=True), \
+             mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(main, "_hid_exchange", return_value=bytes(busy)), \
+             mock.patch.object(main.time, "sleep"), \
+             mock.patch.object(main, "set_controller_power") as set_power:
+            with self.assertRaisesRegex(TimeoutError, "controller power was left on"):
+                main.eject_controller_modules("both", config)
+        set_power.assert_not_called()
 
     def test_magic_module_presence_matches_ec_absent_bits(self):
         with mock.patch.object(main, "_read_ec_register", return_value=0):
@@ -496,6 +566,7 @@ class LogicTests(unittest.TestCase):
         operations = (
             (main._write_ec_register, (0x10, 0x01)),
             (main.apply_tdp, (main.DEFAULT_TDP,)),
+            (main.write_cpu_boost, (False,)),
             (main.apply_controller, (controller,)),
             (main.set_vibration_gain, (50,)),
             (main.play_vibration_test, ("high", 100)),
@@ -582,6 +653,31 @@ class LogicTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     main.install_display_script()
                 self.assertEqual(target.read_bytes(), b"-- belongs to somebody else\n")
+
+    def test_display_definition_removal_is_owned_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "display.lua"
+            target.write_bytes(main.LUA_SOURCE.read_bytes())
+            with mock.patch.object(main, "LUA_TARGET", target), \
+                 mock.patch.object(main, "supported_device", return_value=True):
+                main.remove_display_script()
+                self.assertFalse(target.exists())
+                main.remove_display_script()
+                target.write_text("-- belongs to somebody else\n")
+                with self.assertRaises(RuntimeError):
+                    main.remove_display_script()
+                self.assertTrue(target.exists())
+
+    def test_display_switch_keeps_installed_definition_when_edid_retry_is_needed(self):
+        state = {"screen_installed": True}
+        with mock.patch.object(main, "install_display_script") as install_display, \
+             mock.patch.object(main, "patch_published_edid", side_effect=OSError("busy")), \
+             mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value=state)), \
+             mock.patch.object(main.decky.logger, "warning") as warning:
+            result = asyncio.run(main.Plugin().set_screen_fix(True))
+        install_display.assert_called_once_with()
+        warning.assert_called_once()
+        self.assertIs(result, state)
 
     def test_input_map_upgrades_owned_legacy_file_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -709,7 +805,7 @@ class LogicTests(unittest.TestCase):
         }
         with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
             info = main.updater.check()
-        self.assertEqual(info["current_version"], "1.0.0")
+        self.assertEqual(info["current_version"], "1.0.1")
         self.assertEqual(info["latest_version"], "1.1.0")
         self.assertTrue(info["update_available"])
         self.assertEqual(info["asset_name"], "Ayaneo3Companion-1.1.0.zip")
@@ -727,7 +823,7 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(
             {manifest["version"], package["version"], lock["version"],
              lock["packages"][""]["version"]},
-            {"1.0.0"},
+            {"1.0.1"},
         )
         package_script = (root / "scripts" / "package.mjs").read_text()
         self.assertIn('"lego_updater.py"', package_script)

@@ -25,6 +25,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lig
 | **Custom TDP** | SPL up to 35 W, with SPPT and FPPT capped at 37 W |
 | **Per-game profiles** | Saves a TDP profile for the running game and applies it automatically |
 | **Live power** | Shows current package power in the TDP panel |
+| **CPU Boost** | Enables or disables kernel-wide CPU frequency boost and restores the choice after startup |
 | **Charge bypass** | Powers the console from its charger while inhibiting battery charging |
 | **Charging estimate** | Shows live battery percentage, net charging power and estimated time to full only while Battery is open |
 | **Magic Modules** | Identifies every known module and upper/lower layout, ejects either side and provides Quick Reset |
@@ -98,7 +99,7 @@ On a fresh installation where the QAM button is not available yet, copy
 
 ```bash
 chmod +x bootstrap.sh
-./bootstrap.sh Ayaneo3Companion-1.0.0.zip
+./bootstrap.sh Ayaneo3Companion-1.0.1.zip
 ```
 
 The bootstrap installer checks the device, installs the plugin directly and
@@ -147,6 +148,8 @@ overview. Closing and reopening QAM always returns to this overview.
 The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
 37 W FPPT; Custom tuning is also capped at 37 W.
 
+- CPU Boost writes Linux CPUFreq's global `boost` control. Disabling it prevents
+  the CPU from exceeding its base frequency without changing the selected TDP.
 - On Bazzite, TDP is written through `org.shadowblip.PowerStation`. On SteamOS,
   the plugin downloads the pinned RyzenAdj build and writes SPL/SPPT/FPPT directly.
 - Charge bypass prefers the upstream AYANEO `charge_behaviour` kernel ABI. On
