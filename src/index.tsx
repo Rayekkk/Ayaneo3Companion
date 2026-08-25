@@ -351,10 +351,7 @@ const Content: FC = () => {
   const controllerPending = useRef<Controller | null>(null);
   const controllerWriting = useRef(false);
   const controllerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ffGainTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ffGainPending = useRef<number | null>(null);
-  const ffGainDirty = useRef(false);
-  const appliedVibration = useRef<Vibration | null>(null);
+  const appliedController = useRef<Controller | null>(null);
   const lastRgbMode = useRef<RgbMode>("solid");
   const [state, setState] = useState<State | null>(null);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
@@ -377,10 +374,10 @@ const Content: FC = () => {
   }, [state?.controller.color, state?.controller.brightness]);
 
   useEffect(() => {
-    if (state && appliedVibration.current === null && !controllerDirty.current) {
-      appliedVibration.current = state.controller.vibration;
+    if (state && !controllerDirty.current) {
+      appliedController.current = state.controller;
     }
-  }, [state?.controller.vibration]);
+  }, [state?.controller]);
 
   useEffect(() => AppWatcher.listen(setGame), []);
 
@@ -422,7 +419,7 @@ const Content: FC = () => {
         return {
           ...next,
           tdp: tdpDirty.current ? current.tdp : next.tdp,
-          controller: controllerDirty.current || ffGainDirty.current ? current.controller : next.controller,
+          controller: controllerDirty.current ? current.controller : next.controller,
         };
       });
       if (!presetInitialized.current) { presetInitialized.current = true; setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets)); }
@@ -463,7 +460,6 @@ const Content: FC = () => {
 
   useEffect(() => () => {
     if (controllerTimer.current) clearTimeout(controllerTimer.current);
-    if (ffGainTimer.current) clearTimeout(ffGainTimer.current);
   }, []);
 
   const run = async (action: ActionKey, work: () => Promise<State>, title: string, success?: string) => {
@@ -621,18 +617,34 @@ const Content: FC = () => {
       while (controllerPending.current) {
         const next = controllerPending.current;
         controllerPending.current = null;
-        const previousVibration = appliedVibration.current ?? state.controller.vibration;
-        const vibrationChanged = next.vibration !== previousVibration;
+        const previous = appliedController.current ?? state.controller;
+        const vibrationChanged = next.vibration !== previous.vibration;
+        const firmwareChanged = vibrationChanged
+          || next.rgb_mode !== previous.rgb_mode
+          || next.color !== previous.color
+          || next.brightness !== previous.brightness;
+        const gainChanged = next.ff_gain !== previous.ff_gain;
         try {
-          const applied = vibrationChanged
-            ? await setControllerWithVibrationFeedback(next)
-            : await setController(next);
-          appliedVibration.current = next.vibration;
+          let applied: State | null = null;
+          if (firmwareChanged) {
+            applied = vibrationChanged
+              ? await setControllerWithVibrationFeedback(next)
+              : await setController(next);
+          }
+          // FF_GAIN lives on a separate evdev device. Keep it in the same
+          // serialized queue so an RGB write cannot persist an older gain.
+          if (gainChanged) applied = await setVibrationGain(next.ff_gain);
+          appliedController.current = next;
           if (!controllerPending.current) {
             controllerDirty.current = false;
-            setState(current => current ? { ...applied, tdp: current.tdp, controller: next } : applied);
+            if (applied) {
+              setState(current => current
+                ? { ...applied, tdp: current.tdp, controller: next }
+                : applied);
+            }
           }
         } catch (error) {
+          appliedController.current = null;
           const message = error instanceof Error ? error.message : String(error);
           toaster.toast({ title: "Controller setting failed", body: message });
           if (!controllerPending.current) {
@@ -664,35 +676,7 @@ const Content: FC = () => {
   const setFfGain = (raw: number) => {
     if (!Number.isFinite(raw)) return;
     const value = Math.round(clamp(raw, 0, 100) / 10) * 10;
-    if (value === state.controller.ff_gain && ffGainPending.current === null) return;
-    ffGainDirty.current = true;
-    ffGainPending.current = value;
-    if (controllerPending.current) controllerPending.current = { ...controllerPending.current, ff_gain: value };
-    setState(current => current ? { ...current, controller: { ...current.controller, ff_gain: value } } : current);
-    if (ffGainTimer.current) clearTimeout(ffGainTimer.current);
-    ffGainTimer.current = setTimeout(async () => {
-      ffGainTimer.current = null;
-      const target = ffGainPending.current;
-      if (target === null) return;
-      try {
-        const applied = await setVibrationGain(target);
-        if (ffGainPending.current === target) {
-          ffGainPending.current = null;
-          ffGainDirty.current = false;
-          setState(current => current ? {
-            ...applied,
-            tdp: current.tdp,
-            controller: { ...applied.controller, ff_gain: target },
-          } : applied);
-        }
-      } catch (error) {
-        ffGainPending.current = null;
-        ffGainDirty.current = false;
-        const message = error instanceof Error ? error.message : String(error);
-        toaster.toast({ title: "FF gain failed", body: message });
-        await refresh();
-      }
-    }, 150);
+    if (value !== state.controller.ff_gain) applyController({ ff_gain: value }, 150);
   };
   const previewRgb = (next: Hsv) => {
     controllerDirty.current = true;

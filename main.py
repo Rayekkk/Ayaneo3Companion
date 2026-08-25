@@ -207,8 +207,17 @@ MODULE_LAYOUTS = {
 MODULE_INFO_LEFT_INDEX = 32
 MODULE_INFO_RIGHT_INDEX = 33
 TM_GUARD_INTERVAL = 0.5
+CONTROLLER_GAIN_CHECK_INTERVAL = 2.0
+CONTROLLER_RESUME_THRESHOLD = 1.0
 HID_COMMAND_ATTEMPTS = 3
 HID_AYANEO_DRIVER_NAMES = frozenset({"hid-ayaneo", "hid_ayaneo"})
+CONTROLLER_COLOR_TOLERANCE = 1
+AYA3_GAMEPAD_PHYS_PATHS = frozenset({
+    # InputPlumber's AYANEO 3 source definitions. The PCI topology differs
+    # between the Ryzen 7 8840U and Ryzen AI 9 HX 370 variants.
+    "usb-0000:c4:00.3-2/input0",
+    "usb-0000:c7:00.0-2/input0",
+})
 
 VIBRATION_VALUES = {"off": 0x04, "low": 0x01, "medium": 0x02, "high": 0x03}
 RGB_MODES = {"off": 0xFF, "solid": 0x01, "pulse": 0x02, "rainbow": 0x03}
@@ -239,7 +248,8 @@ _tdp_apply_lock = threading.Lock()
 _tdp_mutation_lock = threading.RLock()
 _cpu_boost_lock = threading.Lock()
 _ec_lock = threading.Lock()
-_controller_apply_lock = threading.Lock()
+_controller_apply_lock = threading.RLock()
+_controller_event_lock = threading.Lock()
 _audio_apply_lock = threading.Lock()
 
 def _dmi(name: str) -> str:
@@ -1455,12 +1465,13 @@ def program_rear_buttons(enabled: bool, config: dict | None = None) -> None:
 
 
 def read_controller() -> dict:
-    path = _vendor_hidraw()
-    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-    try:
-        response = _hid_exchange(fd, AYA_CHECK)
-    finally:
-        os.close(fd)
+    with _controller_apply_lock:
+        path = _vendor_hidraw()
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            response = _hid_exchange(fd, AYA_CHECK)
+        finally:
+            os.close(fd)
     if len(response) < 25:
         raise RuntimeError("controller did not answer")
     reverse_modes = {value: key for key, value in RGB_MODES.items()}
@@ -1492,25 +1503,95 @@ def apply_controller(config: dict, vibration_feedback: bool = False,
         # that transition with the previous level immediately beforehand.
         if (vibration_feedback and feedback_level == "off"
                 and previous_vibration in ("low", "medium", "high")):
-            play_vibration_test(previous_vibration, VIBRATION_CONFIRM_MS)
+            try:
+                play_vibration_test(previous_vibration, VIBRATION_CONFIRM_MS)
+            except Exception as error:
+                # Confirmation is cosmetic. It must never prevent the actual
+                # firmware setting (especially Off) from being applied.
+                decky.logger.warning(f"{LOG} vibration confirmation skipped: {error}")
         path = _vendor_hidraw()
         fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
         try:
             check = _hid_exchange(fd, AYA_CHECK)
             _switch_to_custom_mode_fd(fd, check)
-            if not _hid_exchange(fd, controller_command(config)):
+            command = controller_command(config)
+            if not _hid_exchange(fd, command):
                 raise RuntimeError("controller rejected configuration")
+            verification = _hid_exchange(fd, AYA_CHECK)
+            if (verification and verification[3] == AYA_CHECK[4]
+                    and not controller_response_matches(verification, config)):
+                if not _hid_exchange(fd, command):
+                    raise RuntimeError("controller rejected configuration retry")
+                verification = _hid_exchange(fd, AYA_CHECK)
+                if (verification and verification[3] == AYA_CHECK[4]
+                        and not controller_response_matches(verification, config)):
+                    raise RuntimeError("controller did not retain configuration")
             # The configuration command applies the new level immediately.
             # Confirm it before the slower non-volatile save operation.
             if vibration_feedback and feedback_level != "off":
-                play_vibration_test(feedback_level, VIBRATION_CONFIRM_MS)
+                try:
+                    play_vibration_test(feedback_level, VIBRATION_CONFIRM_MS)
+                except Exception as error:
+                    decky.logger.warning(f"{LOG} vibration confirmation skipped: {error}")
             # The plugin persists every setting itself. Firmware save is useful
             # for ordinary RGB/config writes, but it adds a second, much longer
             # controller-side confirmation when changing vibration strength.
             if persist_firmware:
-                _hid_exchange(fd, AYA_SAVE, timeout=1.5)
+                if not _hid_exchange(fd, AYA_SAVE, timeout=1.5):
+                    decky.logger.warning(
+                        f"{LOG} controller configuration applied but firmware save was unanswered")
         finally:
             os.close(fd)
+
+
+def controller_response_matches(response: bytes, config: dict) -> bool:
+    """Compare AYA_CHECK's echoed volatile settings with the requested state."""
+    if len(response) < 24 or response[3] != AYA_CHECK[4]:
+        return False
+    config = normalize_controller(config)
+    expected = controller_command(config)
+    if response[21:23] != expected[22:24] or response[23] != expected[24]:
+        return False
+    if response[7] != expected[8] or response[11] != expected[12]:
+        return False
+    mode = config["rgb_mode"]
+    if mode not in ("solid", "pulse"):
+        return True
+    echoed = response[8:11] + response[12:15]
+    requested = expected[9:12] + expected[13:16]
+    return all(abs(current - target) <= CONTROLLER_COLOR_TOLERANCE
+               for current, target in zip(echoed, requested))
+
+
+def reconcile_controller(config: dict, recover_custom: bool,
+                         force: bool = False) -> tuple[str, str]:
+    """Verify volatile controller state and repair it without writing NVRAM."""
+    require_supported_device("controller monitoring")
+    config = normalize_controller(config)
+    path = _vendor_hidraw()
+    with _controller_apply_lock:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            response = _hid_exchange(fd, AYA_CHECK)
+            if not response:
+                raise RuntimeError("controller did not answer the state check")
+            if controller_requires_custom(response):
+                if not recover_custom:
+                    return "tm_mode", path
+                _switch_to_custom_mode_fd(fd, response)
+                status = "mode_restored"
+            elif force or not controller_response_matches(response, config):
+                status = "configuration_restored"
+            else:
+                return "healthy", path
+            if not _hid_exchange(fd, controller_command(config)):
+                raise RuntimeError("controller rejected automatic configuration restore")
+        finally:
+            os.close(fd)
+    # FF_GAIN belongs to the evdev node and is reset independently when that
+    # node is recreated, so restore it together with the firmware packet.
+    set_vibration_gain(config["ff_gain"])
+    return status, path
 
 
 def eject_controller_modules(side: str, config: dict) -> None:
@@ -1581,22 +1662,8 @@ def recover_tm_mode(config: dict, _restore_buttons: bool) -> bool:
     require_supported_device("TM Guard")
     if not both_modules_connected() or not controller_powered():
         return False
-    path = _vendor_hidraw()
-    with _controller_apply_lock:
-        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-        try:
-            check = _hid_exchange(fd, AYA_CHECK)
-            changed = _switch_to_custom_mode_fd(fd, check)
-        finally:
-            os.close(fd)
-    if not changed:
-        return False
-    # AYA_SAVE keeps the complete button table in controller NVRAM. Rewriting
-    # it here would send the 0x88 activation reset and cycle the physical Magic
-    # Module mechanisms after every accidental TM mode change.
-    apply_controller(config)
-    set_vibration_gain(config["ff_gain"])
-    return True
+    status, _ = reconcile_controller(config, True)
+    return status == "mode_restored"
 
 
 def _event_has_rumble(node: str) -> bool:
@@ -1610,43 +1677,91 @@ def _event_has_rumble(node: str) -> bool:
         return False
 
 
+def _input_event_identity(node: str) -> tuple[str, str, str]:
+    """Return the kernel vendor, product and physical path for an event node."""
+    device = Path("/sys/class/input") / Path(node).name / "device"
+
+    def read(name: str) -> str:
+        try:
+            return (device / name).read_text().strip().lower()
+        except OSError:
+            return ""
+
+    return read("id/vendor"), read("id/product"), read("phys")
+
+
 def _rumble_event_node() -> str | None:
-    """Prefer AYANEO's physical input node over virtual rumble devices."""
-    fallback = None
+    """Return AYANEO's physical gamepad without selecting an external pad."""
     nodes = sorted(glob.glob("/dev/input/event*"),
                    key=lambda path: int("".join(filter(str.isdigit, Path(path).name)) or 0))
+    candidates = []
     for node in nodes:
         if not _event_has_rumble(node):
             continue
-        try:
-            vendor = Path(f"/sys/class/input/{Path(node).name}/device/id/vendor").read_text().strip().lower()
-        except OSError:
-            vendor = ""
+        vendor, product, phys = _input_event_identity(node)
         # The controller firmware exposes an Xbox 360-compatible xpad node
-        # (045e:028e). Never prefer InputPlumber's 28de virtual controller,
-        # because FF_GAIN must scale the physical device itself.
-        if vendor in ("045e", "1c4f"):
+        # (045e:028e); development firmware can retain AYANEO's 1c4f VID.
+        # Never select InputPlumber's 28de virtual controller, because FF_GAIN
+        # must scale the physical device itself.
+        if not ((vendor == "045e" and product == "028e") or vendor == "1c4f"):
+            continue
+        if phys in AYA3_GAMEPAD_PHYS_PATHS:
             return node
-        fallback = fallback or node
-    return fallback
+        candidates.append(node)
+    # Older or future kernels may expose a different physical path. A single
+    # hardware candidate is still safe; multiple candidates are ambiguous and
+    # must not make Companion modify an attached Xbox-compatible controller.
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _device_node_token(path: str) -> tuple[str, int | None, int | None]:
+    """Identify a device-node incarnation even when Linux reuses its name."""
+    try:
+        info = os.stat(path)
+        return path, info.st_rdev, info.st_ino
+    except OSError:
+        return path, None, None
+
+
+def _rumble_event_token() -> tuple[str, int, int] | None:
+    node = _rumble_event_node()
+    if not node:
+        return None
+    try:
+        info = os.stat(node)
+        return node, info.st_rdev, info.st_ino
+    except OSError:
+        return None
+
+
+def _suspend_clock_offset() -> float | None:
+    """Return a value that increases only while Linux is suspended."""
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return None
+    try:
+        return time.clock_gettime(clock) - time.monotonic()
+    except (OSError, ValueError):
+        return None
 
 
 def set_vibration_gain(percent: int) -> None:
     """Set Linux FF_GAIN on AYANEO's physical gamepad input device."""
     require_supported_device("vibration control")
     gain = _clamp(percent, 0, 100)
-    node = _rumble_event_node()
-    if not node:
-        raise RuntimeError("No rumble-capable input device found")
-    now = time.time()
-    event = struct.pack("<qqHHi", int(now), int((now % 1) * 1_000_000),
-                        EV_FF, FF_GAIN, round(0xFFFF * gain / 100))
-    fd = os.open(node, os.O_RDWR)
-    try:
-        if os.write(fd, event) != len(event):
-            raise RuntimeError("Controller rejected FF_GAIN")
-    finally:
-        os.close(fd)
+    with _controller_event_lock:
+        node = _rumble_event_node()
+        if not node:
+            raise RuntimeError("No rumble-capable input device found")
+        now = time.time()
+        event = struct.pack("<qqHHi", int(now), int((now % 1) * 1_000_000),
+                            EV_FF, FF_GAIN, round(0xFFFF * gain / 100))
+        fd = os.open(node, os.O_RDWR)
+        try:
+            if os.write(fd, event) != len(event):
+                raise RuntimeError("Controller rejected FF_GAIN")
+        finally:
+            os.close(fd)
 
 
 def play_vibration_test(level: str, duration_ms: int = 500) -> None:
@@ -1660,31 +1775,32 @@ def play_vibration_test(level: str, duration_ms: int = 500) -> None:
     strength = {"low": 0.20, "medium": 0.55, "high": 1.0}.get(level, 0.0)
     if strength <= 0:
         raise RuntimeError("Vibration is Off - select a strength first")
-    node = _rumble_event_node()
-    if not node:
-        raise RuntimeError("No rumble-capable input device found")
     duration = max(100, min(2000, int(duration_ms)))
     magnitude = round(0xFFFF * strength)
-    fd = os.open(node, os.O_RDWR)
-    try:
-        effect = bytearray(struct.pack("<HhHHHHHxxHH28x", FF_RUMBLE, -1, 0,
-                                       0, 0, duration, 0, magnitude, magnitude))
-        fcntl.ioctl(fd, EVIOCSFF, effect)
-        effect_id = struct.unpack_from("<h", effect, 2)[0]
-        if effect_id < 0:
-            raise RuntimeError("Controller rejected the vibration effect")
+    with _controller_event_lock:
+        node = _rumble_event_node()
+        if not node:
+            raise RuntimeError("No rumble-capable input device found")
+        fd = os.open(node, os.O_RDWR)
+        try:
+            effect = bytearray(struct.pack("<HhHHHHHxxHH28x", FF_RUMBLE, -1, 0,
+                                           0, 0, duration, 0, magnitude, magnitude))
+            fcntl.ioctl(fd, EVIOCSFF, effect)
+            effect_id = struct.unpack_from("<h", effect, 2)[0]
+            if effect_id < 0:
+                raise RuntimeError("Controller rejected the vibration effect")
 
-        def event(value: int) -> bytes:
-            now = time.time()
-            return struct.pack("<qqHHi", int(now), int((now % 1) * 1_000_000),
-                               EV_FF, effect_id, value)
+            def event(value: int) -> bytes:
+                now = time.time()
+                return struct.pack("<qqHHi", int(now), int((now % 1) * 1_000_000),
+                                   EV_FF, effect_id, value)
 
-        os.write(fd, event(1))
-        time.sleep(duration / 1000)
-        os.write(fd, event(0))
-        fcntl.ioctl(fd, EVIOCRMFF, effect_id)
-    finally:
-        os.close(fd)
+            os.write(fd, event(1))
+            time.sleep(duration / 1000)
+            os.write(fd, event(0))
+            fcntl.ioctl(fd, EVIOCRMFF, effect_id)
+        finally:
+            os.close(fd)
 
 
 def _powerstation_card():
@@ -2078,6 +2194,34 @@ class Plugin:
             return target
 
     @classmethod
+    def _reconcile_current_controller(cls, recover_custom: bool,
+                                      force: bool = False):
+        """Read the newest desired state after all earlier writes complete."""
+        with _controller_apply_lock:
+            with _lock:
+                controller = dict(cls._state["controller"])
+            status, path = reconcile_controller(controller, recover_custom, force)
+            return status, path
+
+    @classmethod
+    def _restore_current_controller(cls, persist_firmware: bool = False):
+        """Atomically snapshot and restore all controller-side settings."""
+        with _controller_apply_lock:
+            with _lock:
+                controller = dict(cls._state["controller"])
+            apply_controller(controller, persist_firmware=persist_firmware)
+            set_vibration_gain(controller["ff_gain"])
+            return controller
+
+    @classmethod
+    def _restore_current_vibration_gain(cls):
+        with _controller_apply_lock:
+            with _lock:
+                gain = cls._state["controller"]["ff_gain"]
+            set_vibration_gain(gain)
+            return gain
+
+    @classmethod
     def _snapshot(cls):
         with _lock:
             state = dict(cls._state)
@@ -2270,30 +2414,45 @@ class Plugin:
 
     async def set_controller(self, raw):
         value = normalize_controller(raw)
-        await asyncio.to_thread(apply_controller, value)
-        with _lock:
-            Plugin._state["controller"] = value
-            self._save("controller", value)
+
+        def mutate():
+            with _controller_apply_lock:
+                apply_controller(value)
+                with _lock:
+                    Plugin._state["controller"] = value
+                    self._save("controller", value)
+
+        await asyncio.to_thread(mutate)
         return await self.get_state()
 
     async def set_controller_with_vibration_feedback(self, raw):
         value = normalize_controller(raw)
-        with _lock:
-            previous_vibration = Plugin._state["controller"]["vibration"]
-        await asyncio.to_thread(apply_controller, value, True, previous_vibration, False)
-        with _lock:
-            Plugin._state["controller"] = value
-            self._save("controller", value)
+
+        def mutate():
+            with _controller_apply_lock:
+                with _lock:
+                    previous_vibration = Plugin._state["controller"]["vibration"]
+                apply_controller(value, True, previous_vibration, False)
+                with _lock:
+                    Plugin._state["controller"] = value
+                    self._save("controller", value)
+
+        await asyncio.to_thread(mutate)
         return await self.get_state()
 
     async def set_vibration_gain(self, percent):
         value = _clamp(percent, 0, 100)
-        await asyncio.to_thread(set_vibration_gain, value)
-        with _lock:
-            controller = dict(Plugin._state["controller"])
-            controller["ff_gain"] = value
-            Plugin._state["controller"] = controller
-            self._save("controller", controller)
+
+        def mutate():
+            with _controller_apply_lock:
+                set_vibration_gain(value)
+                with _lock:
+                    controller = dict(Plugin._state["controller"])
+                    controller["ff_gain"] = value
+                    Plugin._state["controller"] = controller
+                    self._save("controller", controller)
+
+        await asyncio.to_thread(mutate)
         return await self.get_state()
 
     async def test_vibration(self, duration_ms=VIBRATION_TEST_MS):
@@ -2388,14 +2547,31 @@ class Plugin:
             if Plugin._state.get("modules_reconnecting"):
                 raise RuntimeError("reinsert both modules before ejecting again")
             controller = dict(Plugin._state["controller"])
-        await asyncio.to_thread(eject_controller_modules, side, controller)
-        with _lock:
             Plugin._state["modules_reconnecting"] = True
             Plugin._state["modules_connected"] = False
+            Plugin._state["modules_detached"] = False
             if side in ("left", "both"):
                 Plugin._state["module_left"] = _module_info("left", status="ejecting")
             if side in ("right", "both"):
                 Plugin._state["module_right"] = _module_info("right", status="ejecting")
+        try:
+            await asyncio.to_thread(eject_controller_modules, side, controller)
+        except Exception:
+            try:
+                presence = await asyncio.to_thread(module_presence)
+                left, right = module_states_from_presence(presence)
+                connected = all(presence.values())
+            except Exception:
+                left = _module_info("left", status="unavailable")
+                right = _module_info("right", status="unavailable")
+                connected = False
+            with _lock:
+                Plugin._state["modules_reconnecting"] = False
+                Plugin._state["modules_connected"] = connected
+                Plugin._state["modules_detached"] = False
+                Plugin._state["module_left"] = left
+                Plugin._state["module_right"] = right
+            raise
         decky.logger.info(f"{LOG} ejected {side} controller module(s)")
         return await self.get_state()
 
@@ -2405,6 +2581,8 @@ class Plugin:
                 raise RuntimeError("insert both modules before resetting")
             controller = dict(Plugin._state["controller"])
             restore_buttons = Plugin._state.get("button_fix_installed", False)
+            Plugin._state["modules_reconnecting"] = True
+            Plugin._state["modules_detached"] = False
             Plugin._state["module_left"] = _module_info("left", status="activating")
             Plugin._state["module_right"] = _module_info("right", status="activating")
         try:
@@ -2415,16 +2593,24 @@ class Plugin:
                 Plugin._state["module_right"] = right
                 Plugin._state["modules_connected"] = True
                 Plugin._state["modules_reconnecting"] = False
+                Plugin._state["modules_detached"] = False
             decky.logger.info(f"{LOG} reset and re-detected both Magic Modules")
         except Exception:
+            left = _module_info("left", status="unavailable")
+            right = _module_info("right", status="unavailable")
+            connected = False
             try:
                 presence = await asyncio.to_thread(module_presence)
                 left, right = module_states_from_presence(presence)
-                with _lock:
-                    Plugin._state["module_left"] = left
-                    Plugin._state["module_right"] = right
+                connected = all(presence.values())
             except Exception:
                 pass
+            with _lock:
+                Plugin._state["modules_reconnecting"] = False
+                Plugin._state["modules_connected"] = connected
+                Plugin._state["modules_detached"] = False
+                Plugin._state["module_left"] = left
+                Plugin._state["module_right"] = right
             raise
         return await self.get_state()
 
@@ -2510,8 +2696,6 @@ class Plugin:
             pending.add("cpu_boost")
         for delay in (1, 2, 4, 8):
             await asyncio.sleep(delay)
-            with _lock:
-                controller = dict(Plugin._state["controller"])
             if "tdp" in pending:
                 try:
                     await asyncio.to_thread(Plugin._reapply_current_tdp)
@@ -2521,8 +2705,7 @@ class Plugin:
                     decky.logger.warning(f"{LOG} TDP restore attempt failed: {error}")
             if "controller" in pending:
                 try:
-                    await asyncio.to_thread(apply_controller, controller)
-                    await asyncio.to_thread(set_vibration_gain, controller["ff_gain"])
+                    await asyncio.to_thread(Plugin._restore_current_controller)
                     pending.remove("controller")
                     decky.logger.info(f"{LOG} restored RGB, firmware vibration and FF_GAIN after startup")
                 except Exception as error:
@@ -2623,12 +2806,22 @@ class Plugin:
                 previous_connected = connected
                 with _lock:
                     Plugin._state["modules_connected"] = connected
+                    reconnecting = Plugin._state.get("modules_reconnecting", False)
+                    detached = Plugin._state.get("modules_detached", False)
                 if not connected:
                     left, right = module_states_from_presence(presence)
                     with _lock:
+                        if reconnecting:
+                            Plugin._state["modules_detached"] = True
                         Plugin._state["module_left"] = left
                         Plugin._state["module_right"] = right
                     identify_pending = True
+                    continue
+                # During eject, both EC presence bits can remain asserted until
+                # the released module is physically lifted. Do not immediately
+                # undo the deliberate controller power-off. Quick Reset also
+                # owns the controller until its RPC clears this state.
+                if reconnecting and not detached:
                     continue
                 if not powered:
                     await asyncio.to_thread(set_controller_power, True)
@@ -2642,8 +2835,6 @@ class Plugin:
                     with _lock:
                         Plugin._state["module_left"] = _module_info("left", status="activating")
                         Plugin._state["module_right"] = _module_info("right", status="activating")
-                with _lock:
-                    controller = dict(Plugin._state["controller"])
                 last_error = None
                 if restore_pending:
                     for delay in (0.5, 1.0, 2.0, 3.0):
@@ -2654,12 +2845,12 @@ class Plugin:
                             # Rear-button mappings are persisted with AYA_SAVE.
                             # Reprogramming them here would also issue the 0x88
                             # physical module reset on every reconnection.
-                            await asyncio.to_thread(apply_controller, controller)
-                            await asyncio.to_thread(set_vibration_gain, controller["ff_gain"])
+                            await asyncio.to_thread(Plugin._restore_current_controller)
                             restore_pending = False
                             identify_pending = True
                             with _lock:
                                 Plugin._state["modules_reconnecting"] = False
+                                Plugin._state["modules_detached"] = False
                             decky.logger.info(
                                 f"{LOG} modules connected; restored RGB, vibration and FF_GAIN")
                             break
@@ -2687,36 +2878,86 @@ class Plugin:
                 decky.logger.debug(f"{LOG} module monitor unavailable: {error}")
 
     async def _tm_guard_loop(self):
-        """Return from accidental hardware TM mode changes without touching LC/RC."""
+        """Repair controller resets and optionally undo accidental TM changes."""
+        was_available = None
+        last_device_token = None
+        last_rumble_token = None
+        next_gain_check = 0.0
+        last_suspend_offset = _suspend_clock_offset()
         while True:
             await asyncio.sleep(TM_GUARD_INTERVAL)
+            suspend_offset = _suspend_clock_offset()
+            resumed = bool(
+                suspend_offset is not None
+                and last_suspend_offset is not None
+                and suspend_offset - last_suspend_offset > CONTROLLER_RESUME_THRESHOLD
+            )
+            if suspend_offset is not None:
+                last_suspend_offset = suspend_offset
             with _lock:
                 enabled = Plugin._state.get("tm_guard_enabled", False)
                 reconnecting = Plugin._state.get("modules_reconnecting", False)
-                controller = dict(Plugin._state["controller"])
-                restore_buttons = Plugin._state.get("button_fix_installed", False)
-            if not enabled:
-                continue
-            if reconnecting:
+                connected = Plugin._state.get("modules_connected", False)
+            if reconnecting or not connected:
+                was_available = None
+                last_device_token = None
+                last_rumble_token = None
+                next_gain_check = 0.0
                 with _lock:
-                    Plugin._state["tm_guard_status"] = "Waiting for modules"
+                    Plugin._state["tm_guard_status"] = (
+                        "Waiting for modules" if enabled else "Disabled")
                 continue
             try:
-                changed = await asyncio.to_thread(recover_tm_mode, controller, restore_buttons)
+                status, path = await asyncio.to_thread(
+                    Plugin._reconcile_current_controller,
+                    enabled, was_available is False or resumed)
+                device_token = await asyncio.to_thread(_device_node_token, path)
+                if (last_device_token is not None
+                        and device_token != last_device_token
+                        and status == "healthy"):
+                    status, path = await asyncio.to_thread(
+                        Plugin._reconcile_current_controller, enabled, True)
+                    device_token = await asyncio.to_thread(_device_node_token, path)
+                was_available = True
+                last_device_token = device_token
+                if resumed and status in ("mode_restored", "configuration_restored"):
+                    decky.logger.info(
+                        f"{LOG} restored controller configuration after system resume")
+                now = time.monotonic()
+                if now >= next_gain_check:
+                    rumble_token = await asyncio.to_thread(_rumble_event_token)
+                    if rumble_token != last_rumble_token:
+                        if rumble_token is not None and status in ("healthy", "tm_mode"):
+                            await asyncio.to_thread(
+                                Plugin._restore_current_vibration_gain)
+                            decky.logger.info(
+                                f"{LOG} restored FF_GAIN after input-device recreation")
+                        last_rumble_token = rumble_token
+                    next_gain_check = now + CONTROLLER_GAIN_CHECK_INTERVAL
                 with _lock:
-                    if changed:
+                    if status == "mode_restored":
                         Plugin._state["tm_guard_recoveries"] += 1
-                        Plugin._state["tm_guard_status"] = "Custom mode restored"
-                    else:
-                        Plugin._state["tm_guard_status"] = "Monitoring"
-                if changed:
+                    Plugin._state["tm_guard_status"] = (
+                        "Custom mode restored"
+                        if enabled and status == "mode_restored"
+                        else "Monitoring" if enabled else "Disabled")
+                if status == "mode_restored":
                     decky.logger.info(f"{LOG} TM Guard restored custom controller mode")
+                elif status == "configuration_restored":
+                    decky.logger.info(
+                        f"{LOG} restored drifted RGB, vibration and FF_GAIN")
+                elif status == "tm_mode":
+                    # TM Guard is intentionally disabled, so leave the user's
+                    # selected hardware mode untouched.
+                    pass
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                was_available = False
                 with _lock:
-                    Plugin._state["tm_guard_status"] = "Waiting for controller"
-                decky.logger.debug(f"{LOG} TM Guard waiting: {error}")
+                    Plugin._state["tm_guard_status"] = (
+                        "Waiting for controller" if enabled else "Disabled")
+                decky.logger.debug(f"{LOG} controller monitor waiting: {error}")
 
     async def _main(self):
         await asyncio.to_thread(settings.read)
@@ -2783,6 +3024,7 @@ class Plugin:
             "module_reset_supported": ec_control is not None,
             "modules_reconnecting": False,
             "modules_connected": True,
+            "modules_detached": False,
             "module_left": _module_info("left", status="detecting"),
             "module_right": _module_info("right", status="detecting"),
             "tm_guard_enabled": tm_guard_enabled,
@@ -2827,9 +3069,12 @@ class Plugin:
         Plugin._tm_guard_task = None
         with _lock:
             was_supported = bool(Plugin._state.get("supported", False))
-        if was_supported and await asyncio.to_thread(supported_device):
+            was_reconnecting = bool(Plugin._state.get("modules_reconnecting", False))
+        if (was_supported and not was_reconnecting
+                and await asyncio.to_thread(supported_device)):
             try:
-                if not await asyncio.to_thread(controller_powered):
+                connected = await asyncio.to_thread(both_modules_connected)
+                if connected and not await asyncio.to_thread(controller_powered):
                     await asyncio.to_thread(set_controller_power, True)
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not restore controller power on unload: {error}")

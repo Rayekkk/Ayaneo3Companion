@@ -242,6 +242,83 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(packet[24], 0x10)
         self.assertEqual(int.from_bytes(packet[1:3], "little"), sum(packet[7:]))
 
+    def test_controller_response_match_detects_rgb_and_vibration_drift(self):
+        config = {
+            "vibration": "low", "ff_gain": 70, "rgb_mode": "solid",
+            "color": "ff0000", "brightness": 50,
+        }
+        packet = main.controller_command(config)
+        response = bytearray(64)
+        response[3] = main.AYA_CHECK[4]
+        response[7:15] = packet[8:16]
+        response[21:24] = packet[22:25]
+        self.assertTrue(main.controller_response_matches(bytes(response), config))
+
+        # One quantization step is tolerated, but a real colour or firmware
+        # strength change must trigger an automatic restore.
+        response[8] -= 1
+        self.assertTrue(main.controller_response_matches(bytes(response), config))
+        response[8] -= 1
+        self.assertFalse(main.controller_response_matches(bytes(response), config))
+        response[8:11] = packet[9:12]
+        response[23] = main.VIBRATION_VALUES["high"] << 4
+        self.assertFalse(main.controller_response_matches(bytes(response), config))
+
+    def test_controller_reconcile_repairs_drift_without_firmware_save(self):
+        config = {
+            "vibration": "off", "ff_gain": 60, "rgb_mode": "solid",
+            "color": "ff0000", "brightness": 50,
+        }
+        packet = main.controller_command(config)
+        response = bytearray(64)
+        response[3] = main.AYA_CHECK[4]
+        response[7:15] = packet[8:16]
+        response[21:24] = packet[22:25]
+        response[23] = main.VIBRATION_VALUES["high"] << 4
+        commands = []
+
+        def exchange(_fd, command, timeout=0.4):
+            commands.append((command, timeout))
+            return bytes(response) if command == main.AYA_CHECK else bytes(64)
+
+        with mock.patch.object(main, "supported_device", return_value=True), \
+             mock.patch.object(main, "_vendor_hidraw", return_value="/dev/hidraw7"), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(main, "_hid_exchange", side_effect=exchange), \
+             mock.patch.object(main, "set_vibration_gain") as gain:
+            status, path = main.reconcile_controller(config, True)
+
+        self.assertEqual((status, path), ("configuration_restored", "/dev/hidraw7"))
+        self.assertEqual([command for command, _ in commands], [main.AYA_CHECK, packet])
+        self.assertNotIn(main.AYA_SAVE, [command for command, _ in commands])
+        gain.assert_called_once_with(60)
+
+    def test_controller_reconcile_respects_disabled_tm_guard(self):
+        config = dict(main.DEFAULT_CONTROLLER)
+        response = bytearray(64)
+        response[3] = main.AYA_CHECK[4]
+        response[main.AYA_CUSTOM_REQUIRED_INDEX] = 1
+        commands = []
+
+        def exchange(_fd, command, timeout=0.4):
+            commands.append(command)
+            return bytes(response)
+
+        with mock.patch.object(main, "supported_device", return_value=True), \
+             mock.patch.object(main, "_vendor_hidraw", return_value="/dev/hidraw7"), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(main, "_hid_exchange", side_effect=exchange), \
+             mock.patch.object(main, "set_vibration_gain") as gain:
+            status, _ = main.reconcile_controller(config, False, force=True)
+
+        self.assertEqual(status, "tm_mode")
+        self.assertEqual(commands, [main.AYA_CHECK])
+        gain.assert_not_called()
+
     def test_hid_exchange_retries_the_complete_command(self):
         command = main.AYA_CHECK
         response = bytearray(64)
@@ -293,6 +370,61 @@ class LogicTests(unittest.TestCase):
                 main.eject_controller_modules("both", config)
         set_power.assert_not_called()
 
+    def test_module_eject_blocks_background_recovery_before_hardware_command(self):
+        previous_state = main.Plugin._state
+        main.Plugin._state = {
+            "controller": dict(main.DEFAULT_CONTROLLER),
+            "modules_reconnecting": False,
+            "modules_connected": True,
+            "modules_detached": False,
+            "module_left": main._module_info("left"),
+            "module_right": main._module_info("right"),
+        }
+
+        def eject(_side, _controller):
+            self.assertTrue(main.Plugin._state["modules_reconnecting"])
+            self.assertFalse(main.Plugin._state["modules_connected"])
+            self.assertEqual(main.Plugin._state["module_right"]["status"], "ejecting")
+
+        try:
+            with mock.patch.object(main, "eject_controller_modules", side_effect=eject), \
+                 mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})):
+                asyncio.run(main.Plugin().eject_modules("right"))
+            self.assertTrue(main.Plugin._state["modules_reconnecting"])
+        finally:
+            main.Plugin._state = previous_state
+
+    def test_module_monitor_does_not_undo_eject_poweroff_before_detach(self):
+        previous_state = main.Plugin._state
+        main.Plugin._state = {
+            "controller": dict(main.DEFAULT_CONTROLLER),
+            "modules_reconnecting": True,
+            "modules_connected": False,
+            "modules_detached": False,
+            "module_left": main._module_info("left", status="ejecting"),
+            "module_right": main._module_info("right", status="ejecting"),
+        }
+        sleeps = 0
+
+        async def stop_after_one_iteration(_delay):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 1:
+                raise asyncio.CancelledError
+
+        try:
+            with mock.patch.object(main.asyncio, "sleep", side_effect=stop_after_one_iteration), \
+                 mock.patch.object(main, "controller_powered", return_value=False), \
+                 mock.patch.object(main, "module_presence", return_value={"left": True, "right": True}), \
+                 mock.patch.object(main, "set_controller_power") as set_power, \
+                 mock.patch.object(main, "apply_controller") as apply:
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(main.Plugin()._module_loop())
+            set_power.assert_not_called()
+            apply.assert_not_called()
+        finally:
+            main.Plugin._state = previous_state
+
     def test_magic_module_presence_matches_ec_absent_bits(self):
         with mock.patch.object(main, "_read_ec_register", return_value=0):
             self.assertEqual(main.module_presence(), {"left": True, "right": True})
@@ -336,6 +468,164 @@ class LogicTests(unittest.TestCase):
         with mock.patch.object(main, "_hid_exchange", side_effect=exchange):
             self.assertFalse(main._switch_to_custom_mode_fd(7, bytes(custom)))
         self.assertNotIn(main.AYA_CUSTOM, calls)
+
+    def test_controller_monitor_repairs_drift_even_when_tm_guard_is_disabled(self):
+        previous_state = main.Plugin._state
+        main.Plugin._state = {
+            "controller": dict(main.DEFAULT_CONTROLLER),
+            "modules_reconnecting": False,
+            "modules_connected": True,
+            "tm_guard_enabled": False,
+            "tm_guard_status": "Disabled",
+            "tm_guard_recoveries": 0,
+        }
+        sleeps = 0
+
+        async def stop_after_one_iteration(_delay):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 1:
+                raise asyncio.CancelledError
+
+        try:
+            with mock.patch.object(main.asyncio, "sleep", side_effect=stop_after_one_iteration), \
+                 mock.patch.object(main, "reconcile_controller",
+                                   return_value=("configuration_restored", "/dev/hidraw7")) as reconcile:
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(main.Plugin()._tm_guard_loop())
+            reconcile.assert_called_once_with(main.DEFAULT_CONTROLLER, False, False)
+            self.assertEqual(main.Plugin._state["tm_guard_status"], "Disabled")
+        finally:
+            main.Plugin._state = previous_state
+
+    def test_controller_monitor_restores_gain_when_event_device_is_recreated(self):
+        previous_state = main.Plugin._state
+        main.Plugin._state = {
+            "controller": {**main.DEFAULT_CONTROLLER, "ff_gain": 60},
+            "modules_reconnecting": False,
+            "modules_connected": True,
+            "tm_guard_enabled": False,
+            "tm_guard_status": "Disabled",
+            "tm_guard_recoveries": 0,
+        }
+        sleeps = 0
+
+        async def stop_after_two_iterations(_delay):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 2:
+                raise asyncio.CancelledError
+
+        try:
+            with mock.patch.object(main.asyncio, "sleep",
+                                   side_effect=stop_after_two_iterations), \
+                 mock.patch.object(main, "reconcile_controller",
+                                   return_value=("healthy", "/dev/hidraw7")), \
+                 mock.patch.object(main, "_device_node_token",
+                                   return_value=("/dev/hidraw7", 1, 10)), \
+                 mock.patch.object(main, "_rumble_event_token", side_effect=[
+                     ("/dev/input/event5", 2, 20),
+                     ("/dev/input/event5", 2, 21),
+                 ]), \
+                 mock.patch.object(main, "CONTROLLER_GAIN_CHECK_INTERVAL", 0), \
+                 mock.patch.object(main, "set_vibration_gain") as gain:
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(main.Plugin()._tm_guard_loop())
+            self.assertEqual(gain.call_args_list, [mock.call(60), mock.call(60)])
+        finally:
+            main.Plugin._state = previous_state
+
+    def test_controller_monitor_detects_reused_hidraw_name(self):
+        previous_state = main.Plugin._state
+        main.Plugin._state = {
+            "controller": dict(main.DEFAULT_CONTROLLER),
+            "modules_reconnecting": False,
+            "modules_connected": True,
+            "tm_guard_enabled": False,
+            "tm_guard_status": "Disabled",
+            "tm_guard_recoveries": 0,
+        }
+        sleeps = 0
+
+        async def stop_after_two_iterations(_delay):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 2:
+                raise asyncio.CancelledError
+
+        reconciliations = [
+            ("healthy", "/dev/hidraw7"),
+            ("healthy", "/dev/hidraw7"),
+            ("configuration_restored", "/dev/hidraw7"),
+        ]
+        try:
+            with mock.patch.object(main.asyncio, "sleep",
+                                   side_effect=stop_after_two_iterations), \
+                 mock.patch.object(main, "reconcile_controller",
+                                   side_effect=reconciliations) as reconcile, \
+                 mock.patch.object(main, "_device_node_token", side_effect=[
+                     ("/dev/hidraw7", 1, 10),
+                     ("/dev/hidraw7", 1, 11),
+                     ("/dev/hidraw7", 1, 11),
+                 ]), \
+                 mock.patch.object(main, "_rumble_event_token", return_value=None), \
+                 mock.patch.object(main, "CONTROLLER_GAIN_CHECK_INTERVAL", 0):
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(main.Plugin()._tm_guard_loop())
+            self.assertEqual(reconcile.call_args_list, [
+                mock.call(main.DEFAULT_CONTROLLER, False, False),
+                mock.call(main.DEFAULT_CONTROLLER, False, False),
+                mock.call(main.DEFAULT_CONTROLLER, False, True),
+            ])
+        finally:
+            main.Plugin._state = previous_state
+
+    def test_suspend_clock_offset_counts_only_boottime_difference(self):
+        with mock.patch.object(main.time, "CLOCK_BOOTTIME", 7, create=True), \
+             mock.patch.object(main.time, "clock_gettime", return_value=123.5,
+                               create=True), \
+             mock.patch.object(main.time, "monotonic", return_value=100.0):
+            self.assertEqual(main._suspend_clock_offset(), 23.5)
+
+    def test_controller_monitor_forces_one_restore_after_resume(self):
+        previous_state = main.Plugin._state
+        main.Plugin._state = {
+            "controller": dict(main.DEFAULT_CONTROLLER),
+            "modules_reconnecting": False,
+            "modules_connected": True,
+            "tm_guard_enabled": False,
+            "tm_guard_status": "Disabled",
+            "tm_guard_recoveries": 0,
+        }
+        sleeps = 0
+
+        async def stop_after_two_iterations(_delay):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 2:
+                raise asyncio.CancelledError
+
+        try:
+            with mock.patch.object(main.asyncio, "sleep",
+                                   side_effect=stop_after_two_iterations), \
+                 mock.patch.object(main, "_suspend_clock_offset",
+                                   side_effect=[10.0, 10.0, 15.0]), \
+                 mock.patch.object(main, "reconcile_controller", side_effect=[
+                     ("healthy", "/dev/hidraw7"),
+                     ("configuration_restored", "/dev/hidraw7"),
+                 ]) as reconcile, \
+                 mock.patch.object(main, "_device_node_token",
+                                   return_value=("/dev/hidraw7", 1, 10)), \
+                 mock.patch.object(main, "_rumble_event_token", return_value=None), \
+                 mock.patch.object(main, "CONTROLLER_GAIN_CHECK_INTERVAL", 0):
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(main.Plugin()._tm_guard_loop())
+            self.assertEqual(reconcile.call_args_list, [
+                mock.call(main.DEFAULT_CONTROLLER, False, False),
+                mock.call(main.DEFAULT_CONTROLLER, False, True),
+            ])
+        finally:
+            main.Plugin._state = previous_state
 
     def test_magic_module_quick_reset_packet(self):
         config = {"vibration": "high", "rgb_mode": "solid", "color": "ff0000", "brightness": 100}
@@ -386,15 +676,107 @@ class LogicTests(unittest.TestCase):
             config["vibration"] = "off"
             main.apply_controller(config, True, "high", False)
 
-        self.assertEqual(calls[:3], [
+        self.assertEqual(calls[:4], [
             ("hid", 0x08, 0.4), ("hid", 0x09, 0.4),
+            ("hid", 0x08, 0.4),
             ("pulse", "high", main.VIBRATION_CONFIRM_MS),
         ])
-        self.assertEqual(calls[3:6], [
+        self.assertEqual(calls[4:8], [
             ("pulse", "high", main.VIBRATION_CONFIRM_MS), ("hid", 0x08, 0.4),
-            ("hid", 0x09, 0.4),
+            ("hid", 0x09, 0.4), ("hid", 0x08, 0.4),
         ])
         self.assertNotIn(("hid", 0x05, 1.5), calls)
+
+    def test_controller_write_retries_once_when_firmware_echo_is_stale(self):
+        config = {
+            "vibration": "off", "ff_gain": 100, "rgb_mode": "solid",
+            "color": "ff0000", "brightness": 50,
+        }
+        packet = main.controller_command(config)
+        stale = bytearray(64)
+        stale[3] = main.AYA_CHECK[4]
+        stale[7:15] = packet[8:16]
+        stale[21:24] = packet[22:25]
+        stale[23] = main.VIBRATION_VALUES["high"] << 4
+        current = bytearray(stale)
+        current[23] = packet[24]
+        checks = iter((bytes(stale), bytes(stale), bytes(current)))
+        config_writes = 0
+
+        def exchange(_fd, command, timeout=0.4):
+            nonlocal config_writes
+            if command == main.AYA_CHECK:
+                return next(checks)
+            if command == packet:
+                config_writes += 1
+            return bytes(64)
+
+        with mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
+             mock.patch.object(main, "supported_device", return_value=True), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(main, "_hid_exchange", side_effect=exchange):
+            main.apply_controller(config, persist_firmware=False)
+
+        self.assertEqual(config_writes, 2)
+
+    def test_failed_vibration_feedback_cannot_block_firmware_off(self):
+        config = {
+            "vibration": "off", "ff_gain": 100, "rgb_mode": "solid",
+            "color": "ff0000", "brightness": 50,
+        }
+        commands = []
+
+        def exchange(_fd, command, timeout=0.4):
+            commands.append(command)
+            return bytes(64)
+
+        with mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
+             mock.patch.object(main, "supported_device", return_value=True), \
+             mock.patch.object(main.os, "open", return_value=7), \
+             mock.patch.object(main.os, "close"), \
+             mock.patch.object(main.os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(main, "_hid_exchange", side_effect=exchange), \
+             mock.patch.object(main, "play_vibration_test", side_effect=OSError("not ready")):
+            main.apply_controller(config, True, "high", False)
+
+        self.assertEqual(commands[0], main.AYA_CHECK)
+        self.assertEqual(commands[1][24], main.VIBRATION_VALUES["off"] << 4)
+
+    def test_rumble_node_never_falls_back_to_virtual_controller(self):
+        with mock.patch.object(main.glob, "glob", return_value=["/dev/input/event9"]), \
+             mock.patch.object(main, "_event_has_rumble", return_value=True), \
+             mock.patch.object(main, "_input_event_identity",
+                               return_value=("28de", "1205", "virtual/input0")):
+            self.assertIsNone(main._rumble_event_node())
+        with mock.patch.object(main.glob, "glob", return_value=["/dev/input/event5"]), \
+             mock.patch.object(main, "_event_has_rumble", return_value=True), \
+             mock.patch.object(main, "_input_event_identity", return_value=(
+                 "045e", "028e", "usb-0000:c4:00.3-2/input0")):
+            self.assertEqual(main._rumble_event_node(), "/dev/input/event5")
+
+    def test_rumble_node_prefers_ayaneo_phys_path_over_external_xbox_pad(self):
+        identities = {
+            "/dev/input/event3": ("045e", "028e", "usb-external/input0"),
+            "/dev/input/event7": ("045e", "028e", "usb-0000:c7:00.0-2/input0"),
+        }
+        with mock.patch.object(main.glob, "glob", return_value=list(identities)), \
+             mock.patch.object(main, "_event_has_rumble", return_value=True), \
+             mock.patch.object(main, "_input_event_identity",
+                               side_effect=lambda node: identities[node]):
+            self.assertEqual(main._rumble_event_node(), "/dev/input/event7")
+
+    def test_rumble_node_rejects_multiple_ambiguous_hardware_candidates(self):
+        identities = {
+            "/dev/input/event3": ("045e", "028e", "usb-external-a/input0"),
+            "/dev/input/event7": ("045e", "028e", "usb-external-b/input0"),
+        }
+        with mock.patch.object(main.glob, "glob", return_value=list(identities)), \
+             mock.patch.object(main, "_event_has_rumble", return_value=True), \
+             mock.patch.object(main, "_input_event_identity",
+                               side_effect=lambda node: identities[node]):
+            self.assertIsNone(main._rumble_event_node())
 
     def test_download_url_allowlist(self):
         self.assertEqual(main._checked_download_url(main.RYZENADJ_URL), main.RYZENADJ_URL)
@@ -552,6 +934,7 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(value["vibration"], "high")
         self.assertEqual(value["rgb_mode"], "solid")
         self.assertEqual(value["color"], "3c00ff")
+        self.assertTrue(main.controller_response_matches(response, value))
 
     def test_hx370_custom_mode_flag_uses_status_byte_18(self):
         response = bytes.fromhex(
@@ -601,6 +984,31 @@ class LogicTests(unittest.TestCase):
                  mock.patch.object(main, "controller_powered") as powered, \
                  mock.patch.object(main, "set_controller_power") as set_power:
                 asyncio.run(main.Plugin()._unload())
+            powered.assert_not_called()
+            set_power.assert_not_called()
+        finally:
+            main.Plugin._state = previous_state
+            for name, value in previous_tasks.items():
+                setattr(main.Plugin, name, value)
+
+    def test_unload_does_not_undo_an_in_progress_module_eject(self):
+        previous_state = main.Plugin._state
+        task_names = (
+            "_audio_task", "_restore_task", "_edid_task", "_ac_task",
+            "_module_task", "_tm_guard_task",
+        )
+        previous_tasks = {name: getattr(main.Plugin, name) for name in task_names}
+        main.Plugin._state = {"supported": True, "modules_reconnecting": True}
+        for name in task_names:
+            setattr(main.Plugin, name, None)
+        try:
+            with mock.patch.object(main, "supported_device") as supported, \
+                 mock.patch.object(main, "both_modules_connected") as connected, \
+                 mock.patch.object(main, "controller_powered") as powered, \
+                 mock.patch.object(main, "set_controller_power") as set_power:
+                asyncio.run(main.Plugin()._unload())
+            supported.assert_not_called()
+            connected.assert_not_called()
             powered.assert_not_called()
             set_power.assert_not_called()
         finally:
@@ -810,6 +1218,55 @@ class LogicTests(unittest.TestCase):
             release.set()
             main.settings.data = previous_settings
             main.Plugin._active_app = previous_active_app
+            main.Plugin._state = previous_state
+
+    def test_controller_monitor_reads_state_after_pending_rpc_commits(self):
+        target = {
+            **main.DEFAULT_CONTROLLER,
+            "vibration": "off",
+            "rgb_mode": "pulse",
+            "color": "ff0000",
+            "ff_gain": 60,
+        }
+        started = threading.Event()
+        release = threading.Event()
+        reconciled = []
+        previous_settings = dict(main.settings.data)
+        previous_state = main.Plugin._state
+        main.settings.data = {"controller": dict(main.DEFAULT_CONTROLLER)}
+        main.Plugin._state = {"controller": dict(main.DEFAULT_CONTROLLER)}
+
+        def apply(_value):
+            started.set()
+            if not release.wait(2):
+                raise RuntimeError("test synchronization timed out")
+
+        def reconcile(value, _recover, _force):
+            reconciled.append(dict(value))
+            return "healthy", "/dev/hidraw7"
+
+        async def scenario():
+            first = asyncio.create_task(main.Plugin().set_controller(target))
+            self.assertTrue(await asyncio.to_thread(started.wait, 2))
+            second = asyncio.create_task(asyncio.to_thread(
+                main.Plugin._reconcile_current_controller, False, False))
+            await asyncio.sleep(0.05)
+            self.assertFalse(second.done())
+            release.set()
+            await asyncio.gather(first, second)
+
+        try:
+            with mock.patch.object(main, "apply_controller", side_effect=apply), \
+                 mock.patch.object(main, "reconcile_controller", side_effect=reconcile), \
+                 mock.patch.object(main.Plugin, "get_state",
+                                   new=mock.AsyncMock(return_value={})):
+                asyncio.run(scenario())
+            self.assertEqual(reconciled, [target])
+            self.assertEqual(main.Plugin._state["controller"], target)
+            self.assertEqual(main.settings.data["controller"], target)
+        finally:
+            release.set()
+            main.settings.data = previous_settings
             main.Plugin._state = previous_state
 
     def test_updater_accepts_only_the_exact_release_asset(self):
