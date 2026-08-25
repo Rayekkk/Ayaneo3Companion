@@ -2,6 +2,30 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## [1.0.2] - 2026-08-25
+
+### Fixed
+
+- Verify AYANEO vendor-HID controller writes against the firmware's current
+  report, retry stale writes and automatically repair RGB or vibration settings
+  that drift after startup, resume or controller-device recreation.
+- Restore FF_GAIN whenever the physical rumble input node is recreated, while
+  excluding virtual and unrelated external controllers from device selection.
+- Serialize RGB, firmware vibration and FF_GAIN changes in one frontend queue so
+  rapid adjustments cannot overwrite one another with stale controller state.
+- Keep Magic Module ejection isolated from background recovery and plugin unload,
+  then restore controller settings after a real module reconnection without an
+  unnecessary firmware save or mechanical reset.
+- Recognize the original public Gamma 2.2 OLED definition as Companion-owned.
+  Unknown existing definitions now require explicit replacement confirmation and
+  are backed up and verified before the Companion definition is installed.
+
+### Internal
+
+- Backend tests up to 73 from 55, covering controller report parsing, drift and
+  resume recovery, physical rumble-device selection, concurrent setting writes,
+  Magic Module eject races and safe OLED definition replacement.
+
 ## [1.0.1] - 2026-08-24
 
 ### Added

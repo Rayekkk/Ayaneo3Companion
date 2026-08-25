@@ -99,7 +99,7 @@ On a fresh installation where the QAM button is not available yet, copy
 
 ```bash
 chmod +x bootstrap.sh
-./bootstrap.sh Ayaneo3Companion-1.0.1.zip
+./bootstrap.sh Ayaneo3Companion-1.0.2.zip
 ```
 
 The bootstrap installer checks the device, installs the plugin directly and

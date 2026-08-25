@@ -1290,7 +1290,7 @@ class LogicTests(unittest.TestCase):
         }
         with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
             info = main.updater.check()
-        self.assertEqual(info["current_version"], "1.0.1")
+        self.assertEqual(info["current_version"], "1.0.2")
         self.assertEqual(info["latest_version"], "1.1.0")
         self.assertTrue(info["update_available"])
         self.assertEqual(info["asset_name"], "Ayaneo3Companion-1.1.0.zip")
@@ -1308,7 +1308,7 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(
             {manifest["version"], package["version"], lock["version"],
              lock["packages"][""]["version"]},
-            {"1.0.1"},
+            {"1.0.2"},
         )
         package_script = (root / "scripts" / "package.mjs").read_text()
         self.assertIn('"lego_updater.py"', package_script)
