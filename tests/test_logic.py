@@ -634,6 +634,10 @@ class LogicTests(unittest.TestCase):
             main.Plugin._state = previous_state
 
     def test_display_definition_upgrades_owned_legacy_file_only(self):
+        self.assertTrue({
+            "98de33235379f187b9d0eeb1460016b71fbc808c7cecff574774bbae64a130d4",
+            "f52b721078df6336855c543da325a908477382cd8f313d395a7eabf1ad9f0b21",
+        }.issubset(main.LEGACY_DISPLAY_SCRIPT_SHA256))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.lua"
@@ -653,6 +657,30 @@ class LogicTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     main.install_display_script()
                 self.assertEqual(target.read_bytes(), b"-- belongs to somebody else\n")
+
+    def test_display_definition_replacement_requires_confirmation_and_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.lua"
+            target = root / "target.lua"
+            backups = root / "backups"
+            current = main.LUA_SOURCE.read_bytes()
+            foreign = b"-- existing custom display definition\n"
+            source.write_bytes(current)
+            target.write_bytes(foreign)
+            with mock.patch.object(main, "LUA_SOURCE", source), \
+                 mock.patch.object(main, "LUA_TARGET", target), \
+                 mock.patch.object(main, "DISPLAY_SCRIPT_BACKUP_ROOT", backups), \
+                 mock.patch.object(main, "supported_device", return_value=True):
+                self.assertTrue(main._display_script_conflict(target))
+                with self.assertRaisesRegex(RuntimeError, "requires confirmation"):
+                    main.install_display_script()
+                self.assertEqual(target.read_bytes(), foreign)
+                backup = main.install_display_script(replace_existing=True)
+                self.assertIsNotNone(backup)
+                self.assertEqual(backup.read_bytes(), foreign)
+                self.assertEqual(target.read_bytes(), current)
+                self.assertFalse(main._display_script_conflict(target))
 
     def test_display_definition_removal_is_owned_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -675,7 +703,7 @@ class LogicTests(unittest.TestCase):
              mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value=state)), \
              mock.patch.object(main.decky.logger, "warning") as warning:
             result = asyncio.run(main.Plugin().set_screen_fix(True))
-        install_display.assert_called_once_with()
+        install_display.assert_called_once_with(False)
         warning.assert_called_once()
         self.assertIs(result, state)
 

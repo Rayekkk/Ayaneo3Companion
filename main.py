@@ -74,7 +74,11 @@ _ssl_ctx = None
 LUA_SOURCE = PLUGIN_DIR / "assets" / "ayaneo.ayaneo3.oled.lua"
 LUA_TARGET = Path("/etc/gamescope/scripts/00-gamescope/displays/ayaneo.ayaneo3.oled.lua")
 DISPLAY_SCRIPT_MARKER = b"-- Managed by AYANEO 3 Companion\n"
+DISPLAY_SCRIPT_BACKUP_ROOT = Path("/var/lib/ayaneo3-companion/display-definition")
 LEGACY_DISPLAY_SCRIPT_SHA256 = frozenset({
+    # Initial public Gamma 2.2 definition (Display-P3 primaries).
+    "98de33235379f187b9d0eeb1460016b71fbc808c7cecff574774bbae64a130d4",
+    # Pre-marker DXQ7D0023 calibration.
     "f52b721078df6336855c543da325a908477382cd8f313d395a7eabf1ad9f0b21",
 })
 PUBLISHED_EDID = Path("/home/deck/.config/gamescope/edid.bin")
@@ -1862,13 +1866,35 @@ def _is_our_display_script(path: Path) -> bool:
     return data is not None and source is not None and data == source
 
 
-def install_display_script() -> None:
+def _display_script_conflict(path: Path) -> bool:
+    return path.is_symlink() or (path.exists() and not _display_script_owned(path))
+
+
+def _backup_display_script(data: bytes) -> Path:
+    DISPLAY_SCRIPT_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    digest = hashlib.sha256(data).hexdigest()[:12]
+    target = DISPLAY_SCRIPT_BACKUP_ROOT / f"{LUA_TARGET.name}-{stamp}-{digest}.bak"
+    with target.open("xb") as output:
+        output.write(data)
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(target, 0o600)
+    if target.read_bytes() != data:
+        raise RuntimeError("display definition backup verification failed")
+    return target
+
+
+def install_display_script(replace_existing: bool = False) -> Path | None:
     """Install or upgrade only a display definition owned by this plugin."""
     require_supported_device("display definition")
     if LUA_TARGET.is_symlink():
         raise RuntimeError("refusing to replace a symlinked gamescope definition")
+    backup = None
     if LUA_TARGET.exists() and not _display_script_owned(LUA_TARGET):
-        raise RuntimeError("another AYANEO 3 gamescope definition already exists")
+        if not replace_existing:
+            raise RuntimeError("display definition replacement requires confirmation")
+        backup = _backup_display_script(LUA_TARGET.read_bytes())
     LUA_TARGET.parent.mkdir(parents=True, exist_ok=True)
     temporary = LUA_TARGET.with_name(f".{LUA_TARGET.name}.tmp")
     try:
@@ -1878,6 +1904,7 @@ def install_display_script() -> None:
     finally:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
+    return backup
 
 
 def remove_display_script() -> None:
@@ -2078,6 +2105,7 @@ class Plugin:
         except RuntimeError:
             state["cpu_boost_supported"] = False
         state["screen_installed"] = _is_our_display_script(LUA_TARGET)
+        state["screen_conflict"] = _display_script_conflict(LUA_TARGET)
         try:
             edid = PUBLISHED_EDID.read_bytes()
             state["edid_game_nits"] = round(_published_edid_nits(edid) or 0)
@@ -2400,10 +2428,14 @@ class Plugin:
             raise
         return await self.get_state()
 
-    async def set_screen_fix(self, enabled):
+    async def set_screen_fix(self, enabled, replace_existing=False):
         try:
             if enabled:
-                await asyncio.to_thread(install_display_script)
+                backup = await asyncio.to_thread(
+                    install_display_script, bool(replace_existing))
+                if backup is not None:
+                    decky.logger.info(
+                        f"{LOG} replaced existing display definition; backup={backup}")
                 try:
                     await asyncio.to_thread(patch_published_edid)
                 except Exception as error:
@@ -2741,6 +2773,7 @@ class Plugin:
             "cpu_boost": cpu_boost,
             "controller": saved_controller,
             "screen_installed": screen_installed,
+            "screen_conflict": _display_script_conflict(LUA_TARGET),
             "edid_patched": False,
             "edid_game_nits": 0,
             "button_fix_installed": key_binding_installed,

@@ -21,7 +21,7 @@ interface GameProfile { exists: boolean; profile: Tdp; preset?: Preset }
 interface ModuleInfo { code: number | null; label: string; layout: string; status: string; connected: boolean }
 interface BatteryStatus { available: boolean; percent: number | null; status: string; seconds_to_full: number | null; power_w: number | null; source: "UPower" | "sysfs" | "none" }
 interface UpdateInfo { current_version?: string; latest_version?: string; update_available?: boolean; download_url?: string | null; asset_name?: string | null; error?: string }
-interface State { supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; cpu_boost_supported: boolean; cpu_boost: boolean; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
+interface State { supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; cpu_boost_supported: boolean; cpu_boost: boolean; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; screen_conflict: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
 
 const getState = callable<[], State>("get_state");
 const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
@@ -41,7 +41,7 @@ const testVibration = callable<[number], { success: boolean; error?: string }>("
 const setChargeBypass = callable<[boolean], State>("set_charge_bypass");
 const ejectModules = callable<["left" | "right" | "both"], State>("eject_modules");
 const resetModules = callable<[], State>("reset_modules");
-const setScreenFix = callable<[boolean], State>("set_screen_fix");
+const setScreenFix = callable<[boolean, boolean?], State>("set_screen_fix");
 const setButtonFix = callable<[boolean], State>("set_button_fix");
 const setTmGuard = callable<[boolean], State>("set_tm_guard");
 const setAudioFix = callable<[boolean], State>("set_audio_fix");
@@ -489,6 +489,29 @@ const Content: FC = () => {
   if (!state) return <PanelSection><PanelSectionRow><Spinner /></PanelSectionRow></PanelSection>;
   if (!state.supported) return <PanelSection title="Unsupported device"><PanelSectionRow><Field label={state.device} description="AYANEO 3 is required." /></PanelSectionRow></PanelSection>;
 
+  const changeScreenFix = (enabled: boolean) => {
+    const apply = (replaceExisting = false) => void run(
+      "screen",
+      () => setScreenFix(enabled, replaceExisting),
+      "Display fix failed",
+      enabled ? "Display definition installed. Restart Game Mode." : "Display definition removed. Restart Game Mode.",
+    );
+    if (enabled && state.screen_conflict) {
+      openModal(
+        <ConfirmModal
+          strTitle="Replace Display Definition?"
+          strDescription="Another AYANEO 3 gamescope display definition is already installed. OLED Fix must replace it to manage the display. The existing file will be backed up before any change."
+          strOKButtonText="Replace"
+          strCancelButtonText="Keep Existing"
+          bDestructiveWarning
+          onOK={() => apply(true)}
+        />,
+      );
+      return;
+    }
+    apply();
+  };
+
   const tdp = state.tdp;
   const tuning = normalise(fromAbsolute(tdp));
   const spptOff = tuning.spptOff;
@@ -711,7 +734,7 @@ const Content: FC = () => {
       <SectionLink title="Magic Modules" description={moduleSummary} onClick={() => openSection("modules")} />
       <SectionLink title="Audio" description={audioSummary} onClick={() => openSection("audio")} />
       <SectionLink title="Key Binding" description={`${state.button_fix_installed ? "L5/R5 enabled" : "Native mapping"} · TM Guard ${state.tm_guard_enabled ? "on" : "off"}`} onClick={() => openSection("buttons")} />
-      <SectionLink title="OLED Display" description={state.screen_installed ? `Definition installed · ${state.edid_game_nits || 800} nits` : "Display definition not installed"} onClick={() => openSection("screen")} />
+      <SectionLink title="OLED Display" description={state.screen_installed ? `Definition installed · ${state.edid_game_nits || 800} nits` : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed"} onClick={() => openSection("screen")} />
     </PanelSection>
     <PanelSection title="Device">
       <PanelSectionRow><Field label={state.device} description={`TDP backend: ${state.tdp_backend}`} /></PanelSectionRow>
@@ -867,7 +890,7 @@ const Content: FC = () => {
     </PanelSection>}
 
     {activeSection === "screen" && <PanelSection title="Display Definition">
-      <PanelSectionRow><ToggleField label="Install Display Definition" description="Install the AYANEO 3 OLED HDR, colour and 60/90/120/144 Hz gamescope definition with Gamma 2.2 output." checked={state.screen_installed} disabled={busy} onChange={enabled => void run("screen", () => setScreenFix(enabled), "Display fix failed", enabled ? "Display definition installed. Restart Game Mode." : "Display definition removed. Restart Game Mode.")} /></PanelSectionRow>
+      <PanelSectionRow><ToggleField label="Install Display Definition" description={state.screen_conflict ? "An existing display definition must be replaced before OLED Fix can be enabled." : "Install the AYANEO 3 OLED HDR, colour and 60/90/120/144 Hz gamescope definition with Gamma 2.2 output."} checked={state.screen_installed} disabled={busy} onChange={changeScreenFix} /></PanelSectionRow>
       <PanelSectionRow><Field label={state.edid_patched ? "EDID metadata normalized" : "EDID update waiting"} description={state.edid_game_nits ? `Games see AYANEO's advertised ${state.edid_game_nits}-nit maximum.` : "Waiting for gamescope to publish the display EDID."} /></PanelSectionRow>
       <PanelSectionRow><Field label="Restart required after changing" description="Restart Game Mode manually so gamescope reloads the display definition." /></PanelSectionRow>
     </PanelSection>}
