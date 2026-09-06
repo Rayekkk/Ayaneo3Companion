@@ -63,27 +63,29 @@ Other AYANEO models are deliberately rejected by the device checks.
 
 ## Installation
 
-**1.** Install [Decky Loader](https://decky.xyz) if you haven't already.
-**2.** Download `Ayaneo3Companion-x.x.x.zip` from the [Releases](https://github.com/Rayekkk/Ayaneo3Companion/releases) page.
-**3.** In Gaming Mode, open the **Quick Access Menu**.
-**4.** Open the Decky menu, scroll to the bottom, then **Developer → Install Plugin from ZIP**.
-**5.** Select the downloaded zip.
+1. Install [Decky Loader](https://decky.xyz) if you haven't already.
+2. Download `Ayaneo3Companion-x.x.x.zip` from the [Releases](https://github.com/Rayekkk/Ayaneo3Companion/releases) page.
+3. In Gaming Mode, open the **Quick Access Menu**.
+4. Open the Decky menu, scroll to the bottom, then **Developer → Install Plugin from ZIP**.
+5. Select the downloaded zip.
 
 <details>
 <summary><b>Building from source</b></summary>
 
 <br>
 
-Requires Node.js 18+ and Python 3.10+.
+The development checks use Node.js 24 and Python 3.10 or 3.13.
 
 ```bash
 git clone https://github.com/Rayekkk/Ayaneo3Companion
 cd Ayaneo3Companion
 
-npm install
+npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
+npm run test:frontend
+npm run test:backend
 npm run build
-python -m unittest discover -s tests -v
+npm run package -- --check
 npm run package    # produces Ayaneo3Companion-<version>.zip
 ```
 
@@ -99,7 +101,7 @@ On a fresh installation where the QAM button is not available yet, copy
 
 ```bash
 chmod +x bootstrap.sh
-./bootstrap.sh Ayaneo3Companion-1.0.2.zip
+./bootstrap.sh Ayaneo3Companion-1.1.0.zip
 ```
 
 The bootstrap installer checks the device, installs the plugin directly and
@@ -117,7 +119,9 @@ Game Mode when the panel asks for it.
 
 The plugin opens on a compact hardware overview. Each row shows the current
 state and opens a dedicated control page; **All Controls** returns to the
-overview. Closing and reopening QAM always returns to this overview.
+overview. Closing and reopening QAM returns to this overview; choosing an option
+in a native dropdown keeps the current page open. The last confirmed overview
+state is shown immediately while a fresh read completes.
 
 - Open **TDP** to select a preset or create a Custom configuration. Enable
   **Per Game Profile** while a game is running to bind the chosen values to it.
@@ -142,8 +146,25 @@ overview. Closing and reopening QAM always returns to this overview.
 - Open **OLED display** to install the gamescope definition and verify its HDR metadata.
 - Open **About** at the bottom of the overview to see the installed version,
   check GitHub releases and download a newer plugin ZIP when one is available.
+  The result remains available when returning to About during the same plugin
+  session; repeated clicks do not start duplicate downloads.
 
 ## How it works
+
+Settings are committed as one complete JSON file using an atomic replacement,
+with a last-good backup. A damaged primary file is recovered from that backup;
+if neither copy can be read safely, hardware changes stop and the panel explains
+the problem. Failed setting changes restore the previous configuration where
+the hardware interface supports restoration.
+
+Pending RGB and vibration adjustments are saved even when their control page
+closes. Status polls never overlap and stop while QAM is hidden; completed writes and a new
+game context cannot be overwritten by an older response. Per-game tracking and
+the existing recovery monitors continue independently of the panel.
+
+GitHub downloads are limited to this plugin's stable release ZIP. The updater
+checks the release's SHA-256 digest, archive paths, sizes and plugin identity
+before publishing a complete file in Downloads.
 
 The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
 37 W FPPT; Custom tuning is also capped at 37 W.
@@ -194,16 +215,25 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
 The complete verification sequence is:
 
 ```bash
-npm ci
+npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
+npm run test:frontend
+npm run test:backend
 npm run build
-python -m unittest discover -s tests -v
+npm run package -- --check
 npm run package
 ```
 
-The backend tests run without AYANEO hardware. Device-specific paths are isolated
-behind hardware checks and are also exercised on both retail processor variants
-before release.
+Backend tests run without AYANEO hardware, using isolated temporary files and
+mocked device interfaces. The frontend suite runs the actual components with
+controlled RPC completion order to exercise saves, polling, game changes,
+dropdowns and panel lifecycles. GitHub Actions runs the backend suite on Ubuntu
+with Python 3.10 and Windows with Python 3.13, then checks the frontend and the
+contents of the built ZIP with Node.js 24.
+
+These checks do not verify live hardware. Startup, suspend/resume, charger
+changes, module reconnection and physical controller behaviour still require
+validation on an AYANEO 3 before claiming a hardware-tested release.
 
 ---
 

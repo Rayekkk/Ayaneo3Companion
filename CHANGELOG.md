@@ -2,6 +2,38 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## [1.1.0] - 2026-09-06
+
+### Fixed
+
+- Commit complete settings atomically, retain a last-good recovery copy and
+  refuse unsafe paths or unreadable settings instead of overwriting user intent.
+- Keep hardware transactions serialized through cancellation and plugin shutdown,
+  and restore the previous setting when a write or persistence step fails.
+- Reject TDP and profile edits captured for a game that is no longer active.
+- Preserve pending RGB and vibration changes when closing a page, merge rapid
+  slider changes and prevent stale status replies from reverting saved controls.
+- Keep native dropdown selections on their current page, retain confirmed
+  overview and update results, and stop overlapping or hidden status polls.
+- Clear delayed app notifications on unload and recover from temporary profile
+  lookup errors without requiring the user to reopen the menu.
+- Validate the exact GitHub release ZIP, its SHA-256 digest and archive contents;
+  publish downloads atomically and avoid duplicate checks or downloads.
+- Resolve audio-session and gamescope EDID paths from the Decky user account,
+  including accounts with names or UIDs other than deck/1000.
+- Bound EDID status reads and report a failed calibration-history save separately
+  from a completed hardware calibration, retaining the recovery backup path.
+- Verify hardware write readbacks, recover partial button-map changes and back
+  off repeated interface failures while retaining resume and drift recovery.
+
+### Internal
+
+- Add frontend lifecycle regression tests and isolated backend failure tests.
+- Check Python 3.10 on Linux, Python 3.13 on Windows, frontend types, the production
+  build and package contents in GitHub Actions using pinned action revisions.
+- Synchronize release metadata and add package payload validation. Existing
+  functions, defaults, button mappings and the 35/37 W Custom limits are unchanged.
+
 ## [1.0.2] - 2026-08-25
 
 ### Fixed

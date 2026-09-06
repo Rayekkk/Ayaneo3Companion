@@ -5,7 +5,8 @@ def install():
     decky = types.ModuleType("decky")
     decky.DECKY_PLUGIN_DIR = os.path.dirname(os.path.dirname(__file__))
     decky.DECKY_PLUGIN_SETTINGS_DIR = temp
-    decky.logger = types.SimpleNamespace(info=lambda *_: None, warning=lambda *_: None, error=lambda *_: None)
+    decky.logger = types.SimpleNamespace(info=lambda *_: None, warning=lambda *_: None,
+                                        error=lambda *_: None, debug=lambda *_: None)
     sys.modules["decky"] = decky
     settings = types.ModuleType("settings")
     class SettingsManager:

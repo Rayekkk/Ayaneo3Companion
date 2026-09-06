@@ -1,10 +1,41 @@
-node_modules/
-dist/
-build/
+# Dependencies and generated artifacts
+/node_modules/
+/dist/
+/build/
+/bin/
 *.zip
+*.pending
+
+# Python and test caches
 __pycache__/
-tests/_settings/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+/tests/_settings/
+
+# Local hardware research and maintenance artifacts
 /AYANEO3_Audio_Calibration/
 /AYANEO3_EC_0.21_SHELL/
 /AYANEO_3_Drivers_20250409/
+/AYANEO3_Controller_Firmware_V12_2025052201/
 /artifacts/
+
+# Local configuration, credentials and runtime settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+/*settings.json
+/*settings.json.bak
+/*settings.json.corrupt-*
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

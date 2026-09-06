@@ -21,18 +21,18 @@ interface GameProfile { exists: boolean; profile: Tdp; preset?: Preset }
 interface ModuleInfo { code: number | null; label: string; layout: string; status: string; connected: boolean }
 interface BatteryStatus { available: boolean; percent: number | null; status: string; seconds_to_full: number | null; power_w: number | null; source: "UPower" | "sysfs" | "none" }
 interface UpdateInfo { current_version?: string; latest_version?: string; update_available?: boolean; download_url?: string | null; asset_name?: string | null; error?: string }
-interface State { supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; cpu_boost_supported: boolean; cpu_boost: boolean; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; screen_conflict: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
+interface State { settings_error?: string; initializing?: boolean; startup_error?: string; supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; cpu_boost_supported: boolean; cpu_boost: boolean; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; screen_conflict: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
 
 const getState = callable<[], State>("get_state");
 const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
 const getVersion = callable<[], { version: string }>("get_version");
 const checkForUpdates = callable<[], UpdateInfo>("check_for_updates");
 const performUpdate = callable<[], { success: boolean; path?: string; error?: string }>("perform_update");
-const setTdp = callable<[Tdp, Preset], State>("set_tdp");
+const setTdp = callable<[Tdp, Preset, string], State>("set_tdp");
 const setCpuBoost = callable<[boolean], State>("set_cpu_boost");
 const getGameProfile = callable<[string], GameProfile>("get_game_profile");
-const setGameProfile = callable<[string, Tdp, Preset], State>("set_game_profile");
-const deleteGameProfile = callable<[string], State>("delete_game_profile");
+const setGameProfile = callable<[string, Tdp, Preset, string], State>("set_game_profile");
+const deleteGameProfile = callable<[string, string], State>("delete_game_profile");
 const setActiveApp = callable<[string], void>("set_active_app");
 const setController = callable<[Controller], State>("set_controller");
 const setControllerWithVibrationFeedback = callable<[Controller], State>("set_controller_with_vibration_feedback");
@@ -74,6 +74,8 @@ class AppWatcher {
   private static started = false;
   private static busy = false;
   private static lastPush = 0;
+  private static generation = 0;
+  private static lifetimeTimer: ReturnType<typeof setTimeout> | undefined;
 
   static activeGame(): RunningGame | null {
     try {
@@ -89,13 +91,20 @@ class AppWatcher {
   static start() {
     if (this.started) return;
     this.started = true;
+    const generation = ++this.generation;
+    this.busy = false;
     this.current = this.activeGame();
 
     try {
       const registration = (window as any).SteamClient?.GameSessions
         ?.RegisterForAppLifetimeNotifications?.(() => {
           // Router.MainRunningApp updates shortly after Steam's notification.
-          setTimeout(() => void this.check(), 300);
+          if (!this.started || generation !== this.generation) return;
+          if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
+          this.lifetimeTimer = setTimeout(() => {
+            this.lifetimeTimer = undefined;
+            if (this.started && generation === this.generation) void this.check();
+          }, 300);
         });
       if (registration?.unregister) this.unsubs.push(() => registration.unregister());
     } catch (error) {
@@ -106,6 +115,10 @@ class AppWatcher {
     void this.check(true);
   }
   static stop() {
+    ++this.generation;
+    this.busy = false;
+    if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
+    this.lifetimeTimer = undefined;
     if (this.timer) clearInterval(this.timer);
     for (const unsubscribe of this.unsubs) {
       try { unsubscribe(); } catch { /* subscription may already be gone */ }
@@ -113,18 +126,19 @@ class AppWatcher {
     this.timer = undefined; this.unsubs = []; this.listeners = []; this.current = null; this.started = false; this.lastPush = 0;
   }
   private static async check(force = false) {
-    if (this.busy) return;
+    if (!this.started || this.busy) return;
+    const generation = this.generation;
     const game = this.activeGame();
     const changed = game?.appId !== this.current?.appId;
     this.current = game;
+    if (changed) this.listeners.forEach(listener => listener(game));
     const now = Date.now();
     if (force || changed || now - this.lastPush >= 6000) {
       this.busy = true;
-      try { await setActiveApp(game?.appId ?? ""); this.lastPush = now; }
+      try { await setActiveApp(game?.appId ?? ""); if (generation === this.generation) this.lastPush = now; }
       catch (error) { console.error("[ayaneo3companion] active app update failed", error); }
-      finally { this.busy = false; }
+      finally { if (generation === this.generation) this.busy = false; }
     }
-    if (changed) this.listeners.forEach(listener => listener(game));
   }
 }
 
@@ -153,24 +167,13 @@ interface SlowSliderProps {
   onChange(value: number): void; onChangeEnd(value: number): void;
 }
 
-// Update the preview immediately, then send one hardware write after movement
-// has stopped. Keeping the timer in a ref avoids the initial no-op write and
-// stale-value races caused by an effect tied to render state.
-const SlowSliderField: FC<SlowSliderProps> = slider => {
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const commit = useRef(slider.onChangeEnd);
-  commit.current = slider.onChangeEnd;
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  return <SliderField
-    label={slider.label} value={slider.value} min={slider.min} max={slider.max}
-    validValues="range" showValue valueSuffix={slider.valueSuffix} className={slider.className}
-    onChange={value => {
-      slider.onChange(value);
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => { timer.current = null; commit.current(value); }, 500);
-    }}
-  />;
-};
+// The parent owns the debounce and write queue, so leaving the RGB page cannot
+// discard a pending slider value or send an older sibling slider closure.
+const SlowSliderField: FC<SlowSliderProps> = slider => <SliderField
+  label={slider.label} value={slider.value} min={slider.min} max={slider.max}
+  validValues="range" showValue valueSuffix={slider.valueSuffix} className={slider.className}
+  onChange={value => { slider.onChange(value); slider.onChangeEnd(value); }}
+/>;
 
 function detectPreset(tdp: Tdp, presets: Record<string, Tdp>): Preset {
   for (const name of ["Minimum", "Low power", "Balanced", "Performance", "Max"] as Preset[]) {
@@ -246,19 +249,27 @@ const StackedAction: FC<{
   </PanelSectionRow>
 );
 
+interface UpdateView { info: UpdateInfo | null; checking: boolean; downloading: boolean; path: string | null }
+let updateView: UpdateView = { info: null, checking: false, downloading: false, path: null };
+let updateGeneration = 0;
+const updateListeners = new Set<(value: UpdateView) => void>();
+const publishUpdate = (next: Partial<UpdateView>) => {
+  updateView = { ...updateView, ...next };
+  updateListeners.forEach(listener => listener(updateView));
+};
 const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }) => {
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadPath, setDownloadPath] = useState<string | null>(null);
+  const [view, setView] = useState(updateView);
+  const { info: updateInfo, checking, downloading, path: downloadPath } = view;
   const [version, setVersion] = useState(initialVersion);
 
   useEffect(() => {
     let active = true;
+    updateListeners.add(setView);
+    setView(updateView);
     getVersion()
       .then(result => { if (active && result.version) setVersion(result.version); })
       .catch(() => undefined);
-    return () => { active = false; };
+    return () => { active = false; updateListeners.delete(setView); };
   }, []);
 
   const notifyFailure = (title: string, error: unknown) => {
@@ -268,32 +279,38 @@ const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }) => {
   };
 
   const check = useCallback(async () => {
-    setChecking(true);
-    setUpdateInfo(null);
-    setDownloadPath(null);
+    if (updateView.checking || updateView.downloading) return;
+    const generation = updateGeneration;
+    publishUpdate({ checking: true, info: null, path: null });
     try {
-      setUpdateInfo(await checkForUpdates());
+      const info = await checkForUpdates();
+      if (generation === updateGeneration) publishUpdate({ info });
     } catch (error) {
-      notifyFailure("Update check failed", error);
-      setUpdateInfo({ error: error instanceof Error ? error.message : String(error) });
+      if (generation === updateGeneration) {
+        notifyFailure("Update check failed", error);
+        publishUpdate({ info: { error: error instanceof Error ? error.message : String(error) } });
+      }
     } finally {
-      setChecking(false);
+      if (generation === updateGeneration) publishUpdate({ checking: false });
     }
   }, []);
 
   const download = useCallback(async () => {
-    setDownloading(true);
+    if (updateView.checking || updateView.downloading) return;
+    const generation = updateGeneration;
+    publishUpdate({ downloading: true });
     try {
       const result = await performUpdate();
-      if (result.success && result.path) setDownloadPath(result.path);
-      else {
-        setUpdateInfo(current => ({ ...(current ?? {}), error: result.error ?? "Unknown error" }));
-        notifyFailure("Download failed", result.error ?? "Unknown error");
-      }
+      if (generation !== updateGeneration) return;
+      if (result.success && result.path) publishUpdate({ path: result.path });
+      else throw new Error(result.error ?? "Unknown error");
     } catch (error) {
-      notifyFailure("Download failed", error);
+      if (generation === updateGeneration) {
+        publishUpdate({ info: { ...(updateView.info ?? {}), error: error instanceof Error ? error.message : String(error) } });
+        notifyFailure("Download failed", error);
+      }
     } finally {
-      setDownloading(false);
+      if (generation === updateGeneration) publishUpdate({ downloading: false });
     }
   }, []);
 
@@ -341,8 +358,22 @@ const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }) => {
   </PanelSection>;
 };
 
+let confirmedState: State | null = null;
+
 const Content: FC = () => {
   const visible = useQuickAccessVisible();
+  const mounted = useRef(true);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const revision = useRef(0);
+  const reading = useRef(false);
+  const flushPendingController = useRef<() => void>(() => {});
+  const desiredController = useRef<Controller | null>(null);
+  const desiredRgb = useRef<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; ++revision.current; flushPendingController.current(); };
+  }, []);
   const wasVisible = useRef(false);
   const transientOverlay = useRef(false);
   const presetInitialized = useRef(false);
@@ -353,78 +384,122 @@ const Content: FC = () => {
   const controllerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const appliedController = useRef<Controller | null>(null);
   const lastRgbMode = useRef<RgbMode>("solid");
-  const [state, setState] = useState<State | null>(null);
+  const [state, setState] = useState<State | null>(confirmedState);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
-  const [preset, setPreset] = useState<Preset>("Custom");
+  const [preset, setPreset] = useState<Preset>(() => confirmedState ? confirmedState.tdp_preset ?? detectPreset(confirmedState.tdp, confirmedState.presets) : "Custom");
   const [pendingAction, setPendingAction] = useState<ActionKey | null>(null);
   const pendingActionRef = useRef<ActionKey | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [rgbEdit, setRgbEdit] = useState<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
   const [game, setGame] = useState<RunningGame | null>(AppWatcher.currentGame());
   const [perGame, setPerGame] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(Boolean(game));
   const [savedGamePreset, setSavedGamePreset] = useState<Preset | undefined>(undefined);
   const [battery, setBattery] = useState<BatteryStatus | null>(null);
   const gameRequest = useRef(0);
-  const busy = pendingAction !== null;
+  const profileReady = useRef(!game);
+  const contextStateReady = useRef(false);
+  const busy = pendingAction !== null || Boolean(state?.settings_error || state?.initializing);
+  const tdpBusy = busy || profileLoading;
+  const currentGameId = useRef(game?.appId ?? "");
+  currentGameId.current = game?.appId ?? "";
+  const validContext = (context: string) => mounted.current && currentGameId.current === context && (AppWatcher.activeGame()?.appId ?? "") === context;
+  const notifyFailure = (title: string, error: unknown) => {
+    const body = error instanceof Error ? error.message : String(error);
+    try { toaster.toast({ title, body }); } catch { console.error(`[ayaneo3companion] ${title}: ${body}`); }
+  };
+  const acceptState = (next: State) => {
+    if (!mounted.current) return;
+    confirmedState = next;
+    setState(current => current ? { ...next,
+      tdp: tdpDirty.current ? current.tdp : next.tdp,
+      controller: controllerDirty.current ? current.controller : next.controller,
+    } : next);
+  };
 
   useEffect(() => {
     if (!state || controllerDirty.current) return;
     const hsv = hexToHsv(state.controller.color);
-    setRgbEdit({ ...hsv, brightness: state.controller.brightness });
+    desiredRgb.current = { ...hsv, brightness: state.controller.brightness };
+    setRgbEdit(desiredRgb.current);
   }, [state?.controller.color, state?.controller.brightness]);
 
   useEffect(() => {
     if (state && !controllerDirty.current) {
       appliedController.current = state.controller;
+      desiredController.current = state.controller;
+      if (state.controller.rgb_mode !== "off") lastRgbMode.current = state.controller.rgb_mode;
     }
   }, [state?.controller]);
 
-  useEffect(() => AppWatcher.listen(setGame), []);
+  useEffect(() => AppWatcher.listen(next => {
+    ++revision.current;
+    tdpDirty.current = false;
+    presetInitialized.current = false;
+    currentGameId.current = next?.appId ?? "";
+    profileReady.current = !next;
+    contextStateReady.current = false;
+    setGame(next);
+    setProfileLoading(Boolean(next));
+  }), []);
+
+  const refresh = useCallback(async () => {
+    if (!mounted.current || !visibleRef.current || reading.current || pendingActionRef.current || controllerWriting.current || controllerPending.current) return;
+    reading.current = true;
+    const request = revision.current;
+    try {
+      const next = await getState();
+      if (!mounted.current || !visibleRef.current || request !== revision.current) return;
+      acceptState(next);
+      contextStateReady.current = true;
+      setProfileLoading(!profileReady.current);
+      if (!presetInitialized.current && !tdpDirty.current && !pendingActionRef.current) {
+        presetInitialized.current = true;
+        setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
+      }
+    } catch (error) {
+      if (mounted.current && visibleRef.current && request === revision.current && !confirmedState) {
+        setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } finally {
+      reading.current = false;
+      if (mounted.current && visibleRef.current && request !== revision.current) void refresh();
+    }
+  }, []);
 
   useEffect(() => {
     const request = ++gameRequest.current;
-    if (!game) {
-      setPerGame(false);
-      setSavedGamePreset(undefined);
-      void getState().then(next => {
-        if (request !== gameRequest.current || AppWatcher.currentGame()) return;
-        setState(next); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
-      });
-      return;
-    }
-    void getGameProfile(game.appId).then(profile => {
-      if (request !== gameRequest.current || AppWatcher.currentGame()?.appId !== game.appId) return;
-      setPerGame(profile.exists);
-      if (profile.exists) {
-        const stored = profile.preset ?? detectPreset(profile.profile, state?.presets ?? {});
-        setSavedGamePreset(stored);
-        setPreset(stored);
-        setState(current => current ? { ...current, tdp: profile.profile } : current);
-      } else {
-        setSavedGamePreset(undefined);
-        void getState().then(next => {
-          if (request !== gameRequest.current || AppWatcher.currentGame()?.appId !== game.appId) return;
-          setState(next); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
-        });
+    const context = game?.appId ?? "";
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    setPerGame(false);
+    setSavedGamePreset(undefined);
+    if (!visible || !game) { if (!game) setProfileLoading(false); return; }
+    profileReady.current = false;
+    setProfileLoading(true);
+    const current = () => request === gameRequest.current && validContext(context) && visibleRef.current;
+    const lookup = async () => {
+      if (!current()) return;
+      try {
+        const profile = await getGameProfile(context);
+        if (!current()) return;
+        profileReady.current = true;
+        setProfileLoading(!contextStateReady.current);
+        setPerGame(profile.exists);
+        if (profile.exists) {
+          const stored = profile.preset ?? detectPreset(profile.profile, confirmedState?.presets ?? {});
+          setSavedGamePreset(stored);
+          setPreset(stored);
+        }
+      } catch (error) {
+        if (current()) {
+          setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+          retry = setTimeout(() => { retry = undefined; void lookup(); }, 3000);
+        }
       }
-    }).catch(error => console.error("[ayaneo3companion] game profile lookup failed", error));
-    return () => { gameRequest.current += 1; };
-  }, [game?.appId]);
-
-  const refresh = useCallback(async () => {
-    try {
-      const next = await getState();
-      setState(current => {
-        if (!current) return next;
-        return {
-          ...next,
-          tdp: tdpDirty.current ? current.tdp : next.tdp,
-          controller: controllerDirty.current ? current.controller : next.controller,
-        };
-      });
-      if (!presetInitialized.current) { presetInitialized.current = true; setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets)); }
-    } catch { /* backend may still be starting */ }
-  }, []);
+    };
+    void lookup();
+    return () => { gameRequest.current += 1; if (retry) clearTimeout(retry); };
+  }, [game?.appId, visible]);
 
   useEffect(() => {
     if (visible && !wasVisible.current) {
@@ -436,8 +511,9 @@ const Content: FC = () => {
       }
     }
     wasVisible.current = visible;
-    if (!visible) return;
-    refresh();
+    ++revision.current;
+    if (!visible) { flushPendingController.current(); return; }
+    void refresh();
     const timer = setInterval(refresh, 1500);
     return () => clearInterval(timer);
   }, [refresh, visible]);
@@ -445,32 +521,41 @@ const Content: FC = () => {
   useEffect(() => {
     if (!visible || activeSection !== "battery") return;
     let cancelled = false;
+    let readingBattery = false;
     const updateBattery = async () => {
+      if (cancelled || readingBattery) return;
+      readingBattery = true;
       try {
         const next = await getBatteryStatus();
         if (!cancelled) setBattery(next);
       } catch (error) {
         console.warn("[ayaneo3companion] battery status unavailable", error);
-      }
+      } finally { readingBattery = false; }
     };
     void updateBattery();
     const timer = setInterval(() => void updateBattery(), 10000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [activeSection, visible]);
 
-  useEffect(() => () => {
-    if (controllerTimer.current) clearTimeout(controllerTimer.current);
-  }, []);
 
   const run = async (action: ActionKey, work: () => Promise<State>, title: string, success?: string) => {
-    if (pendingActionRef.current) return;
+    if (pendingActionRef.current || state?.settings_error || state?.initializing) return;
+    const context = currentGameId.current;
+    ++revision.current;
+    if (action === "tdp" || action === "profile") ++gameRequest.current;
     pendingActionRef.current = action;
     setPendingAction(action); setStatus(null);
-    try { setState(await work()); if (success) setStatus(success); }
-    catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(`Error: ${message}`); toaster.toast({ title, body: message }); await refresh();
-    } finally { pendingActionRef.current = null; setPendingAction(null); }
+    try {
+      const next = await work();
+      if (validContext(context)) { acceptState(next); if (success) setStatus(success); }
+    } catch (error) {
+      notifyFailure(title, error);
+      if (validContext(context)) setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      ++revision.current;
+      pendingActionRef.current = null;
+      if (mounted.current) { setPendingAction(null); void refresh(); }
+    }
   };
 
   const openDropdown = (showMenu: () => void) => {
@@ -482,7 +567,8 @@ const Content: FC = () => {
     showModal(modal);
   };
 
-  if (!state) return <PanelSection><PanelSectionRow><Spinner /></PanelSectionRow></PanelSection>;
+  if (!state) return <PanelSection><PanelSectionRow>{status ? <Field label="Backend unavailable" description={status.replace(/^Error:\s*/, "")} /> : <Spinner />}</PanelSectionRow></PanelSection>;
+  if (state.settings_error || state.startup_error || state.initializing) return <PanelSection title="Plugin unavailable"><PanelSectionRow><Field label={state.initializing ? "Starting hardware controls" : "Settings require attention"} description={state.settings_error || state.startup_error || "Waiting for the backend to finish initialising."} /></PanelSectionRow></PanelSection>;
   if (!state.supported) return <PanelSection title="Unsupported device"><PanelSectionRow><Field label={state.device} description="AYANEO 3 is required." /></PanelSectionRow></PanelSection>;
 
   const changeScreenFix = (enabled: boolean) => {
@@ -529,61 +615,58 @@ const Content: FC = () => {
     const nextFppt = clamp(value, 0, maxFpptOffset);
     setCustomTdp(absolute(normalise({ ...tuning, fpptOff: nextFppt, spptOff: Math.min(tuning.spptOff, nextFppt) })));
   };
-  const toggleCpuBoost = async (enabled: boolean) => {
-    if (pendingActionRef.current) return;
-    pendingActionRef.current = "cpu_boost";
-    setPendingAction("cpu_boost");
-    try {
-      setState(await setCpuBoost(enabled));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      toaster.toast({ title: "CPU Boost failed", body: message });
-      await refresh();
-    } finally {
-      pendingActionRef.current = null;
-      setPendingAction(null);
-    }
-  };
+  const toggleCpuBoost = (enabled: boolean) => run("cpu_boost", () => setCpuBoost(enabled), "CPU Boost failed");
   const choosePreset = async (name: Preset) => {
-    if (pendingActionRef.current) return;
+    const context = game?.appId ?? "";
+    if (tdpBusy || pendingActionRef.current || !validContext(context)) return;
     const previousPreset = preset;
     const previousTdp = tdp;
     const previousSavedPreset = savedGamePreset;
+    presetInitialized.current = true;
     setPreset(name); setStatus(null);
     if (name === "Custom") return;
-
-    tdpDirty.current = false;
     const value = state.presets[name];
+    if (!value) return;
+    ++revision.current;
+    ++gameRequest.current;
+    tdpDirty.current = false;
     setState(current => current ? { ...current, tdp: value } : current);
     pendingActionRef.current = "tdp";
     setPendingAction("tdp");
     try {
       const next = await (perGame && game
-        ? setGameProfile(game.appId, value, name)
-        : setTdp(value, name));
-      setState(next);
+        ? setGameProfile(game.appId, value, name, context)
+        : setTdp(value, name, context));
+      if (!validContext(context)) return;
+      acceptState(next);
       if (perGame && game) setSavedGamePreset(name);
       setStatus(perGame && game ? `${name} saved for ${game.name}.` : `${name} applied.`);
     } catch (error) {
-      setPreset(previousPreset);
-      setSavedGamePreset(previousSavedPreset);
-      setState(current => current ? { ...current, tdp: previousTdp } : current);
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(`Error: ${message}`);
-      toaster.toast({ title: "TDP preset failed", body: message });
+      notifyFailure("TDP preset failed", error);
+      if (validContext(context)) {
+        setPreset(previousPreset);
+        setSavedGamePreset(previousSavedPreset);
+        setState(current => current ? { ...current, tdp: previousTdp } : current);
+        setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
+      ++revision.current;
       pendingActionRef.current = null;
-      setPendingAction(null);
+      if (mounted.current) { setPendingAction(null); void refresh(); }
     }
   };
   const togglePerGame = async (enabled: boolean) => {
-    if (!game || pendingActionRef.current) return;
+    const context = game?.appId ?? "";
+    if (!game || tdpBusy || pendingActionRef.current || !validContext(context)) return;
+    ++revision.current;
+    ++gameRequest.current;
     pendingActionRef.current = "profile";
     setPendingAction("profile");
     setPerGame(enabled); setStatus(null);
     try {
       if (enabled) {
-        const profile = await getGameProfile(game.appId);
+        const profile = await getGameProfile(context);
+        if (!validContext(context)) return;
         if (profile.exists) {
           const stored = profile.preset ?? detectPreset(profile.profile, state.presets);
           setSavedGamePreset(stored);
@@ -595,24 +678,30 @@ const Content: FC = () => {
           setStatus(`No saved profile for ${game.name}. Use Custom or choose a preset to create one.`);
         }
       } else {
-        const next = await deleteGameProfile(game.appId);
+        const next = await deleteGameProfile(context, context);
+        if (!validContext(context)) return;
+        tdpDirty.current = false;
         setSavedGamePreset(undefined);
-        setState(next); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
+        acceptState(next); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
         setStatus("Switched to global settings.");
       }
     } catch (error) {
-      setPerGame(!enabled);
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(`Error: ${message}`);
-      toaster.toast({ title: enabled ? "Game profile lookup failed" : "Game profile removal failed", body: message });
+      notifyFailure(enabled ? "Game profile lookup failed" : "Game profile removal failed", error);
+      if (validContext(context)) {
+        setPerGame(!enabled);
+        setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
+      ++revision.current;
       pendingActionRef.current = null;
-      setPendingAction(null);
+      if (mounted.current) { setPendingAction(null); void refresh(); }
     }
   };
   const flushController = async () => {
     if (controllerWriting.current) return;
     controllerWriting.current = true;
+    let needsRefresh = false;
+    ++revision.current;
     try {
       while (controllerPending.current) {
         const next = controllerPending.current;
@@ -634,39 +723,52 @@ const Content: FC = () => {
           // FF_GAIN lives on a separate evdev device. Keep it in the same
           // serialized queue so an RGB write cannot persist an older gain.
           if (gainChanged) applied = await setVibrationGain(next.ff_gain);
-          appliedController.current = next;
+          appliedController.current = applied?.controller ?? next;
           if (!controllerPending.current) {
             controllerDirty.current = false;
-            if (applied) {
+            if (applied && mounted.current) {
+              confirmedState = confirmedState ? { ...confirmedState, controller: applied.controller } : applied;
               setState(current => current
-                ? { ...applied, tdp: current.tdp, controller: next }
+                ? { ...current, controller: applied.controller }
                 : applied);
             }
           }
         } catch (error) {
           appliedController.current = null;
           const message = error instanceof Error ? error.message : String(error);
-          toaster.toast({ title: "Controller setting failed", body: message });
+          notifyFailure("Controller setting failed", message);
           if (!controllerPending.current) {
             controllerDirty.current = false;
-            void refresh();
+            desiredController.current = null;
+            needsRefresh = true;
           }
         }
       }
     } finally {
+      ++revision.current;
       controllerWriting.current = false;
       if (controllerPending.current) void flushController();
+      else if (needsRefresh && mounted.current) void refresh();
     }
   };
   const applyController = (part: Partial<Controller>, delay = 0) => {
-    const base = controllerPending.current ?? state.controller;
+    if (state.settings_error || state.initializing) return;
+    ++revision.current;
+    const base = controllerPending.current ?? desiredController.current ?? state.controller;
     const controller = { ...base, ...part };
     if (controller.rgb_mode !== "off") lastRgbMode.current = controller.rgb_mode;
     controllerDirty.current = true;
     controllerPending.current = controller;
-    setState(current => current ? { ...current, controller } : current);
+    desiredController.current = controller;
+    if (mounted.current) setState(current => current ? { ...current, controller } : current);
     if (controllerTimer.current) clearTimeout(controllerTimer.current);
-    controllerTimer.current = setTimeout(() => { controllerTimer.current = null; void flushController(); }, delay);
+    if (!mounted.current) { controllerTimer.current = null; void flushController(); }
+    else controllerTimer.current = setTimeout(() => { controllerTimer.current = null; void flushController(); }, delay);
+  };
+  flushPendingController.current = () => {
+    if (controllerTimer.current) clearTimeout(controllerTimer.current);
+    controllerTimer.current = null;
+    if (controllerPending.current) void flushController();
   };
   const setVibrationLevel = (value: number) => {
     if (!Number.isFinite(value)) return;
@@ -680,11 +782,13 @@ const Content: FC = () => {
   };
   const previewRgb = (next: Hsv) => {
     controllerDirty.current = true;
+    desiredRgb.current = next;
     setRgbEdit(next);
   };
   const commitRgb = (next: Hsv) => {
+    desiredRgb.current = next;
     setRgbEdit(next);
-    applyController({ color: hsvToHex(next.hue, next.saturation), brightness: next.brightness });
+    applyController({ color: hsvToHex(next.hue, next.saturation), brightness: next.brightness }, 500);
   };
   const runVibrationTest = async () => {
     if (pendingActionRef.current) return;
@@ -695,7 +799,7 @@ const Content: FC = () => {
       if (!result.success) toaster.toast({ title: "Vibration test failed", body: result.error ?? "Unknown error" });
     } catch (error) {
       toaster.toast({ title: "Vibration test failed", body: error instanceof Error ? error.message : String(error) });
-    } finally { pendingActionRef.current = null; setPendingAction(null); }
+    } finally { pendingActionRef.current = null; if (mounted.current) setPendingAction(null); }
   };
 
   const openSection = (section: SectionKey) => { setStatus(null); setActiveSection(section); };
@@ -759,7 +863,7 @@ const Content: FC = () => {
             </span>
           ) : game.name) : "No game running"}
           checked={perGame}
-          disabled={!game || busy}
+          disabled={!game || tdpBusy}
           onChange={enabled => void togglePerGame(enabled)}
         /></PanelSectionRow>
       </PanelSection>
@@ -767,7 +871,7 @@ const Content: FC = () => {
         {PRESET_ORDER.map(name => <PanelSectionRow key={name}>
           <ButtonItem
             layout="below"
-            disabled={preset === name || busy}
+            disabled={preset === name || tdpBusy}
             onClick={() => void choosePreset(name)}
           >
             {preset === name ? `> ${name}` : name}
@@ -777,20 +881,24 @@ const Content: FC = () => {
       </PanelSection>
       {preset === "Custom" && <>
         <PanelSection title="TDP Limits">
-          <PanelSectionRow><SliderField label={`SPL (TDP) - ${tuning.spl} W`} value={tuning.spl} min={5} max={35} step={1} onChange={setSpl} description="Sustained power limit - the main TDP dial" /></PanelSectionRow>
-          <PanelSectionRow><SliderField key={`sppt-${tuning.spl}-${maxSpptOffset}`} label={`SPPT +${spptOff} W  =  ${tuning.spl + spptOff} W`} value={spptOff} min={0} max={maxSpptOffset || 1} step={1} disabled={maxSpptOffset === 0} onChange={setSpptOff} description={maxSpptOffset === 0 ? "No headroom left at this SPL" : `Slow limit headroom above SPL (max +${maxSpptOffset} W here)`} /></PanelSectionRow>
+          <PanelSectionRow><SliderField label={`SPL (TDP) - ${tuning.spl} W`} value={tuning.spl} min={5} max={35} step={1} disabled={tdpBusy} onChange={setSpl} description="Sustained power limit - the main TDP dial" /></PanelSectionRow>
+          <PanelSectionRow><SliderField key={`sppt-${tuning.spl}-${maxSpptOffset}`} label={`SPPT +${spptOff} W  =  ${tuning.spl + spptOff} W`} value={spptOff} min={0} max={maxSpptOffset || 1} step={1} disabled={tdpBusy || maxSpptOffset === 0} onChange={setSpptOff} description={maxSpptOffset === 0 ? "No headroom left at this SPL" : `Slow limit headroom above SPL (max +${maxSpptOffset} W here)`} /></PanelSectionRow>
           {state.tdp_backend !== "PowerStation"
-            ? <PanelSectionRow><SliderField key={`fppt-${tuning.spl}-${maxFpptOffset}`} label={`FPPT +${fpptOff} W  =  ${tuning.spl + fpptOff} W`} value={fpptOff} min={0} max={maxFpptOffset || 1} step={1} disabled={maxFpptOffset === 0} onChange={setFpptOff} description={maxFpptOffset === 0 ? "No headroom left at this SPL" : `Fast limit headroom above SPL (max +${maxFpptOffset} W here)`} /></PanelSectionRow>
+            ? <PanelSectionRow><SliderField key={`fppt-${tuning.spl}-${maxFpptOffset}`} label={`FPPT +${fpptOff} W  =  ${tuning.spl + fpptOff} W`} value={fpptOff} min={0} max={maxFpptOffset || 1} step={1} disabled={tdpBusy || maxFpptOffset === 0} onChange={setFpptOff} description={maxFpptOffset === 0 ? "No headroom left at this SPL" : `Fast limit headroom above SPL (max +${maxFpptOffset} W here)`} /></PanelSectionRow>
             : <PanelSectionRow><Field label="FPPT managed automatically" description="PowerStation derives the fast limit from SPL and SPPT." /></PanelSectionRow>}
         </PanelSection>
         <PanelSection title="Action">
-          <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => {
+          <PanelSectionRow><ButtonItem layout="below" disabled={tdpBusy} onClick={() => {
+            const context = game?.appId ?? "";
+            if (tdpBusy || !validContext(context)) return;
             void run("tdp", async () => {
               const next = await (perGame && game
-                ? setGameProfile(game.appId, tdp, "Custom")
-                : setTdp(tdp, "Custom"));
-              tdpDirty.current = false;
-              if (perGame && game) setSavedGamePreset("Custom");
+                ? setGameProfile(game.appId, tdp, "Custom", context)
+                : setTdp(tdp, "Custom", context));
+              if (validContext(context)) {
+                tdpDirty.current = false;
+                if (perGame && game) setSavedGamePreset("Custom");
+              }
               return next;
             }, "TDP apply failed", perGame && game ? `Custom settings saved for ${game.name}.` : "Custom settings applied.");
           }}>{pendingAction === "tdp" ? "Applying..." : perGame && game ? `Apply & Save for ${game.name}` : "Apply TDP"}</ButtonItem></PanelSectionRow>
@@ -811,9 +919,9 @@ const Content: FC = () => {
       {state.controller.rgb_mode !== "off" && <>
         <PanelSectionRow><DropdownItem label="LED Mode" selectedOption={state.controller.rgb_mode} rgOptions={rgbOptions.filter(option => option.data !== "off")} onMenuWillOpen={openDropdown} onChange={option => applyController({ rgb_mode: option.data as RgbMode })} /></PanelSectionRow>
         <PanelSectionRow><Field label={`#${state.controller.color.toUpperCase()}`} description={`${titleCase(state.controller.rgb_mode)} · ${rgbEdit.brightness}% brightness`}><span style={{ display: "block", width: "28px", height: "28px", borderRadius: "50%", background: `#${state.controller.color}`, border: "2px solid rgba(255,255,255,.55)" }} /></Field></PanelSectionRow>
-        <PanelSectionRow><SlowSliderField label="Hue" value={rgbEdit.hue} min={0} max={359} valueSuffix="°" className="AyaneoRgbHue" onChange={hue => previewRgb({ ...rgbEdit, hue })} onChangeEnd={hue => commitRgb({ ...rgbEdit, hue })} /></PanelSectionRow>
-        <PanelSectionRow><SlowSliderField label="Saturation" value={rgbEdit.saturation} min={0} max={100} valueSuffix="%" className="AyaneoRgbSaturation" onChange={saturation => previewRgb({ ...rgbEdit, saturation })} onChangeEnd={saturation => commitRgb({ ...rgbEdit, saturation })} /></PanelSectionRow>
-        <PanelSectionRow><SlowSliderField label="Brightness" value={rgbEdit.brightness} min={0} max={100} valueSuffix="%" className="AyaneoRgbBrightness" onChange={brightness => previewRgb({ ...rgbEdit, brightness })} onChangeEnd={brightness => commitRgb({ ...rgbEdit, brightness })} /></PanelSectionRow>
+        <PanelSectionRow><SlowSliderField label="Hue" value={rgbEdit.hue} min={0} max={359} valueSuffix="°" className="AyaneoRgbHue" onChange={hue => previewRgb({ ...desiredRgb.current, hue })} onChangeEnd={hue => commitRgb({ ...desiredRgb.current, hue })} /></PanelSectionRow>
+        <PanelSectionRow><SlowSliderField label="Saturation" value={rgbEdit.saturation} min={0} max={100} valueSuffix="%" className="AyaneoRgbSaturation" onChange={saturation => previewRgb({ ...desiredRgb.current, saturation })} onChangeEnd={saturation => commitRgb({ ...desiredRgb.current, saturation })} /></PanelSectionRow>
+        <PanelSectionRow><SlowSliderField label="Brightness" value={rgbEdit.brightness} min={0} max={100} valueSuffix="%" className="AyaneoRgbBrightness" onChange={brightness => previewRgb({ ...desiredRgb.current, brightness })} onChangeEnd={brightness => commitRgb({ ...desiredRgb.current, brightness })} /></PanelSectionRow>
         <style>{`
           .AyaneoRgbHue .${gamepadSliderClasses.SliderTrack} { background: linear-gradient(to right, hsl(0,100%,50%), hsl(60,100%,50%), hsl(120,100%,50%), hsl(180,100%,50%), hsl(240,100%,50%), hsl(300,100%,50%), hsl(360,100%,50%)) !important; --left-track-color: #0000 !important; --colored-toggles-main-color: #0000 !important; }
           .AyaneoRgbSaturation .${gamepadSliderClasses.SliderTrack} { background: linear-gradient(to right, hsl(${rgbEdit.hue},0%,100%), hsl(${rgbEdit.hue},100%,50%)) !important; --left-track-color: #0000 !important; --colored-toggles-main-color: #0000 !important; }
@@ -899,7 +1007,13 @@ export default definePlugin(() => {
     name: "AYANEO 3 Companion",
     titleView: <div className={staticClasses.Title}>AYANEO 3 Companion</div>,
     content: <Content />,
+    alwaysRender: true,
     icon: <Icon />,
-    onDismount() { AppWatcher.stop(); },
+    onDismount() {
+      AppWatcher.stop(); confirmedState = null;
+      ++updateGeneration;
+      updateListeners.clear();
+      updateView = { info: null, checking: false, downloading: false, path: null };
+    },
   };
 });

@@ -1,4 +1,4 @@
-import asyncio, hashlib, json, os, struct, sys, tempfile, threading, unittest
+import asyncio, hashlib, io, json, os, struct, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
@@ -66,10 +66,12 @@ class LogicTests(unittest.TestCase):
             path = Path(directory) / "io"
             path.write_bytes(bytes(256))
             old_path = main._ec_io_path
+            old_behaviour = main._charge_behaviour_path
             old_ensure = main.ensure_charge_bypass_control
             old_supported = main.supported_device
             try:
                 main._ec_io_path = lambda: path
+                main._charge_behaviour_path = lambda: None
                 main.ensure_charge_bypass_control = lambda: path
                 main.supported_device = lambda: True
                 self.assertFalse(main.read_charge_bypass())
@@ -81,6 +83,7 @@ class LogicTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes()[main.EC_CHARGE_REGISTER], main.EC_CHARGE_AUTO)
             finally:
                 main._ec_io_path = old_path
+                main._charge_behaviour_path = old_behaviour
                 main.ensure_charge_bypass_control = old_ensure
                 main.supported_device = old_supported
 
@@ -146,6 +149,8 @@ class LogicTests(unittest.TestCase):
         main.Plugin._state = {"tdp": dict(main.DEFAULT_TDP)}
         try:
             with mock.patch.object(main, "apply_tdp") as apply, \
+                 mock.patch.object(main, "read_cpu_boost", return_value=True), \
+                 mock.patch.object(main, "write_cpu_boost"), \
                  mock.patch.object(main, "supported_device", return_value=True), \
                  mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={"tdp": custom})):
                 plugin = main.Plugin()
@@ -489,6 +494,8 @@ class LogicTests(unittest.TestCase):
 
         try:
             with mock.patch.object(main.asyncio, "sleep", side_effect=stop_after_one_iteration), \
+                 mock.patch.object(main, "_rumble_event_token", return_value=None), \
+                 mock.patch.object(main, "_device_node_token", return_value=("/dev/hidraw7", 1, 10)), \
                  mock.patch.object(main, "reconcile_controller",
                                    return_value=("configuration_restored", "/dev/hidraw7")) as reconcile:
                 with self.assertRaises(asyncio.CancelledError):
@@ -1208,6 +1215,8 @@ class LogicTests(unittest.TestCase):
         try:
             with mock.patch.object(main, "supported_device", return_value=True), \
                  mock.patch.object(main, "apply_tdp", side_effect=apply), \
+                 mock.patch.object(main, "read_cpu_boost", return_value=True), \
+                 mock.patch.object(main, "write_cpu_boost"), \
                  mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})):
                 asyncio.run(scenario())
             self.assertEqual(calls, [profile_a, {"spl": 30, "sppt": 32, "fppt": 35}])
@@ -1270,35 +1279,36 @@ class LogicTests(unittest.TestCase):
             main.Plugin._state = previous_state
 
     def test_updater_accepts_only_the_exact_release_asset(self):
-        class Response:
+        main.updater.reset()
+        class Response(io.BytesIO):
             def __init__(self, payload):
-                self.payload = json.dumps(payload).encode()
-            def __enter__(self): return self
-            def __exit__(self, *_): return False
-            def read(self, *_): return self.payload
+                super().__init__(json.dumps(payload).encode())
             def geturl(self): return main.GITHUB_RELEASES_URL
-            def close(self): pass
 
         release = {
-            "tag_name": "v1.1.0",
+            "tag_name": "v1.2.0",
+            "draft": False, "prerelease": False,
+            "html_url": "https://github.com/Rayekkk/Ayaneo3Companion/releases/tag/v1.2.0",
             "assets": [{
-                "name": "Ayaneo3Companion-1.1.0.zip",
+                "name": "Ayaneo3Companion-1.2.0.zip",
+                "state": "uploaded", "size": 1234, "digest": "sha256:" + "1" * 64,
                 "browser_download_url": (
                     "https://github.com/Rayekkk/Ayaneo3Companion/releases/download/"
-                    "v1.1.0/Ayaneo3Companion-1.1.0.zip"),
+                    "v1.2.0/Ayaneo3Companion-1.2.0.zip"),
             }],
         }
         with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
             info = main.updater.check()
-        self.assertEqual(info["current_version"], "1.0.2")
-        self.assertEqual(info["latest_version"], "1.1.0")
+        self.assertEqual(info["current_version"], "1.1.0")
+        self.assertEqual(info["latest_version"], "1.2.0")
         self.assertTrue(info["update_available"])
-        self.assertEqual(info["asset_name"], "Ayaneo3Companion-1.1.0.zip")
+        self.assertEqual(info["asset_name"], "Ayaneo3Companion-1.2.0.zip")
 
         release["assets"][0]["name"] = "source.zip"
+        main.updater._cached = None
         with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
             info = main.updater.check()
-        self.assertIn("Ayaneo3Companion-1.1.0.zip", info["error"])
+        self.assertIn("Ayaneo3Companion-1.2.0.zip", info["error"])
 
     def test_release_version_and_package_inventory_agree(self):
         root = main.PLUGIN_DIR
@@ -1308,7 +1318,7 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(
             {manifest["version"], package["version"], lock["version"],
              lock["packages"][""]["version"]},
-            {"1.0.2"},
+            {"1.1.0"},
         )
         package_script = (root / "scripts" / "package.mjs").read_text()
         self.assertIn('"lego_updater.py"', package_script)
