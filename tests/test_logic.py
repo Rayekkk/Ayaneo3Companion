@@ -431,12 +431,14 @@ class LogicTests(unittest.TestCase):
             main.Plugin._state = previous_state
 
     def test_magic_module_presence_matches_ec_absent_bits(self):
-        with mock.patch.object(main, "_read_ec_register", return_value=0):
-            self.assertEqual(main.module_presence(), {"left": True, "right": True})
-        with mock.patch.object(main, "_read_ec_register", return_value=main.EC_MODULE_LEFT):
-            self.assertEqual(main.module_presence(), {"left": False, "right": True})
-        with mock.patch.object(main, "_read_ec_register", return_value=main.EC_MODULE_RIGHT):
-            self.assertEqual(main.module_presence(), {"left": True, "right": False})
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(main, "AYANEO_EC_ROOT", Path(directory) / "absent"):
+            with mock.patch.object(main, "_read_ec_register", return_value=0):
+                self.assertEqual(main.module_presence(), {"left": True, "right": True})
+            with mock.patch.object(main, "_read_ec_register", return_value=main.EC_MODULE_LEFT):
+                self.assertEqual(main.module_presence(), {"left": False, "right": True})
+            with mock.patch.object(main, "_read_ec_register", return_value=main.EC_MODULE_RIGHT):
+                self.assertEqual(main.module_presence(), {"left": True, "right": False})
 
     def test_magic_module_identification_and_layout(self):
         response = bytearray(64)
@@ -1286,29 +1288,29 @@ class LogicTests(unittest.TestCase):
             def geturl(self): return main.GITHUB_RELEASES_URL
 
         release = {
-            "tag_name": "v1.2.0",
+            "tag_name": "v1.3.0",
             "draft": False, "prerelease": False,
-            "html_url": "https://github.com/Rayekkk/Ayaneo3Companion/releases/tag/v1.2.0",
+            "html_url": "https://github.com/Rayekkk/Ayaneo3Companion/releases/tag/v1.3.0",
             "assets": [{
-                "name": "Ayaneo3Companion-1.2.0.zip",
+                "name": "Ayaneo3Companion-1.3.0.zip",
                 "state": "uploaded", "size": 1234, "digest": "sha256:" + "1" * 64,
                 "browser_download_url": (
                     "https://github.com/Rayekkk/Ayaneo3Companion/releases/download/"
-                    "v1.2.0/Ayaneo3Companion-1.2.0.zip"),
+                    "v1.3.0/Ayaneo3Companion-1.3.0.zip"),
             }],
         }
         with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
             info = main.updater.check()
-        self.assertEqual(info["current_version"], "1.1.0")
-        self.assertEqual(info["latest_version"], "1.2.0")
+        self.assertEqual(info["current_version"], "1.2.0")
+        self.assertEqual(info["latest_version"], "1.3.0")
         self.assertTrue(info["update_available"])
-        self.assertEqual(info["asset_name"], "Ayaneo3Companion-1.2.0.zip")
+        self.assertEqual(info["asset_name"], "Ayaneo3Companion-1.3.0.zip")
 
         release["assets"][0]["name"] = "source.zip"
         main.updater._cached = None
         with mock.patch.object(main.updater, "open_url", return_value=Response(release)):
             info = main.updater.check()
-        self.assertIn("Ayaneo3Companion-1.2.0.zip", info["error"])
+        self.assertIn("Ayaneo3Companion-1.3.0.zip", info["error"])
 
     def test_release_version_and_package_inventory_agree(self):
         root = main.PLUGIN_DIR
@@ -1318,10 +1320,12 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(
             {manifest["version"], package["version"], lock["version"],
              lock["packages"][""]["version"]},
-            {"1.1.0"},
+            {"1.2.0"},
         )
         package_script = (root / "scripts" / "package.mjs").read_text()
         self.assertIn('"lego_updater.py"', package_script)
+        self.assertIn('"fan_backend.py"', package_script)
+        self.assertNotIn('"react-icons"', package_script)
         self.assertIn("THIRD_PARTY_LICENSES", package_script)
         self.assertIn("THIRD_PARTY_SOURCES", package_script)
         self.assertIn("Decky Loader API 1.1.3", (root / "NOTICE").read_text())

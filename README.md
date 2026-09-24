@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/github/license/Rayekkk/Ayaneo3Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
 **The missing AYANEO 3 hardware controls in one Steam overlay panel.**
-TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lighting, rear buttons and OLED display support.
+TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibration, RGB lighting, rear buttons and OLED display support.
 
 [Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Development](#development)
 
@@ -27,6 +27,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lig
 | **Live power** | Shows current package power in the TDP panel |
 | **CPU Boost** | Enables or disables kernel-wide CPU frequency boost and restores the choice after startup |
 | **Charge bypass** | Powers the console from its charger while inhibiting battery charging |
+| **Fan control** | Auto mode or a guarded 60–100% manual speed when the kernel exposes the native AYANEO EC fan interface |
 | **Charging estimate** | Shows live battery percentage, net charging power and estimated time to full only while Battery is open |
 | **Magic Modules** | Identifies every known module and upper/lower layout, ejects either side and provides Quick Reset |
 | **Vibration** | Firmware Off/Low/Medium/High strength, 0-100% Linux FF gain and a vibration test |
@@ -53,6 +54,9 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, vibration, RGB lig
 
 The controller protocol and display identity were verified on retail hardware.
 Other AYANEO models are deliberately rejected by the device checks.
+The plugin retains its SteamOS 3.8/kernel 6.16 controller and charge-control paths.
+Fan control appears only when the native `ayaneo-ec` hwmon interface is available;
+it is available on the tested SteamOS 3.10/kernel 7.2.4 system.
 
 > [!NOTE]
 > AYANEO 3 Companion is deliberately hardware-specific. It has been tested on
@@ -101,7 +105,7 @@ On a fresh installation where the QAM button is not available yet, copy
 
 ```bash
 chmod +x bootstrap.sh
-./bootstrap.sh Ayaneo3Companion-1.1.0.zip
+./bootstrap.sh Ayaneo3Companion-1.2.0.zip
 ```
 
 The bootstrap installer checks the device, installs the plugin directly and
@@ -131,6 +135,9 @@ state is shown immediately while a fresh read completes.
 - Open **Battery** to enable or disable charge bypass. The displayed state is
   read back from the kernel charge-control interface when available, or directly
   from the embedded controller on older kernels; it is never inferred from ACPI.
+- Open **Fan Control** to inspect RPM, use the system's automatic fan curve or
+  apply a manual speed from 60% to 100%. Manual mode is protected by an
+  independent systemd timer that restores Auto if Companion stops responding.
 - Open **Magic Modules** to identify the installed module type and layout,
   eject either side or both, or run Quick Reset. Insert both modules after
   replacement so the plugin can power and identify the controller again.
@@ -144,6 +151,10 @@ state is shown immediately while a fresh read completes.
   TM Guard is enabled by default; disable it temporarily when deliberately
   selecting another hardware mode with the physical TM button.
 - Open **OLED display** to install the gamescope definition and verify its HDR metadata.
+- The Key Binding and OLED switches are saved. If a SteamOS update removes their
+  files from `/etc`, Companion reinstalls enabled definitions at startup and
+  reloads InputPlumber when the key map changes. Restart Game Mode after the
+  OLED definition is restored so gamescope loads it.
 - Open **About** at the bottom of the overview to see the installed version,
   check GitHub releases and download a newer plugin ZIP when one is available.
   The result remains available when returning to About during the same plugin
@@ -177,6 +188,12 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
   older SteamOS kernels it falls back to the same AYANEO 3 EC register used by
   Linux 6.19's `ayaneo-ec` driver. The plugin verifies every write and restores
   automatic charging before uninstalling.
+- Magic Module power and presence use the native `ayaneo-ec` sysfs interface
+  where available. On kernel 6.16, the existing raw EC path remains in use;
+  an incomplete native interface never triggers a competing raw EC write.
+- Fan control uses the kernel's `ayaneo-ec` hwmon interface. Manual mode is
+  applied only after an independent systemd guard has been armed, and the guard
+  retries until Auto is confirmed if the EC temporarily disappears.
 - Magic Module identity and upper/lower layout come from AYANEO's vendor HID status,
   with the same known-module table used by HHD. Release uses the vendor eject
   command; after the latch motors finish, the plugin power-cycles the controller

@@ -10,7 +10,7 @@ const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf
 const packageLock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
 const name = "Ayaneo3Companion";
 const files = [
-  "main.py", "safe_settings.py", "quality_runtime.py", "lego_updater.py", "plugin.json", "package.json", "package-lock.json",
+  "main.py", "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "plugin.json", "package.json", "package-lock.json",
   "README.md", "CHANGELOG.md", "LICENSE", "NOTICE", "requirements.txt",
   "bootstrap.sh", "Install AYANEO 3 Companion.desktop", "rollup.config.js",
   "tsconfig.json", "src", "dist", "assets",
@@ -27,8 +27,7 @@ if (manifest.version !== packageManifest.version || manifest.version !== package
   throw new Error("plugin.json, package.json and package-lock.json versions do not agree");
 }
 const deckyApiPackage = JSON.parse(readFileSync(join(root, "node_modules", "@decky", "api", "package.json"), "utf8"));
-const reactIconsPackage = JSON.parse(readFileSync(join(root, "node_modules", "react-icons", "package.json"), "utf8"));
-if (deckyApiPackage.version !== "1.1.3" || reactIconsPackage.version !== "5.7.0") {
+if (deckyApiPackage.version !== "1.1.3") {
   throw new Error("third-party license inventory no longer matches the installed frontend dependencies");
 }
 function copyPayload(source, destination) {
@@ -56,7 +55,6 @@ try {
   const sourceDir = join(stage, "THIRD_PARTY_SOURCES", "decky-api-1.1.3");
   mkdirSync(licenseDir, { recursive: true });
   copyPayload(join(root, "node_modules", "@decky", "api", "LICENSE"), join(licenseDir, "decky-api-LGPL-2.1.txt"));
-  copyPayload(join(root, "node_modules", "react-icons", "LICENSE"), join(licenseDir, "react-icons-and-icon-packs.txt"));
   copyPayload(join(root, "node_modules", "@decky", "api"), sourceDir);
   if (process.argv.includes("--check")) {
     console.log(`package payload check passed (${files.length} entries)`);

@@ -3,31 +3,21 @@
 // https://github.com/Rayekkk/Ayaneo3Companion
 
 import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
-import { ButtonItem, ConfirmModal, DropdownItem, Field, gamepadDialogClasses, gamepadSliderClasses, PanelSection, PanelSectionRow, Router, showModal, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
-import { FC, ReactElement, ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { FaChevronRight } from "react-icons/fa";
+import { ButtonItem, ConfirmModal, DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, Router, showModal, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
+import { FC, ReactElement, useCallback, useEffect, useRef, useState } from "react";
+import { PageShell, SectionHeader, SectionLink, StackedAction } from "./ui";
+import { resetUpdates } from "./updates";
+import { AboutPage } from "./about";
+import { AudioPage, BatteryPage, ButtonsPage, DisplayPage, MagicModulesPage, VibrationPage } from "./device_pages";
+import { FanPage, resetFanStatus, useFanControl } from "./fan";
+import type { BatteryStatus, Controller, GameProfile, Hsv, Preset, RgbMode, RunningGame, State, Tdp, Vibration } from "./model";
 
-type Vibration = "off" | "low" | "medium" | "high";
-type RgbMode = "off" | "solid" | "pulse" | "rainbow";
-type Preset = "Minimum" | "Low power" | "Balanced" | "Performance" | "Max" | "Custom";
-type SectionKey = "tdp" | "vibration" | "rgb" | "battery" | "modules" | "audio" | "buttons" | "screen" | "about";
+type SectionKey = "tdp" | "vibration" | "rgb" | "fan" | "battery" | "modules" | "audio" | "buttons" | "screen" | "about";
 type ActionKey = "tdp" | "profile" | "cpu_boost" | "vibration" | "battery" | "modules" | "audio" | "buttons" | "screen";
-interface Tdp { spl: number; sppt: number; fppt: number }
 interface Tuning { spl: number; spptOff: number; fpptOff: number }
-interface Controller { vibration: Vibration; ff_gain: number; rgb_mode: RgbMode; color: string; brightness: number }
-interface Hsv { hue: number; saturation: number; brightness: number }
-interface RunningGame { appId: string; name: string }
-interface GameProfile { exists: boolean; profile: Tdp; preset?: Preset }
-interface ModuleInfo { code: number | null; label: string; layout: string; status: string; connected: boolean }
-interface BatteryStatus { available: boolean; percent: number | null; status: string; seconds_to_full: number | null; power_w: number | null; source: "UPower" | "sysfs" | "none" }
-interface UpdateInfo { current_version?: string; latest_version?: string; update_available?: boolean; download_url?: string | null; asset_name?: string | null; error?: string }
-interface State { settings_error?: string; initializing?: boolean; startup_error?: string; supported: boolean; device: string; version: string; tdp_backend: string; tdp: Tdp; tdp_preset?: Preset; presets: Record<string, Tdp>; cpu_boost_supported: boolean; cpu_boost: boolean; controller: Controller; gpu_power_w: number | null; screen_installed: boolean; screen_conflict: boolean; edid_patched: boolean; edid_game_nits: number; button_fix_installed: boolean; charge_bypass_supported: boolean; charge_bypass: boolean; module_eject_supported: boolean; module_reset_supported: boolean; modules_reconnecting: boolean; modules_connected: boolean; module_left: ModuleInfo; module_right: ModuleInfo; tm_guard_enabled: boolean; tm_guard_status: string; tm_guard_recoveries: number; audio_fix_supported: boolean; audio_fix_enabled: boolean; audio_fix_installed: boolean; audio_profile: string; audio_fix_error: string; audio_calibration_available: boolean; audio_calibration_last: string }
 
 const getState = callable<[], State>("get_state");
 const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
-const getVersion = callable<[], { version: string }>("get_version");
-const checkForUpdates = callable<[], UpdateInfo>("check_for_updates");
-const performUpdate = callable<[], { success: boolean; path?: string; error?: string }>("perform_update");
 const setTdp = callable<[Tdp, Preset, string], State>("set_tdp");
 const setCpuBoost = callable<[boolean], State>("set_cpu_boost");
 const getGameProfile = callable<[string], GameProfile>("get_game_profile");
@@ -53,13 +43,6 @@ const VIBRATION_TEST_MS = 500;
 const VIBRATION_APPLY_DELAY_MS = 150;
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const titleCase = (value: string) => value ? value[0].toUpperCase() + value.slice(1) : value;
-const formatDuration = (seconds: number): string => {
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  if (!hours) return `${minutes} min`;
-  return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`;
-};
 const tdpStatusStyle = (message: string) => ({
   fontSize: "12px",
   color: message.startsWith("Error") ? "var(--gpColor-Red, #f87171)" : "var(--gpColor-Green, #4ade80)",
@@ -213,151 +196,6 @@ function normalise(tuning: Tuning): Tuning {
   return { spl, spptOff, fpptOff };
 }
 
-const SectionLink: FC<{ title: string; description: string; onClick: () => void }> = ({ title, description, onClick }) => (
-  <PanelSectionRow>
-    <Field label={title} description={description} childrenLayout="inline" childrenContainerWidth="min" focusable highlightOnFocus onActivate={onClick}>
-      <FaChevronRight aria-hidden style={{ display: "block", flexShrink: 0 }} />
-    </Field>
-  </PanelSectionRow>
-);
-
-const PageShell: FC<{ children: ReactNode }> = ({ children }) => (
-  <div style={{ width: "100%", maxWidth: "100%", minWidth: 0, overflowX: "hidden", boxSizing: "border-box" }}>
-    {children}
-  </div>
-);
-
-const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBack }) => (
-  <PanelSection title={title}>
-    <PanelSectionRow>
-      <ButtonItem layout="below" onClick={onBack}>‹ All Controls</ButtonItem>
-    </PanelSectionRow>
-  </PanelSection>
-);
-
-const StackedAction: FC<{
-  title: string; description: string; disabled?: boolean; onClick: () => void; children: ReactNode;
-}> = ({ title, description, disabled, onClick, children }) => (
-  <PanelSectionRow>
-    <div style={{ width: "100%", maxWidth: "100%", minWidth: 0, boxSizing: "border-box" }}>
-      <div className={gamepadDialogClasses.FieldLabel} style={{ marginBottom: "6px" }}>{title}</div>
-      <div className={gamepadDialogClasses.FieldDescription} style={{ marginBottom: "8px", overflowWrap: "anywhere" }}>{description}</div>
-      <div style={{ width: "100%", maxWidth: "100%", minWidth: 0 }}>
-        <ButtonItem layout="below" bottomSeparator="none" disabled={disabled} onClick={onClick}>{children}</ButtonItem>
-      </div>
-    </div>
-  </PanelSectionRow>
-);
-
-interface UpdateView { info: UpdateInfo | null; checking: boolean; downloading: boolean; path: string | null }
-let updateView: UpdateView = { info: null, checking: false, downloading: false, path: null };
-let updateGeneration = 0;
-const updateListeners = new Set<(value: UpdateView) => void>();
-const publishUpdate = (next: Partial<UpdateView>) => {
-  updateView = { ...updateView, ...next };
-  updateListeners.forEach(listener => listener(updateView));
-};
-const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }) => {
-  const [view, setView] = useState(updateView);
-  const { info: updateInfo, checking, downloading, path: downloadPath } = view;
-  const [version, setVersion] = useState(initialVersion);
-
-  useEffect(() => {
-    let active = true;
-    updateListeners.add(setView);
-    setView(updateView);
-    getVersion()
-      .then(result => { if (active && result.version) setVersion(result.version); })
-      .catch(() => undefined);
-    return () => { active = false; updateListeners.delete(setView); };
-  }, []);
-
-  const notifyFailure = (title: string, error: unknown) => {
-    const body = error instanceof Error ? error.message : String(error ?? "Unknown error");
-    try { toaster.toast({ title, body, duration: 4000 }); }
-    catch { console.error(`[ayaneo3companion] ${title}: ${body}`); }
-  };
-
-  const check = useCallback(async () => {
-    if (updateView.checking || updateView.downloading) return;
-    const generation = updateGeneration;
-    publishUpdate({ checking: true, info: null, path: null });
-    try {
-      const info = await checkForUpdates();
-      if (generation === updateGeneration) publishUpdate({ info });
-    } catch (error) {
-      if (generation === updateGeneration) {
-        notifyFailure("Update check failed", error);
-        publishUpdate({ info: { error: error instanceof Error ? error.message : String(error) } });
-      }
-    } finally {
-      if (generation === updateGeneration) publishUpdate({ checking: false });
-    }
-  }, []);
-
-  const download = useCallback(async () => {
-    if (updateView.checking || updateView.downloading) return;
-    const generation = updateGeneration;
-    publishUpdate({ downloading: true });
-    try {
-      const result = await performUpdate();
-      if (generation !== updateGeneration) return;
-      if (result.success && result.path) publishUpdate({ path: result.path });
-      else throw new Error(result.error ?? "Unknown error");
-    } catch (error) {
-      if (generation === updateGeneration) {
-        publishUpdate({ info: { ...(updateView.info ?? {}), error: error instanceof Error ? error.message : String(error) } });
-        notifyFailure("Download failed", error);
-      }
-    } finally {
-      if (generation === updateGeneration) publishUpdate({ downloading: false });
-    }
-  }, []);
-
-  const versionTag = (value: string) => (
-    <span style={{ fontWeight: 700, color: "var(--gpColor-White, #fff)", background: "rgba(102,192,244,.18)", borderRadius: "4px", padding: "1px 6px" }}>
-      v{value}
-    </span>
-  );
-
-  return <PanelSection title="Updates">
-    <PanelSectionRow>
-      <div style={{ width: "100%", minWidth: 0, fontSize: "12px", color: "var(--gpColor-TextMuted, rgba(255,255,255,.6))", overflowWrap: "anywhere" }}>
-        Installed: {versionTag((updateInfo?.current_version ?? version) || "?")}
-        {updateInfo?.latest_version && !updateInfo.error && <>
-          {" · "}Latest: {versionTag(updateInfo.latest_version)}
-        </>}
-      </div>
-    </PanelSectionRow>
-    {updateInfo?.error && <PanelSectionRow>
-      <div style={{ width: "100%", minWidth: 0, padding: "8px", boxSizing: "border-box", borderRadius: "4px", background: "rgba(248,113,113,.14)", color: "var(--gpColor-Red, #f87171)", overflowWrap: "anywhere" }}>
-        {updateInfo.error}
-      </div>
-    </PanelSectionRow>}
-    {updateInfo && !updateInfo.error && !updateInfo.update_available && !downloadPath && <PanelSectionRow>
-      <div style={{ fontSize: "12px", color: "var(--gpColor-Green, #4ade80)" }}>Up to date</div>
-    </PanelSectionRow>}
-    {updateInfo?.update_available && updateInfo.download_url && updateInfo.asset_name && !downloadPath && <StackedAction
-      title={`Version ${updateInfo.latest_version} is available`}
-      description="Download the exact GitHub release ZIP to the SteamOS Downloads folder."
-      disabled={downloading || checking}
-      onClick={() => void download()}
-    >{downloading ? <Spinner /> : `Download v${updateInfo.latest_version}`}</StackedAction>}
-    {downloadPath && <PanelSectionRow>
-      <Field
-        label="Update downloaded"
-        description={<span>Saved to <span style={{ fontFamily: "monospace", overflowWrap: "anywhere" }}>{downloadPath}</span><br /><br />To install: Decky → Settings → Developer → Uninstall AYANEO 3 Companion → Install Plugin from ZIP. Settings and per-game profiles are preserved.</span>}
-      />
-    </PanelSectionRow>}
-    <StackedAction
-      title="Check for Updates"
-      description="Compare the installed version with the latest GitHub release."
-      disabled={checking || downloading}
-      onClick={() => void check()}
-    >{checking ? <Spinner /> : "Check"}</StackedAction>
-  </PanelSection>;
-};
-
 let confirmedState: State | null = null;
 
 const Content: FC = () => {
@@ -386,6 +224,7 @@ const Content: FC = () => {
   const lastRgbMode = useRef<RgbMode>("solid");
   const [state, setState] = useState<State | null>(confirmedState);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
+  const fan = useFanControl(visible, activeSection === "fan");
   const [preset, setPreset] = useState<Preset>(() => confirmedState ? confirmedState.tdp_preset ?? detectPreset(confirmedState.tdp, confirmedState.presets) : "Custom");
   const [pendingAction, setPendingAction] = useState<ActionKey | null>(null);
   const pendingActionRef = useRef<ActionKey | null>(null);
@@ -818,6 +657,9 @@ const Content: FC = () => {
       <SectionLink title="TDP" description={`${preset} · ${tdp.spl} / ${tdp.sppt} / ${tdp.fppt} W`} onClick={() => openSection("tdp")} />
       <SectionLink title="Vibration" description={`${titleCase(state.controller.vibration)} · FF Gain ${state.controller.ff_gain}%`} onClick={() => openSection("vibration")} />
       <SectionLink title="RGB" description={state.controller.rgb_mode === "off" ? "Off" : `${titleCase(state.controller.rgb_mode)} · #${state.controller.color.toUpperCase()}`} onClick={() => openSection("rgb")} />
+      {fan.available && <SectionLink title="Fan Control"
+        description={fan.error || !fan.status?.supported ? "Status unavailable" : `${fan.status.mode === "manual" && fan.status.percent != null ? `Manual · ${fan.status.percent}%` : "Auto"}${fan.status.rpm == null ? "" : ` · ${fan.status.rpm} RPM`}`}
+        statusNote={fan.error || undefined} onClick={() => openSection("fan")} />}
       <SectionLink title="Battery" description={state.charge_bypass ? "Bypass charging active" : "Automatic charging"} onClick={() => openSection("battery")} />
       <SectionLink title="Magic Modules" description={moduleSummary} onClick={() => openSection("modules")} />
       <SectionLink title="Audio" description={audioSummary} onClick={() => openSection("audio")} />
@@ -825,7 +667,7 @@ const Content: FC = () => {
       <SectionLink title="OLED Display" description={state.screen_installed ? `Definition installed · ${state.edid_game_nits || 800} nits` : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed"} onClick={() => openSection("screen")} />
     </PanelSection>
     <PanelSection title="Device">
-      <PanelSectionRow><Field label={state.device} description={`TDP backend: ${state.tdp_backend}`} /></PanelSectionRow>
+      <PanelSectionRow><Field focusable label={state.device} description={`SteamOS · TDP backend: ${state.tdp_backend}`} /></PanelSectionRow>
     </PanelSection>
     <PanelSection title="Plugin">
       <SectionLink title="About" description={`AYANEO 3 Companion · v${state.version}`} onClick={() => openSection("about")} />
@@ -833,7 +675,7 @@ const Content: FC = () => {
   </PageShell>;
 
   return <PageShell>
-    <SectionHeader title={activeSection === "modules" ? "Magic Modules" : activeSection === "buttons" ? "Key Binding" : activeSection === "screen" ? "OLED Display" : titleCase(activeSection)} onBack={backToControls} />
+    <SectionHeader title={activeSection === "modules" ? "Magic Modules" : activeSection === "buttons" ? "Key Binding" : activeSection === "screen" ? "OLED Display" : activeSection === "fan" ? "Fan Control" : titleCase(activeSection)} onBack={backToControls} />
 
     {activeSection === "tdp" && <>
       <PanelSection title="Current TDP">
@@ -907,12 +749,9 @@ const Content: FC = () => {
       </>}
     </>}
 
-    {activeSection === "vibration" && <PanelSection title="Vibration">
-      <PanelSectionRow><SliderField label={`Firmware Strength · ${titleCase(state.controller.vibration)}`} description="Off · Low · Medium · High" value={VIBRATION_LEVELS.indexOf(state.controller.vibration)} min={0} max={3} step={1} notchCount={4} notchTicksVisible validValues="steps" minimumDpadGranularity={1} showValue={false} onChange={setVibrationLevel} /></PanelSectionRow>
-      <PanelSectionRow><SliderField label="FF Gain" description="Scales force-feedback effects from games and vibration tests." value={state.controller.ff_gain} min={0} max={100} step={10} notchCount={11} notchTicksVisible validValues="steps" minimumDpadGranularity={10} showValue valueSuffix="%" onChange={setFfGain} /></PanelSectionRow>
-      <StackedAction title="Test Vibration" description="Play a short 500 ms rumble pulse." disabled={busy || state.controller.vibration === "off" || state.controller.ff_gain === 0} onClick={() => void runVibrationTest()}>{pendingAction === "vibration" ? <Spinner /> : "Test"}</StackedAction>
-      <PanelSectionRow><Field label="Two-stage control" description="Firmware Strength selects the controller's base level; FF Gain scales Linux force-feedback effects from 0 to 100%." /></PanelSectionRow>
-    </PanelSection>}
+    {activeSection === "vibration" && <VibrationPage state={state} busy={busy} testing={pendingAction === "vibration"} onLevel={setVibrationLevel} onGain={setFfGain} onTest={() => void runVibrationTest()} />}
+
+    {activeSection === "fan" && <FanPage status={fan.status} available={fan.available} error={fan.error} busy={fan.busy} onApply={(mode, percent) => void fan.apply(mode, percent)} />}
 
     {activeSection === "rgb" && <PanelSection title="LED Settings">
       <PanelSectionRow><ToggleField label="Enable LED Control" checked={state.controller.rgb_mode !== "off"} onChange={enabled => applyController({ rgb_mode: enabled ? lastRgbMode.current : "off" })} /></PanelSectionRow>
@@ -930,70 +769,48 @@ const Content: FC = () => {
       </>}
     </PanelSection>}
 
-    {activeSection === "battery" && <>
-      <PanelSection title="Battery Status">
-        {!battery
-          ? <PanelSectionRow><Spinner /></PanelSectionRow>
-          : <PanelSectionRow><Field
-              label={battery.available ? `${battery.percent == null ? "Battery" : `${battery.percent}%`} · ${battery.status}` : "Battery unavailable"}
-              description={battery.seconds_to_full != null
-                ? `Estimated time to full: ${formatDuration(battery.seconds_to_full)}${battery.power_w == null ? "" : ` · ${battery.power_w.toFixed(1)} W net charge`}`
-                : battery.status.toLowerCase() === "charging" ? "Calculating the charging estimate..."
-                : battery.status.toLowerCase() === "full" ? "The battery is fully charged."
-                : "Time to full is shown while the battery is charging."}
-            /></PanelSectionRow>}
-      </PanelSection>
-      <PanelSection title="Charge Control">
-        <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "AYANEO charge control is not exposed by the current system."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={enabled => void run("battery", () => setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")} /></PanelSectionRow>
-        <PanelSectionRow><Field label={state.charge_bypass ? "Bypass active" : "Automatic charging"} description="State verified through the AYANEO kernel or embedded-controller interface." /></PanelSectionRow>
-      </PanelSection>
-    </>}
+    {activeSection === "battery" && <BatteryPage
+      state={state} battery={battery} busy={busy}
+      onBypass={enabled => void run("battery", () => setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")}
+    />}
 
-    {activeSection === "modules" && <>
-      <PanelSection title="Installed Modules">
-        <PanelSectionRow><Field label={`Left · ${state.module_left.label}`} description={[state.module_left.layout, state.module_left.code == null ? "" : `Module ID 0x${state.module_left.code.toString(16).toUpperCase().padStart(2, "0")}`].filter(Boolean).join(" · ")} /></PanelSectionRow>
-        <PanelSectionRow><Field label={`Right · ${state.module_right.label}`} description={[state.module_right.layout, state.module_right.code == null ? "" : `Module ID 0x${state.module_right.code.toString(16).toUpperCase().padStart(2, "0")}`].filter(Boolean).join(" · ")} /></PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Controller Eject">
-        <PanelSectionRow><Field label={state.modules_reconnecting ? "Waiting for both modules" : state.modules_connected ? "Both modules connected" : "Module disconnected"} description="After ejection, insert both modules to initialise the controller again." /></PanelSectionRow>
-        {(["left", "right", "both"] as const).map(side => <StackedAction key={side} title={`Eject ${titleCase(side)}`} description={side === "both" ? "Release both controller modules." : `Release the ${side} controller module.`} disabled={busy || state.modules_reconnecting || !state.module_eject_supported} onClick={() => openModal(<ConfirmModal strTitle={`Eject ${titleCase(side)}`} strDescription={`Release ${side === "both" ? "both controller modules" : `the ${side} controller module`}?`} strOKButtonText="Eject" bDestructiveWarning onOK={() => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`)} />)}>{pendingAction === "modules" ? <Spinner /> : "Eject"}</StackedAction>)}
-      </PanelSection>
-      <PanelSection title="Recovery">
-        <StackedAction title="Reset Magic Modules" description="Reinitialise both modules and restore RGB, vibration, FF Gain and rear-button mappings." disabled={busy || !state.modules_connected || !state.module_reset_supported} onClick={() => openModal(<ConfirmModal strTitle="Reset Magic Modules" strDescription="The controller will briefly disconnect while both modules are reinitialised." strOKButtonText="Reset" onOK={() => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected.")} />)}>{pendingAction === "modules" ? <Spinner /> : "Reset"}</StackedAction>
-      </PanelSection>
-    </>}
+    {activeSection === "modules" && <MagicModulesPage
+      state={state} busy={busy} pending={pendingAction === "modules"}
+      onEject={side => openModal(<ConfirmModal
+        strTitle={`Eject ${titleCase(side)}`}
+        strDescription={`Release ${side === "both" ? "both controller modules" : `the ${side} controller module`}?`}
+        strOKButtonText="Eject" bDestructiveWarning
+        onOK={() => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`)}
+      />)}
+      onReset={() => openModal(<ConfirmModal
+        strTitle="Reset Magic Modules"
+        strDescription="The controller will briefly disconnect while both modules are reinitialised."
+        strOKButtonText="Reset"
+        onOK={() => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected.")}
+      />)}
+    />}
 
-    {activeSection === "audio" && <>
-      <PanelSection title="Smart Amp Tuning">
-        <PanelSectionRow><ToggleField label="AYANEO Speaker Tuning" description={state.audio_fix_supported ? "Load the official AYANEO 3 profile for both CS35L41 smart amplifiers." : "The required SteamOS firmware or CS35L41 controls are unavailable."} checked={state.audio_fix_enabled} disabled={busy || !state.audio_fix_supported} onChange={enabled => void run("audio", () => setAudioFix(enabled), "Audio fix failed", enabled ? "AYANEO speaker tuning enabled." : "Generic audio profile restored.")} /></PanelSectionRow>
-        <PanelSectionRow><Field label={state.audio_fix_installed ? state.audio_profile : state.audio_profile === "Pending" ? "Applying..." : "Not applied"} description={state.audio_fix_error || (state.audio_fix_installed ? "Both speaker DSPs use the device-specific v0.65 tuning." : "SteamOS is using the generic Cirrus speaker profile.")} /></PanelSectionRow>
-        <StackedAction title="Reapply Audio Fix" description="Reload the tuning if audio was reset by the system." disabled={busy || !state.audio_fix_enabled || !state.audio_fix_supported} onClick={() => void run("audio", () => reapplyAudioFix(), "Audio fix failed", "AYANEO speaker tuning reapplied.")}>{pendingAction === "audio" ? <Spinner /> : "Apply"}</StackedAction>
-      </PanelSection>
-      {state.audio_calibration_available && <PanelSection title="Speaker Calibration">
-        <PanelSectionRow><Field label={state.audio_calibration_last || "Factory calibration active"} description="Measures both speakers, validates the result and saves it to EFI. The previous calibration is backed up first." /></PanelSectionRow>
-        <StackedAction title="Recalibrate Audio" description="Requires a quiet room and a clear surface." disabled={busy} onClick={() => openModal(<ConfirmModal strTitle="Recalibrate Speakers" strDescription="Place the console on a clear surface in a quiet room. A calibration signal will play and the result will be written to EFI." strOKButtonText="Recalibrate" bDestructiveWarning onOK={() => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it.")} />)}>{pendingAction === "audio" ? <Spinner /> : "Start"}</StackedAction>
-      </PanelSection>}
-    </>}
+    {activeSection === "audio" && <AudioPage
+      state={state} busy={busy} pending={pendingAction === "audio"}
+      onEnabled={enabled => void run("audio", () => setAudioFix(enabled), "Audio fix failed", enabled ? "AYANEO speaker tuning enabled." : "Generic audio profile restored.")}
+      onReapply={() => void run("audio", () => reapplyAudioFix(), "Audio fix failed", "AYANEO speaker tuning reapplied.")}
+      onRecalibrate={() => openModal(<ConfirmModal
+        strTitle="Recalibrate Speakers"
+        strDescription="Place the console on a clear surface in a quiet room. A calibration signal will play and the result will be written to EFI."
+        strOKButtonText="Recalibrate" bDestructiveWarning
+        onOK={() => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it.")}
+      />)}
+    />}
 
-    {activeSection === "buttons" && <PanelSection title="Controller Buttons">
-      <PanelSectionRow><ToggleField label="Fix Key Binding" description="Program LC1/RC1 as L5/R5 while preserving native LC/RC as L4/R4. Menu/QAM variants are detected automatically." checked={state.button_fix_installed} disabled={busy} onChange={enabled => void run("buttons", () => setButtonFix(enabled), "Key binding fix failed", enabled ? "Key binding fix enabled." : "Native key mapping restored.")} /></PanelSectionRow>
-      <PanelSectionRow><ToggleField label="TM Guard" description="Return the controller to custom gamepad mode after an accidental TM press." checked={state.tm_guard_enabled} disabled={busy} onChange={enabled => void run("buttons", () => setTmGuard(enabled), "TM Guard failed", enabled ? "TM Guard enabled." : "TM Guard disabled.")} /></PanelSectionRow>
-      <PanelSectionRow><Field label={state.tm_guard_status} description={state.tm_guard_recoveries ? `Recovered ${state.tm_guard_recoveries} TM mode change${state.tm_guard_recoveries === 1 ? "" : "s"} since plugin start.` : "The physical TM button remains available when TM Guard is disabled."} /></PanelSectionRow>
-    </PanelSection>}
+    {activeSection === "buttons" && <ButtonsPage
+      state={state} busy={busy}
+      onButtonFix={enabled => void run("buttons", () => setButtonFix(enabled), "Key binding fix failed", enabled ? "Key binding fix enabled." : "Native key mapping restored.")}
+      onTmGuard={enabled => void run("buttons", () => setTmGuard(enabled), "TM Guard failed", enabled ? "TM Guard enabled." : "TM Guard disabled.")}
+    />}
 
-    {activeSection === "screen" && <PanelSection title="Display Definition">
-      <PanelSectionRow><ToggleField label="Install Display Definition" description={state.screen_conflict ? "An existing display definition must be replaced before OLED Fix can be enabled." : "Install the AYANEO 3 OLED HDR, colour and 60/90/120/144 Hz gamescope definition with Gamma 2.2 output."} checked={state.screen_installed} disabled={busy} onChange={changeScreenFix} /></PanelSectionRow>
-      <PanelSectionRow><Field label={state.edid_patched ? "EDID metadata normalized" : "EDID update waiting"} description={state.edid_game_nits ? `Games see AYANEO's advertised ${state.edid_game_nits}-nit maximum.` : "Waiting for gamescope to publish the display EDID."} /></PanelSectionRow>
-      <PanelSectionRow><Field label="Restart required after changing" description="Restart Game Mode manually so gamescope reloads the display definition." /></PanelSectionRow>
-    </PanelSection>}
+    {activeSection === "screen" && <DisplayPage state={state} busy={busy} onChange={changeScreenFix} />}
 
-    {activeSection === "about" && <>
-      <PanelSection title="AYANEO 3 Companion">
-        <PanelSectionRow><Field label={`Version ${state.version}`} description="Native AYANEO 3 hardware controls for Decky Loader." /></PanelSectionRow>
-        <PanelSectionRow><Field label="Rayek" description="BSD-3-Clause open-source plugin." /></PanelSectionRow>
-      </PanelSection>
-      <UpdateSection initialVersion={state.version} />
-    </>}
+    {activeSection === "about" && <AboutPage version={state.version} />}
 
     {status && activeSection !== "tdp" && <PanelSection title="Status"><PanelSectionRow><Field label={status.startsWith("Error:") ? "Action failed" : "Done"} description={status.replace(/^Error:\s*/, "")} /></PanelSectionRow></PanelSection>}
   </PageShell>;
@@ -1011,9 +828,8 @@ export default definePlugin(() => {
     icon: <Icon />,
     onDismount() {
       AppWatcher.stop(); confirmedState = null;
-      ++updateGeneration;
-      updateListeners.clear();
-      updateView = { info: null, checking: false, downloading: false, path: null };
+      resetFanStatus();
+      resetUpdates();
     },
   };
 });

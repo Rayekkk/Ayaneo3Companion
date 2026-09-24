@@ -80,10 +80,9 @@ jobs:
           required = {
               'plugin.json', 'package.json', 'package-lock.json', manifest['main'],
               manifest['bin'], 'LICENSE', 'NOTICE', 'safe_settings.py', 'quality_runtime.py',
-              'lego_updater.py', 'README.md', 'CHANGELOG.md', 'bootstrap.sh',
+              'lego_updater.py', 'fan_backend.py', 'README.md', 'CHANGELOG.md', 'bootstrap.sh',
               'Install AYANEO 3 Companion.desktop', 'assets/ayaneo.ayaneo3.oled.lua',
               'assets/ayaneo3-companion.yaml', 'THIRD_PARTY_LICENSES/decky-api-LGPL-2.1.txt',
-              'THIRD_PARTY_LICENSES/react-icons-and-icon-packs.txt',
               'THIRD_PARTY_SOURCES/decky-api-1.1.3/package.json',
           }
           forbidden = {
@@ -110,9 +109,7 @@ jobs:
                   if relative.parts[0] == 'THIRD_PARTY_SOURCES':
                       source = root / 'node_modules/@decky/api' / Path(*relative.parts[2:])
                   elif relative.parts[0] == 'THIRD_PARTY_LICENSES':
-                      source = root / ('node_modules/react-icons/LICENSE'
-                                       if relative.name == 'react-icons-and-icon-packs.txt'
-                                       else 'node_modules/@decky/api/LICENSE')
+                      source = root / 'node_modules/@decky/api/LICENSE'
                   else:
                       source = root / Path(*relative.parts)
                   assert source.is_file(), f'Unexpected archive file: {path}'

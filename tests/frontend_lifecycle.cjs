@@ -17,31 +17,42 @@ function harness(component = 'Content', initialVisible = true) {
       old?.cleanup?.(); effects.set(i, { deps, cleanup: fn() });
     }); },
   };
-  const mod = { exports: {} }, jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
+  const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
   const callable = name => (...args) => new Promise((resolve, reject) => calls.push({ name, args, resolve, reject, settled: false }));
   const timer = (kind, fn, delay) => { const id = ++nextTimer; timers.set(id, { kind, fn, delay }); return id; };
-  const source = fs.readFileSync(path.join(root, 'src/index.tsx'), 'utf8') + '\nexport { Content, AppWatcher, UpdateSection };';
-  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
-    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX,
-  } }).outputText, {
-    module: mod, exports: mod.exports, console,
-    setTimeout: (fn, delay) => timer('timeout', fn, delay), clearTimeout: id => timers.delete(id),
-    setInterval: (fn, delay) => timer('interval', fn, delay), clearInterval: id => timers.delete(id),
-    window: { SteamClient: { GameSessions: { RegisterForAppLifetimeNotifications(fn) {
-      callbacks.lifetime = fn; return { unregister() {} };
-    } } } },
-    require(name) {
-      if (name === 'react') return hooks;
-      if (name === 'react/jsx-runtime') return jsx;
-      if (name === 'react-icons/fa') return { FaChevronRight: 'FaChevronRight' };
-      if (name === '@decky/api') return { callable, definePlugin: fn => fn, useQuickAccessVisible: () => visible, toaster: { toast: value => toasts.push(value) } };
-      if (name === '@decky/ui') return new Proxy({ Router, showModal() {} }, { get: (object, key) => key in object ? object[key] : key });
-      throw Error(name);
-    },
-  });
-  const render = (nextProps = props) => { props = nextProps; cursor = 0; const tree = mod.exports[component](props); pending.splice(0).forEach(fn => fn()); return tree; };
-  return { render, calls, timers, callbacks, toasts, Router, watcher: mod.exports.AppWatcher,
-    initialize: () => mod.exports.default(), get writes() { return writes; },
+  const modules = new Map();
+  const load = file => {
+    const fullPath = path.join(root, 'src', file);
+    if (modules.has(fullPath)) return modules.get(fullPath).exports;
+    const mod = { exports: {} };
+    modules.set(fullPath, mod);
+    const source = fs.readFileSync(fullPath, 'utf8') + (file === 'index.tsx' ? '\nexport { Content, AppWatcher };' : '');
+    const output = ts.transpileModule(source, { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX,
+    } }).outputText;
+    vm.runInNewContext(output, {
+      module: mod, exports: mod.exports, console,
+      setTimeout: (fn, delay) => timer('timeout', fn, delay), clearTimeout: id => timers.delete(id),
+      setInterval: (fn, delay) => timer('interval', fn, delay), clearInterval: id => timers.delete(id),
+      window: { SteamClient: { GameSessions: { RegisterForAppLifetimeNotifications(fn) {
+        callbacks.lifetime = fn; return { unregister() {} };
+      } } } },
+      require(name) {
+        if (name.startsWith('./')) return load(`${name.slice(2)}.tsx`);
+        if (name === 'react') return hooks;
+        if (name === 'react/jsx-runtime') return jsx;
+        if (name === '@decky/api') return { callable, definePlugin: fn => fn, useQuickAccessVisible: () => visible, toaster: { toast: value => toasts.push(value) } };
+        if (name === '@decky/ui') return new Proxy({ Router, showModal() {} }, { get: (object, key) => key in object ? object[key] : key });
+        throw Error(name);
+      },
+    });
+    return mod.exports;
+  };
+  const plugin = load('index.tsx');
+  const target = component === 'UpdateSection' ? load('updates.tsx') : component === 'FanPage' ? load('fan.tsx') : plugin;
+  const render = (nextProps = props) => { props = nextProps; cursor = 0; const tree = target[component](props); pending.splice(0).forEach(fn => fn()); return tree; };
+  return { render, calls, timers, callbacks, toasts, Router, watcher: plugin.AppWatcher,
+    initialize: () => plugin.default(), get writes() { return writes; },
     visible(value) { visible = value; return render(); },
     fire(kind = 'interval', delay) { for (const [id, timer] of [...timers]) if (timer.kind === kind && (delay == null || timer.delay === delay)) {
       if (kind === 'timeout') timers.delete(id); timer.fn();
@@ -56,6 +67,13 @@ function find(node, key, value) {
   if (!node || typeof node !== 'object') return;
   if (node.props?.[key] === value) return node;
   for (const child of Array.isArray(node) ? node : [node.props?.children]) { const result = find(child, key, value); if (result) return result; }
+}
+function findComponent(node, name) {
+  if (!node || typeof node !== 'object') return;
+  if (node.type?.name === name) return node;
+  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
+    const result = findComponent(child, name); if (result) return result;
+  }
 }
 const state = { supported: true, device: 'AYANEO 3', version: '1.0.2', tdp_backend: 'ryzenadj',
   tdp: { spl: 15, sppt: 17, fppt: 20 }, tdp_preset: 'Balanced', presets: {
@@ -155,5 +173,74 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   expired.remount(); expired.respond('check_for_updates', { update_available: true, latest_version: '9.9.9' }); await settle();
   assert.equal(find(expired.render(), 'title', 'Version 9.9.9 is available'), undefined, 'old plugin lifecycle cannot publish update results'); expired.unmount();
 
-  console.log('Frontend lifecycle regressions: PASS (polling, mutations, RGB queue, dropdown, app lifecycle, profiles, updates and error UI)');
+  const unsupportedFan = await ready();
+  unsupportedFan.respond('get_fan_status', { supported: false, mode: 'auto', percent: null, rpm: null, reason: 'ayaneo_ec hwmon unavailable' });
+  await settle();
+  assert.equal(find(unsupportedFan.render(), 'title', 'Fan Control'), undefined, 'unsupported fan control stays hidden');
+  unsupportedFan.unmount();
+
+  const fan = await ready();
+  fan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 77, rpm: 2100 });
+  await settle();
+  const fanLink = find(fan.render(), 'title', 'Fan Control');
+  assert.ok(fanLink, 'supported fan control appears in the hardware menu');
+  assert.ok(!String(fanLink.props.description).includes('77%'), 'Auto mode does not present last PWM as current speed');
+  fanLink.props.onClick();
+  let fanPage = findComponent(fan.render(), 'FanPage');
+  assert.ok(fanPage, 'fan page opens without changing the other sections');
+  fanPage.props.onApply('manual', 75); fanPage.props.onApply('manual', 80);
+  assert.equal(count(fan, 'set_fan'), 1, 'same-frame fan edits are single flight');
+  assert.equal(fan.calls.find(call => call.name === 'set_fan').args[1], 75);
+  fan.respond('set_fan', { supported: true, mode: 'manual', percent: 75, rpm: 3000 }); await settle();
+  fanPage = findComponent(fan.render(), 'FanPage');
+  assert.equal(fanPage.props.status.percent, 75, 'fan page shows verified backend result');
+  fanPage.props.onApply('auto');
+  const autoCall = fan.calls.filter(call => call.name === 'set_fan')[1];
+  assert.equal(autoCall.args.length, 1, 'Auto request omits a stale PWM value');
+  fan.respond('set_fan', { supported: true, mode: 'auto', percent: 75, rpm: 2200 }); await settle();
+  fan.unmount();
+
+  const lostFan = await ready();
+  lostFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
+  open(lostFan, 'Fan Control');
+  lostFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
+  findComponent(lostFan.render(), 'FanPage').props.onApply('manual', 75);
+  lostFan.respond('set_fan', { supported: false, mode: 'auto', percent: null, rpm: null, reason: 'Temporary EC read failure' }); await settle();
+  let lostPage = findComponent(lostFan.render(), 'FanPage');
+  assert.equal(lostPage.props.available, true, 'a temporary read failure does not erase confirmed fan capability');
+  assert.ok(lostPage.props.error.includes('Temporary EC read failure'), 'unconfirmed manual result remains visible');
+  const fanView = harness('FanPage');
+  let lostTree = fanView.render(lostPage.props);
+  assert.equal(find(lostTree, 'title', 'Restore Automatic Control').props.disabled, false, 'Auto recovery is enabled even when the unknown status defaults to auto');
+  assert.equal(find(lostTree, 'title', 'Enable Manual Control').props.disabled, true, 'manual writes stay disabled until live status recovers');
+  lostPage.props.onApply('manual', 80);
+  assert.equal(count(lostFan, 'set_fan'), 1, 'the hook also refuses manual writes while the controller is unreadable');
+  lostFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
+  lostPage = findComponent(lostFan.render(), 'FanPage');
+  assert.ok(lostPage.props.error.includes('Temporary EC read failure'), 'successful polling does not hide a failed manual action');
+  findComponent(lostFan.render(), 'SectionHeader').props.onBack();
+  assert.equal(find(lostFan.render(), 'title', 'Fan Control').props.description, 'Status unavailable', 'overview does not claim an unconfirmed automatic mode');
+  open(lostFan, 'Fan Control');
+  lostPage = findComponent(lostFan.render(), 'FanPage');
+  lostPage.props.onApply('auto');
+  assert.equal(count(lostFan, 'set_fan'), 2, 'Auto remains callable after an unconfirmed manual operation');
+  lostFan.respond('set_fan', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
+  lostPage = findComponent(lostFan.render(), 'FanPage');
+  assert.equal(lostPage.props.error, '', 'verified Auto clears the failed-action message');
+  lostFan.unmount(); fanView.unmount();
+
+  const disappearingFan = await ready();
+  disappearingFan.respond('get_fan_status', { supported: true, mode: 'manual', percent: 75, rpm: 3000 }); await settle();
+  disappearingFan.fire('interval', 30000);
+  disappearingFan.respond('get_fan_status', { supported: false, mode: 'auto', percent: null, rpm: null, reason: 'Temporarily unavailable' }); await settle();
+  assert.ok(find(disappearingFan.render(), 'title', 'Fan Control'), 'previously supported fan remains reachable after a failed poll');
+  disappearingFan.unmount();
+  assert.ok(find(disappearingFan.remount(), 'title', 'Fan Control'), 'capability survives a view remount in the same plugin lifecycle');
+  disappearingFan.unmount();
+  const retiringPlugin = disappearingFan.initialize(); retiringPlugin.onDismount();
+  disappearingFan.remount();
+  assert.equal(find(disappearingFan.render(), 'title', 'Fan Control'), undefined, 'plugin unload resets the capability proof for a new lifecycle');
+  disappearingFan.unmount();
+
+  console.log('Frontend lifecycle regressions: PASS (polling, mutations, RGB queue, dropdown, app lifecycle, profiles, updates, fan safety and error UI)');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -21,7 +21,8 @@ async def complete(operation):
     return result
 
 
-READ_CALLS = frozenset({'get_state', 'get_battery_status', 'get_version', 'get_game_profile'})
+READ_CALLS = frozenset({'get_state', 'get_battery_status', 'get_fan_status',
+                        'get_version', 'get_game_profile'})
 NETWORK_CALLS = frozenset({'check_for_updates', 'perform_update'})
 
 

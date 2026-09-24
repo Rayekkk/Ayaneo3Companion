@@ -42,6 +42,7 @@ if str(PLUGIN_DIR) not in sys.path:
 from lego_updater import Updater  # noqa: E402
 from safe_settings import SettingsManager  # noqa: E402
 from quality_runtime import complete, guard_public_calls  # noqa: E402
+from fan_backend import FanController, FAN_RENEW_SECONDS  # noqa: E402
 
 GITHUB_RELEASES_URL = (
     "https://api.github.com/repos/Rayekkk/Ayaneo3Companion/releases/latest"
@@ -169,6 +170,7 @@ AUDIO_LEGACY_TEST_PATHS = frozenset({
     "/home/deck/ayaneo3-audio-fix",
 })
 POWER_SUPPLY_ROOT = Path("/sys/class/power_supply")
+AYANEO_EC_ROOT = Path("/sys/devices/platform/ayaneo-ec")
 EC_CHARGE_REGISTER = 0x1E
 EC_CHARGE_AUTO = 0xAA
 EC_CHARGE_INHIBIT = 0x55
@@ -264,6 +266,7 @@ PRESETS = {
 }
 
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
+fan_controller = FanController()
 _lock = threading.RLock()
 _tdp_apply_lock = threading.Lock()
 _tdp_mutation_lock = threading.RLock()
@@ -1268,17 +1271,51 @@ def _write_ec_register(register: int, value: int) -> None:
             raise RuntimeError(f"could not write AYANEO EC register 0x{register:02x}")
 
 
+def _native_controller_power() -> bool:
+    value = (AYANEO_EC_ROOT / "controller_power").read_text().strip()
+    if value not in ("0", "1"):
+        raise RuntimeError(f"unexpected AYANEO controller power state: {value!r}")
+    return value == "1"
+
+
+def _native_module_presence() -> dict:
+    value = (AYANEO_EC_ROOT / "controller_modules").read_text().strip()
+    if value not in ("both", "left", "right", "none"):
+        raise RuntimeError(f"unexpected AYANEO controller module state: {value!r}")
+    return {"left": value in ("both", "left"),
+            "right": value in ("both", "right")}
+
+
+def ensure_controller_control() -> Path | None:
+    """Prefer the kernel ABI; use raw EC only when ayaneo-ec is absent."""
+    if AYANEO_EC_ROOT.exists():
+        try:
+            _native_controller_power()
+            _native_module_presence()
+            return AYANEO_EC_ROOT
+        except (OSError, RuntimeError) as error:
+            decky.logger.warning(f"{LOG} native controller ABI unavailable: {error}")
+            return None
+    return ensure_charge_control()
+
+
 def controller_powered() -> bool:
+    if AYANEO_EC_ROOT.exists():
+        return _native_controller_power()
     return _read_ec_register(EC_CONTROLLER_POWER_REGISTER) == EC_CONTROLLER_POWER_ON
 
 
 def both_modules_connected() -> bool:
+    if AYANEO_EC_ROOT.exists():
+        return all(_native_module_presence().values())
     # Bits set in this register mean that the corresponding module is absent.
     return (_read_ec_register(EC_MODULE_REGISTER) & EC_MODULE_MASK) == 0
 
 
 def module_presence() -> dict:
     """Return each physical slot state from the AYANEO EC."""
+    if AYANEO_EC_ROOT.exists():
+        return _native_module_presence()
     value = _read_ec_register(EC_MODULE_REGISTER)
     return {
         "left": not bool(value & EC_MODULE_LEFT),
@@ -1324,6 +1361,26 @@ def module_states_from_presence(presence: dict) -> tuple[dict, dict]:
 
 
 def set_controller_power(enabled: bool) -> None:
+    require_supported_device("controller power")
+    if AYANEO_EC_ROOT.exists():
+        if type(enabled) is not bool:
+            raise ValueError("controller power must be a boolean")
+        path = AYANEO_EC_ROOT / "controller_power"
+        with _ec_lock:
+            previous = _native_controller_power()
+            try:
+                path.write_text("1\n" if enabled else "0\n")
+                if _native_controller_power() != enabled:
+                    raise RuntimeError("kernel controller power did not retain the setting")
+            except Exception as error:
+                try:
+                    path.write_text("1\n" if previous else "0\n")
+                    if _native_controller_power() != previous:
+                        raise RuntimeError("controller power rollback readback mismatch")
+                except Exception as recovery:
+                    raise RuntimeError(f"{error}; controller recovery failed: {recovery}") from error
+                raise
+        return
     _write_ec_register(EC_CONTROLLER_POWER_REGISTER,
                        EC_CONTROLLER_POWER_ON if enabled else EC_CONTROLLER_POWER_OFF)
 
@@ -2429,6 +2486,7 @@ class Plugin:
     _module_task = None
     _tm_guard_task = None
     _audio_task = None
+    _fan_task = None
     _active_app = ""
 
     def __init__(self):
@@ -2633,6 +2691,12 @@ class Plugin:
 
     async def get_battery_status(self):
         return await self._offload(battery_status)
+
+    async def get_fan_status(self):
+        if not await self._offload(supported_device):
+            return {"supported": False, "mode": "auto", "percent": None,
+                    "rpm": None, "reason": "This device is not an AYANEO 3"}
+        return await self._offload(fan_controller.status)
 
     async def get_version(self):
         return {"version": updater.plugin_version()}
@@ -2852,6 +2916,15 @@ class Plugin:
         await self._offload(mutate)
         return await self.get_state()
 
+    async def set_fan(self, mode, percent=None):
+        def mutate():
+            require_supported_device("fan control")
+            return fan_controller.set(mode, percent)
+        result = await self._offload(mutate)
+        if mode == "manual" and (Plugin._fan_task is None or Plugin._fan_task.done()):
+            Plugin._fan_task = asyncio.create_task(self._fan_loop())
+        return result
+
     async def set_audio_fix(self, enabled):
         value = self._boolean(enabled)
         def mutate():
@@ -2997,10 +3070,36 @@ class Plugin:
     async def set_screen_fix(self, enabled, replace_existing=False):
         enabled = self._boolean(enabled)
         replace_existing = self._boolean(replace_existing)
+        def mutate():
+            if LUA_TARGET.is_symlink():
+                raise RuntimeError("refusing a symlinked gamescope definition")
+            previous = LUA_TARGET.read_bytes() if LUA_TARGET.exists() else None
+            backup = None
+            def apply():
+                nonlocal backup
+                if enabled:
+                    backup = install_display_script(replace_existing)
+                else:
+                    remove_display_script()
+            def restore():
+                if LUA_TARGET.is_symlink():
+                    raise RuntimeError("display definition changed to a symlink")
+                current = LUA_TARGET.read_bytes() if LUA_TARGET.exists() else None
+                if current == previous:
+                    return
+                if current is not None and not _display_script_owned(LUA_TARGET):
+                    raise RuntimeError("display definition changed outside Companion")
+                if previous is None:
+                    LUA_TARGET.unlink(missing_ok=True)
+                else:
+                    _atomic_write_bytes(LUA_TARGET, previous)
+            self._apply_and_save(apply, restore, {"screen_fix_enabled": enabled})
+            with _lock:
+                Plugin._state["screen_installed"] = enabled
+            return backup
         try:
+            backup = await self._offload(mutate)
             if enabled:
-                backup = await self._offload(
-                    install_display_script, bool(replace_existing))
                 if backup is not None:
                     decky.logger.info(
                         f"{LOG} replaced existing display definition; backup={backup}")
@@ -3011,8 +3110,6 @@ class Plugin:
                     # recreated by gamescope and the monitor loop will retry it,
                     # so a transient race here must not roll back the UI switch.
                     decky.logger.warning(f"{LOG} initial EDID normalization deferred: {error}")
-            else:
-                await self._offload(remove_display_script)
         except Exception as error:
             decky.logger.error(f"{LOG} display definition change failed: {error}")
             raise
@@ -3050,6 +3147,7 @@ class Plugin:
                     program_rear_buttons(value, controller if value else None)
                     (install_button_fix if value else remove_button_fix)()
                     _systemctl("restart", "inputplumber", check=True)
+                    self._save("button_fix_enabled", value)
                 except Exception as error:
                     failures = []
                     try:
@@ -3214,6 +3312,29 @@ class Plugin:
                 raise
             except Exception as error:
                 decky.logger.warning(f"{LOG} power monitor retrying: {error}")
+
+    async def _fan_loop(self):
+        """Renew an independent fan safety timer only while Decky stays alive."""
+        suspend_offset = _suspend_clock_offset()
+        while True:
+            await asyncio.sleep(FAN_RENEW_SECONDS)
+            try:
+                offset = _suspend_clock_offset()
+                resumed = (offset is not None and suspend_offset is not None
+                           and offset - suspend_offset > CONTROLLER_RESUME_THRESHOLD)
+                if offset is not None:
+                    suspend_offset = offset
+                if resumed:
+                    await self._offload(fan_controller.close)
+                    decky.logger.info(f"{LOG} restored automatic fan mode after resume")
+                    return
+                if not await self._offload(fan_controller.renew):
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                decky.logger.warning(f"{LOG} manual fan mode ended: {error}")
+                return
 
     async def _module_loop(self):
         """Track module identity and restore the controller after a module swap."""
@@ -3445,33 +3566,71 @@ class Plugin:
         is_supported = await self._offload(supported_device)
         storage_error = getattr(settings, "recovery_error", "")
         hardware_allowed = is_supported and not storage_error
+        if is_supported:
+            try:
+                await self._offload(fan_controller.recover_abandoned)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} previous fan session recovery pending: {error}")
         try:
             await self._offload(updater.ssl_context)
         except Exception as error:
             decky.logger.warning(f"{LOG} updater TLS initialization failed: {error}")
         saved_controller = normalize_controller(settings.getSetting("controller", DEFAULT_CONTROLLER))
-        # Treat an existing map as an enabled toggle and migrate it in place
-        # when a newer package extends the aya7 mapping.
-        key_binding_installed = any(button_map_owned(path) for path in (
+        # Older releases did not persist either switch. Migrate an existing
+        # owned file into a saved preference, then restore it after OS updates
+        # that replace /etc. A missing file with no preference stays disabled.
+        existing_key_binding = any(button_map_owned(path) for path in (
             INPUT_MAP_TARGET, *LEGACY_INPUT_MAP_TARGETS, LEGACY_INPUT_DEVICE_TARGET))
-        if hardware_allowed and key_binding_installed:
+        saved_button_fix = settings.getSetting("button_fix_enabled", None)
+        desired_button_fix = (saved_button_fix if type(saved_button_fix) is bool
+                              else existing_key_binding)
+        if hardware_allowed and desired_button_fix:
             try:
-                await self._offload(install_button_fix)
+                if not await self._offload(button_fix_installed) or any(
+                        button_map_owned(path) for path in (
+                            *LEGACY_INPUT_MAP_TARGETS, LEGACY_INPUT_DEVICE_TARGET)):
+                    await self._offload(install_button_fix)
+                    await self._offload(_systemctl, "restart", "inputplumber", check=True)
             except Exception as error:
-                decky.logger.warning(f"{LOG} key-binding migration failed: {error}")
-            key_binding_installed = await self._offload(button_fix_installed)
-        screen_installed = _display_script_owned(LUA_TARGET)
-        if hardware_allowed and screen_installed and not _is_our_display_script(LUA_TARGET):
+                decky.logger.warning(f"{LOG} key-binding restoration failed: {error}")
+        elif hardware_allowed and saved_button_fix is False and existing_key_binding:
+            try:
+                await self._offload(remove_button_fix)
+                await self._offload(_systemctl, "restart", "inputplumber", check=True)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} key-binding disable recovery failed: {error}")
+        key_binding_installed = await self._offload(button_fix_installed)
+        existing_screen = _display_script_owned(LUA_TARGET)
+        saved_screen_fix = settings.getSetting("screen_fix_enabled", None)
+        desired_screen_fix = (saved_screen_fix if type(saved_screen_fix) is bool
+                              else existing_screen)
+        if hardware_allowed and desired_screen_fix and not _is_our_display_script(LUA_TARGET):
             try:
                 await self._offload(install_display_script)
             except Exception as error:
-                decky.logger.warning(f"{LOG} display-definition migration failed: {error}")
-            screen_installed = _is_our_display_script(LUA_TARGET)
+                decky.logger.warning(f"{LOG} display-definition restoration failed: {error}")
+        elif hardware_allowed and saved_screen_fix is False and existing_screen:
+            try:
+                await self._offload(remove_display_script)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} display-definition disable recovery failed: {error}")
+        screen_installed = _is_our_display_script(LUA_TARGET)
+        if hardware_allowed and not storage_error:
+            migrations = {}
+            if saved_button_fix is None and existing_key_binding:
+                migrations["button_fix_enabled"] = True
+            if saved_screen_fix is None and existing_screen:
+                migrations["screen_fix_enabled"] = True
+            if migrations:
+                try:
+                    await self._offload(self._save_values, migrations)
+                except Exception as error:
+                    decky.logger.warning(f"{LOG} legacy fix preference migration failed: {error}")
         audio_enabled = settings.getSetting("audio_fix_enabled", True) is not False
         tm_guard_enabled = settings.getSetting("tm_guard_enabled", True) is not False
         audio_installed = await self._offload(audio_fix_installed) if hardware_allowed else False
         audio_ready = await self._offload(audio_fix_ready) if audio_installed else False
-        ec_control = await self._offload(ensure_charge_control) if hardware_allowed else None
+        ec_control = await self._offload(ensure_controller_control) if hardware_allowed else None
         charge_control = await self._offload(ensure_charge_bypass_control) if hardware_allowed else None
         try:
             charge_bypass = await self._offload(read_charge_bypass) if charge_control else False
@@ -3550,6 +3709,7 @@ class Plugin:
             tasks = [task for task in (
                 Plugin._audio_task, Plugin._restore_task, Plugin._edid_task,
                 Plugin._ac_task, Plugin._module_task, Plugin._tm_guard_task,
+                Plugin._fan_task,
             ) if task is not None]
             for task in tasks:
                 task.cancel()
@@ -3558,8 +3718,12 @@ class Plugin:
             while self._rpc_jobs or self._workers:
                 await asyncio.gather(*tuple(self._rpc_jobs | self._workers), return_exceptions=True)
             for name in ("_audio_task", "_restore_task", "_edid_task", "_ac_task",
-                         "_module_task", "_tm_guard_task"):
+                         "_module_task", "_tm_guard_task", "_fan_task"):
                 setattr(Plugin, name, None)
+            try:
+                await self._offload(fan_controller.close)
+            except Exception as error:
+                decky.logger.warning(f"{LOG} fan guard will retry automatic mode: {error}")
             with _lock:
                 was_supported = bool(Plugin._state.get("supported", False))
                 was_reconnecting = bool(Plugin._state.get("modules_reconnecting", False))

@@ -2,6 +2,30 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## [1.2.0] - 2026-09-24
+
+### Added
+
+- Add native AYANEO EC fan status and guarded Auto/manual fan control when the
+  kernel exposes the required hwmon interface.
+
+### Fixed
+
+- Prefer the native `ayaneo-ec` controller power and module-presence controls on
+  newer kernels while retaining the raw EC fallback on SteamOS 3.8/kernel 6.16.
+- Save the OLED and key-binding switches and restore their system definitions
+  after SteamOS replaces `/etc`; reload InputPlumber only when its map changes.
+- Keep the fan recovery action available after a temporary status failure and
+  retry independent Auto restoration across longer EC outages.
+- Keep Auto fan status available when the EC rejects a manual PWM read; continue
+  to require PWM readback before confirming manual control.
+
+### Internal
+
+- Split the hardware overview into focused pages and extend regression coverage
+  for kernel compatibility, startup recovery, fan safety and QAM navigation.
+- Drop the unused React Icons package from the frontend and release payload.
+
 ## [1.1.0] - 2026-09-06
 
 ### Fixed
