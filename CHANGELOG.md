@@ -6,6 +6,31 @@ All notable changes to AYANEO 3 Companion, newest first.
 
 ### Fixed
 
+- Clear a transient game-profile read error after automatic recovery without
+  dismissing unrelated action failures. Keep unresolved lookup errors visible
+  in the overview and on control pages, and discard them on context changes.
+
+- Coalesce automatic game-profile reads across QAM reopen and game changes;
+  after a slow request completes, query only the latest active context.
+- Defer profile refresh during TDP/profile transactions and resume it after
+  commit or rollback, so an old read cannot undo the confirmed profile in UI.
+
+- Restore automatic fan control after a bounded wait even if a stalled Decky
+  process holds the lease lock. Retain the lease and retry until the interrupted
+  manual transaction finishes, then clean it up under the lock.
+- Keep battery reads single-flight across page and QAM navigation. Discard an
+  obsolete reply and start one fresh read when the previous worker completes.
+- Keep a new manual fan session monitored when an older renewal or resume
+  cleanup reports completion after the new session was accepted.
+
+- Serialize fan lease changes with the independent guard across processes so
+  an expiring guard cannot delete a newly renewed manual session's protection.
+  Keep Auto available when the lease lock cannot be acquired.
+- Let a fan guard whose session was removed exit successfully instead of
+  triggering repeated systemd restarts; live leases still retry EC outages.
+- Show initial battery read failures and mark cached battery values after a
+  failed refresh. Clear the error after recovery and ignore closed-page replies.
+
 - Add the repository to the temporary GitHub Actions Python step's import
   path before loading the archive validator. Select Git Bash explicitly for
   Windows launcher regressions, and reject dangling calibration output links
@@ -114,6 +139,19 @@ All notable changes to AYANEO 3 Companion, newest first.
 - Replace the obsolete build dependency chain and check npm advisories in CI.
 
 ### Internal
+
+- Cover profile read coalescing, game switches, unmount and QAM reopen during
+  successful or failed profile saves/removals. Complete the fan monitor tests
+  for renewal/resume failures and starting a session after cleanup.
+
+- Add regressions for a stalled fan lease holder, superseded guard ownership,
+  and repeated battery-page navigation during a slow read and after unmount.
+- Cover delayed fan renewal failures, expiry and resume cleanup across a new
+  manual write, including normal monitor shutdown and restart.
+
+- Exercise a guard/manual-write interleaving, cross-process lease exclusion,
+  removed-session exit and Auto fallback. Cover battery read failure, recovery
+  and obsolete responses using the actual frontend components.
 
 - Add event-loop regressions for slow settings commits, raw-EC power readback
   and rollback faults, pre-write ownership failures and post-write TDP recovery.
