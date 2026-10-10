@@ -2,7 +2,7 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-10-10
 
 This update adds fan control and improves how Companion handles everyday
 adjustments, game changes, and temporary hardware problems.
