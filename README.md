@@ -55,6 +55,28 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 The controller protocol and display identity were verified on retail hardware.
 Other AYANEO models are deliberately rejected by the device checks.
 The plugin retains its SteamOS 3.8/kernel 6.16 controller and charge-control paths.
+Three-limit TDP control requires RyzenAdj with no active PowerStation writer.
+When PowerStation is active, TDP edits and per-game TDP application are disabled:
+its TDP/Boost API cannot verify independent SPL/SPPT/FPPT limits or the 37 W FPPT
+ceiling. CPU Boost and the other independent controls remain available.
+Ownership status is refreshed by a single background probe, with a five-second
+interval after each attempt. Slow service diagnostics do not hold up startup or
+the panel's other status fields. Every TDP write checks live ownership again;
+cached availability never authorizes a hardware write.
+Fan commands use their own serialized queue so restoring Auto does not wait for
+a slow TDP or audio operation, including a slow settings commit. Profile reads
+wait for consistent settings in a worker without blocking Decky's event loop.
+Saved charge bypass is verified by a separate
+monitor every 15 seconds and after charger changes or resume, even while TDP
+restoration is still running.
+The current game's profile remains pending while TDP is blocked and is retried
+when RyzenAdj becomes available. A profile error leaves device status and the
+independent controls accessible while TDP edits wait for the correct game.
+Controller firmware, RGB, bindings and module eject/reset require the vendor HID
+interface. If the kernel's `hid-ayaneo` driver owns it, these controls display an
+unavailable reason instead of issuing competing commands; evdev FF Gain remains
+independent. Module presence and power recovery continue through EC while the
+vendor HID interface is temporarily absent after ejecting the modules.
 Fan control appears only when the native `ayaneo-ec` hwmon interface is available;
 it is available on the tested SteamOS 3.10/kernel 7.2.4 system.
 
@@ -86,6 +108,7 @@ cd Ayaneo3Companion
 
 npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
+npm audit --audit-level=high
 npm run test:frontend
 npm run test:backend
 npm run build
@@ -110,6 +133,17 @@ chmod +x bootstrap.sh
 
 The bootstrap installer checks the device, installs the plugin directly and
 installs its aya7 key-binding extension. Decky Loader must already be installed.
+It discovers the plugin directory from the effective Decky systemd service
+configuration, including separate privileged and user data directories and
+accounts other than `deck`. It validates the complete
+ZIP, stages a fresh deployment and replaces the plugin directory as a unit.
+Concurrent installers are excluded for the duration of the transaction. The
+previous deployment is retained until the restarted services pass their checks.
+If a file operation or service restart fails, it restores the previous plugin,
+owned InputPlumber maps and service state. If rollback fails, it keeps recovery
+files in the reported directory and does not restart Decky after an incomplete
+rollback. If Decky cannot be stopped, the installer preserves the running
+deployment and recovery files instead of replacing files under the live process.
 For a graphical Desktop Mode workflow, keep the ZIP, `bootstrap.sh` and
 `Install AYANEO 3 Companion.desktop` in the same folder, mark the launcher as
 executable and double-click it.
@@ -126,6 +160,8 @@ state and opens a dedicated control page; **All Controls** returns to the
 overview. Closing and reopening QAM returns to this overview; choosing an option
 in a native dropdown keeps the current page open. The last confirmed overview
 state is shown immediately while a fresh read completes.
+If a refresh fails, the panel identifies the displayed values as the last
+confirmed state and retries automatically. The message clears after a fresh read.
 
 - Open **TDP** to select a preset or create a Custom configuration. Enable
   **Per Game Profile** while a game is running to bind the chosen values to it.
@@ -173,6 +209,11 @@ closes. Status polls never overlap and stop while QAM is hidden; completed write
 game context cannot be overwritten by an older response. Per-game tracking and
 the existing recovery monitors continue independently of the panel.
 
+Custom TDP and manual fan Apply use the latest slider choice, including changes
+made immediately before pressing Apply. Speaker discovery and verification run
+in the background so other controls can open while ALSA becomes available.
+Audio calibration remains unavailable until both speaker DSPs are verified.
+
 GitHub downloads are limited to this plugin's stable release ZIP. The updater
 checks the release's SHA-256 digest, archive paths, sizes and plugin identity
 before publishing a complete file in Downloads.
@@ -182,8 +223,14 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
 
 - CPU Boost writes Linux CPUFreq's global `boost` control. Disabling it prevents
   the CPU from exceeding its base frequency without changing the selected TDP.
-- On Bazzite, TDP is written through `org.shadowblip.PowerStation`. On SteamOS,
-  the plugin downloads the pinned RyzenAdj build and writes SPL/SPPT/FPPT directly.
+- The plugin downloads the pinned RyzenAdj build and writes SPL/SPPT/FPPT
+  directly when PowerStation is inactive. An active or starting PowerStation
+  writer disables these writes because its TDP/Boost API does not expose a
+  verifiable three-limit contract.
+  The power monitor retries a pending profile after ownership becomes available;
+  same-game heartbeats return before waiting for that monitor's transaction.
+  Charge control has its own transaction lock shared with charge recovery, so
+  a slow TDP monitor does not block independent charge or queued RGB changes.
 - Charge bypass prefers the upstream AYANEO `charge_behaviour` kernel ABI. On
   older SteamOS kernels it falls back to the same AYANEO 3 EC register used by
   Linux 6.19's `ayaneo-ec` driver. The plugin verifies every write and restores
@@ -194,6 +241,8 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
 - Fan control uses the kernel's `ayaneo-ec` hwmon interface. Manual mode is
   applied only after an independent systemd guard has been armed, and the guard
   retries until Auto is confirmed if the EC temporarily disappears.
+  Unreadable unrelated hwmon entries do not block fan discovery or Auto recovery;
+  multiple matching AYANEO devices still prevent ambiguous writes.
 - Magic Module identity and upper/lower layout come from AYANEO's vendor HID status,
   with the same known-module table used by HHD. Release uses the vendor eject
   command; after the latch motors finish, the plugin power-cycles the controller
@@ -203,6 +252,20 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
 - Firmware vibration and RGB use the AYANEO vendor HID interface. The FF Gain
   slider writes Linux `FF_GAIN` to the physical gamepad, scaling effects from
   games and the test button without changing the firmware strength.
+  An independent evdev monitor restores the latest saved gain after startup,
+  resume or physical input-device recreation, including when `hid-ayaneo`
+  blocks vendor HID controls. Missing devices and failed writes are retried;
+  restoration waits for module operations to finish.
+  Device selection requires one of the known internal AYANEO USB physical paths
+  for the 8840U and HX 370 variants. A matching external Xbox-compatible pad is
+  never used as a fallback while the internal evdev node is absent.
+  Combined firmware/RGB and FF Gain edits commit once after both devices succeed;
+  failure restores both previous settings before returning an error.
+  A controller write or recovery requires a matching custom-mode status report,
+  with one additional attempt if verification fails. An ACK alone is insufficient.
+  Vibration tests flush pending slider changes and wait for the whole controller
+  queue to be confirmed. A failed write prevents the test and refreshes the
+  restored settings; FF Gain is disabled while an action is in progress.
 - Key bindings extend InputPlumber's native `aya7` capability map instead of
   replacing its APU-specific device profile. The switch programs only the two
   rear-button firmware slots: LC1/RC1 emit KeyL/KeyR and become L5/R5, while
@@ -221,6 +284,10 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
   format without changing either amplifier ID. The original variable is saved
   under `/var/lib/ayaneo3-companion/audio-calibration` before every write. A
   full restart is required before the driver applies the new values.
+- RyzenAdj and calibration-firmware downloads use incremental reads, byte limits
+  and a 60-second transfer deadline checked between network reads. Individual
+  network operations have a 10-second timeout; a pending read may finish after
+  the transfer deadline. Interrupted binary downloads retain existing components.
 - The display definition matches `AYA / 0x0113 / AYAOLED_FHD`. A runtime check
   normalizes only the CTA MaxCLL byte to AYANEO's advertised 800 nit maximum if
   the bridge or another tool publishes a different value.
@@ -233,6 +300,7 @@ The complete verification sequence is:
 
 ```bash
 npm ci --ignore-scripts --no-audit --no-fund
+npm audit --audit-level=high
 npm run typecheck
 npm run test:frontend
 npm run test:backend
@@ -247,6 +315,22 @@ controlled RPC completion order to exercise saves, polling, game changes,
 dropdowns and panel lifecycles. GitHub Actions runs the backend suite on Ubuntu
 with Python 3.10 and Windows with Python 3.13, then checks the frontend and the
 contents of the built ZIP with Node.js 24.
+Settings writes return their confirmed state without waiting for unrelated
+diagnostics; the UI merges only the action's own fields into the latest observed
+state, including global settings acknowledged after a running-game change.
+TDP and profile edits still require the captured game context to match.
+Regular status reads refresh capabilities. Responsiveness tests
+block a service probe while subsequent controller transactions complete, and
+exercise game changes during a slow RPC and fan reads across QAM navigation.
+Additional regressions cover HID confirmation, bounded hardware transfers,
+pending TDP retry ownership and fan discovery with unreadable unrelated entries.
+They also block the TDP monitor while independent actions finish, verify charge
+recovery reads committed intent, and exercise vibration tests during queued saves.
+Installer regressions exercise real directory swaps, failed staging, map writes,
+service failures and incomplete rollback using temporary files and fake services.
+The archive check also uses the updater's runtime-file validator. The build uses
+direct Rollup plugins and native filesystem cleanup without the obsolete
+glob/delete dependency chain.
 
 These checks do not verify live hardware. Startup, suspend/resume, charger
 changes, module reconnection and physical controller behaviour still require
