@@ -12,7 +12,7 @@ const name = "Ayaneo3Companion";
 const files = [
   "main.py", "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "plugin.json", "package.json", "package-lock.json",
   "README.md", "CHANGELOG.md", "LICENSE", "NOTICE", "requirements.txt",
-  "bootstrap.sh", "Install AYANEO 3 Companion.desktop", "rollup.config.js",
+  "bootstrap.sh", "bootstrap_installer.py", "Install AYANEO 3 Companion.desktop", "rollup.config.js",
   "tsconfig.json", "src", "dist", "assets",
 ];
 if (process.argv.slice(2).some(arg => arg !== "--check")) throw new Error("usage: node scripts/package.mjs [--check]");
@@ -20,6 +20,12 @@ if (!/^\d+\.\d+\.\d+$/.test(manifest.version) || manifest.name !== "AYANEO 3 Com
     || packageManifest.name !== "ayaneo3companion") throw new Error("invalid package identity or stable version");
 for (const file of files) if (!existsSync(join(root, file))) throw new Error(`required file missing: ${file}`);
 if (!existsSync(join(root, "dist", "index.js"))) throw new Error("dist/index.js is missing");
+for (const file of ["assets/ayaneo.ayaneo3.oled.lua", "assets/ayaneo3-companion.yaml"]) {
+  const path = join(root, file);
+  if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).size === 0) {
+    throw new Error(`required runtime asset missing or empty: ${file}`);
+  }
+}
 if (manifest.version !== packageManifest.version || manifest.version !== packageLock.version
     || manifest.version !== packageLock.packages?.[""]?.version
     || packageLock.name !== packageManifest.name || packageLock.packages?.[""]?.name !== packageManifest.name

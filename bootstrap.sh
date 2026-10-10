@@ -2,30 +2,17 @@
 # SPDX-License-Identifier: BSD-3-Clause
 set -Eeuo pipefail
 
-PLUGIN_NAME="Ayaneo3Companion"
-PLUGIN_ROOT="/home/deck/homebrew/plugins"
-MAP_TARGET="/etc/inputplumber/capability_maps.d/ayaneo_type7.yaml"
-LEGACY_DEVICE_TARGET="/etc/inputplumber/devices.d/01-ayaneo3-companion.yaml"
-LEGACY_MAP_TARGET_1="/etc/inputplumber/capability_maps.d/01-ayaneo3-companion-aya7.yaml"
-LEGACY_MAP_TARGET_2="/etc/inputplumber/capability_maps.d/ayaneo3-companion.yaml"
-
-die() {
-  printf 'Error: %s\n' "$*" >&2
-  exit 1
-}
-
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   printf 'Usage: %s [Ayaneo3Companion-version.zip]\n' "${0##*/}"
-  printf 'Installs AYANEO 3 Companion and its AYANEO 3 key bindings without using QAM.\n'
+  printf 'Installs into the plugin directory configured by Decky; rolls back failed updates.\n'
   exit 0
 fi
-
 [[ "$(< /sys/class/dmi/id/sys_vendor)" == "AYANEO" ]] || die "this is not an AYANEO device"
 [[ "$(< /sys/class/dmi/id/product_name)" == "AYANEO 3" ]] || die "AYANEO 3 is required"
 command -v python3 >/dev/null || die "python3 is required"
 command -v systemctl >/dev/null || die "systemd is required"
 systemctl cat plugin_loader.service >/dev/null 2>&1 || die "install Decky Loader first"
-
 archive="${1:-}"
 if [[ -z "$archive" ]]; then
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,47 +24,24 @@ if [[ -z "$archive" ]]; then
 fi
 archive="$(realpath -- "$archive")"
 [[ -f "$archive" ]] || die "archive not found: $archive"
-
 work_dir="$(mktemp -d --tmpdir ayaneo3-companion.XXXXXXXX)"
-loader_stopped=false
-cleanup() {
-  rm -rf -- "$work_dir"
-  if [[ "$loader_stopped" == true ]]; then
-    sudo systemctl start plugin_loader.service || true
-  fi
-}
-trap cleanup EXIT
-
-python3 -m zipfile -e "$archive" "$work_dir"
-source_dir="$work_dir/$PLUGIN_NAME"
-[[ -f "$source_dir/plugin.json" ]] || die "invalid plugin archive"
-[[ -f "$source_dir/main.py" && -f "$source_dir/dist/index.js" ]] || die "plugin files are incomplete"
-[[ -f "$source_dir/assets/ayaneo3-companion.yaml" ]] || die "InputPlumber capability map is missing"
-
-# aya7 is a shared stock filename. Upgrade our marked/legacy map, but never
-# replace an override that belongs to the user or another project.
-if [[ -L "$MAP_TARGET" ]]; then
-  die "refusing to replace a symlinked InputPlumber map: $MAP_TARGET"
-fi
-if [[ -e "$MAP_TARGET" ]] \
-    && ! grep -Fxq '# Managed by AYANEO 3 Companion' "$MAP_TARGET" \
-    && ! grep -Fxq 'name: AYANEO 3 Companion' "$MAP_TARGET"; then
-  die "another aya7 InputPlumber override already exists: $MAP_TARGET"
-fi
-
-version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$source_dir/plugin.json")"
-printf 'Installing AYANEO 3 Companion %s...\n' "$version"
-
-sudo -v
-sudo systemctl stop plugin_loader.service
-loader_stopped=true
-sudo install -d -m 755 "$PLUGIN_ROOT/$PLUGIN_NAME"
-sudo cp -a "$source_dir/." "$PLUGIN_ROOT/$PLUGIN_NAME/"
-sudo chown -R root:root "$PLUGIN_ROOT/$PLUGIN_NAME"
-sudo rm -f -- "$LEGACY_DEVICE_TARGET" "$LEGACY_MAP_TARGET_1" "$LEGACY_MAP_TARGET_2"
-sudo install -D -m 644 "$source_dir/assets/ayaneo3-companion.yaml" "$MAP_TARGET"
-sudo systemctl restart inputplumber.service
-sudo systemctl start plugin_loader.service
-loader_stopped=false
-
-printf 'Installed AYANEO 3 Companion %s. Return to Game Mode and enable Fix Key Binding if needed.\n' "$version"
+trap 'rm -rf -- "$work_dir"' EXIT
+# Read only the installer and its validator into a private temporary directory.
+# The helper validates the whole ZIP before extracting or stopping services.
+python3 - "$archive" "$work_dir" <<'PY'
+import pathlib, stat, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for name in ("bootstrap_installer.py", "lego_updater.py"):
+        key = "Ayaneo3Companion/" + name
+        matches = [entry for entry in archive.infolist() if entry.filename == key]
+        if len(matches) != 1:
+            raise ValueError("Missing or duplicate installer file: " + name)
+        entry = matches[0]
+        mode = entry.external_attr >> 16
+        if entry.is_dir() or not 0 < entry.file_size <= 1024 * 1024 or (
+                stat.S_IFMT(mode) and not stat.S_ISREG(mode)):
+            raise ValueError("Invalid installer file: " + name)
+        (pathlib.Path(sys.argv[2]) / name).write_bytes(archive.read(entry))
+PY
+python3 "$work_dir/bootstrap_installer.py" --archive "$archive" --check
+sudo python3 "$work_dir/bootstrap_installer.py" --archive "$archive"

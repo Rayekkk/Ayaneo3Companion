@@ -4,5 +4,5 @@ Name=Install AYANEO 3 Companion
 Comment=Install the Decky plugin and enable its QAM button mapping
 Icon=system-software-install
 Terminal=true
-Exec=bash -lc 'launcher="%k"; directory=${launcher%/*}; cd "$directory" && chmod +x bootstrap.sh && ./bootstrap.sh; result=$?; echo; if (( result == 0 )); then echo "Installation complete. You can return to Game Mode."; else echo "Installation failed with status $result."; fi; read -rp "Press Enter to close..."; exit $result'
+Exec=python3 -c "import pathlib, subprocess, sys, urllib.parse, urllib.request; location=sys.argv[1] if len(sys.argv)>1 else ''; uri=urllib.parse.urlsplit('' if pathlib.Path(location).is_absolute() else location); sys.exit('A local desktop launcher path is required.') if not location or uri.scheme not in ('', 'file') or uri.netloc not in ('', 'localhost') else None; launcher=pathlib.Path(urllib.request.url2pathname(uri.path) if uri.scheme=='file' else location).resolve(strict=True); result=subprocess.run(['bash', str(launcher.parent / 'bootstrap.sh')], cwd=launcher.parent).returncode; print(); print('Installation complete. You can return to Game Mode.' if result==0 else 'Installation failed with status ' + str(result) + '.'); input('Press Enter to close...'); sys.exit(result)" %k
 Categories=System;
