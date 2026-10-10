@@ -49,7 +49,19 @@ class DesktopLauncherTests(unittest.TestCase):
         if not bash or not Path(bash).is_file():
             self.skipTest("Bash is unavailable")
         environment["PATH"] = str(Path(bash).parent) + os.pathsep + environment.get("PATH", "")
-        return subprocess.run(self.command(location), input="\n", capture_output=True,
+        command = self.command(location)
+        if os.name == "nt":
+            # CreateProcess searches System32 before PATH, so prepending Git
+            # is insufficient when the WSL shim exists. Adapt only executable
+            # resolution in the child; execute the shipped Desktop code and
+            # its unchanged bootstrap arguments against the harmless fixture.
+            command[2] = (
+                "import subprocess; _fixture_run=subprocess.run; "
+                "subprocess.run=lambda argv, **kw: _fixture_run("
+                f"[{bash!r}, *argv[1:]] if argv[0]=='bash' else argv, **kw); "
+                + command[2]
+            )
+        return subprocess.run(command, input="\n", capture_output=True,
                               text=True, timeout=10, cwd=self.base, env=environment)
 
     @unittest.skipUnless(os.name == "nt", "Windows Bash selection")
