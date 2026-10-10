@@ -127,7 +127,13 @@ def main() -> int:
         args.ambient,
         args.timestamp,
     )
-    args.output.write_bytes(candidate)
+    try:
+        # Exclusive creation protects the reviewed output from a concurrent
+        # writer or a dangling symlink that exists() could not detect.
+        with args.output.open("xb") as output:
+            output.write(candidate)
+    except FileExistsError:
+        parser.error(f"output already exists: {args.output}")
     print(f"Wrote {len(candidate)} bytes to {args.output}")
     print(f"SHA256 {hashlib.sha256(candidate).hexdigest()}")
     return 0

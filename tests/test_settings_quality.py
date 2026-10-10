@@ -329,6 +329,67 @@ def _storage_child(connection, directory, operation, checkpoint, payload):
         connection.close()
 
 
+def _fifo_reader_child(connection, path, operation):
+    """Exercise real FIFO opens in a killable child, including an lstat race."""
+    try:
+        connection.send("starting")
+        if operation == "harden":
+            os.mkfifo(path)
+            safe_settings._harden_regular_file(path)
+        else:
+            Path(path).write_text('{"safe":true}', encoding="utf-8")
+            original_lstat = os.lstat
+            swapped = False
+            def swap_after_lstat(candidate, *args, **kwargs):
+                nonlocal swapped
+                info = original_lstat(candidate, *args, **kwargs)
+                if os.fspath(candidate) == path and not swapped:
+                    swapped = True
+                    os.unlink(path)
+                    os.mkfifo(path)
+                return info
+            with patch.object(safe_settings.os, "lstat", side_effect=swap_after_lstat):
+                safe_settings.load_json_object(path)
+        connection.send("unsafe descriptor accepted")
+    except safe_settings.UnsafeSettingsPath:
+        connection.send("rejected")
+    except BaseException:
+        connection.send(traceback.format_exc())
+    finally:
+        connection.close()
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX FIFO open semantics")
+class SettingsFifoTests(unittest.TestCase):
+    def assert_fifo_rejected_without_waiting_for_writer(self, operation):
+        with tempfile.TemporaryDirectory(prefix="ayaneo3-fifo-") as directory:
+            context = multiprocessing.get_context("spawn")
+            parent, child = context.Pipe()
+            process = context.Process(target=_fifo_reader_child,
+                args=(child, str(Path(directory) / "settings.json"), operation))
+            process.start()
+            child.close()
+            try:
+                self.assertTrue(parent.poll(10), "child did not start")
+                self.assertEqual(parent.recv(), "starting")
+                self.assertTrue(parent.poll(3), "settings open blocked waiting for a FIFO writer")
+                self.assertEqual(parent.recv(), "rejected")
+                process.join(3)
+                self.assertEqual(process.exitcode, 0)
+            finally:
+                if process.is_alive():
+                    process.kill()
+                    process.join(3)
+                parent.close()
+                process.close()
+
+    def test_fifo_swapped_after_lstat_does_not_block_settings_read(self):
+        self.assert_fifo_rejected_without_waiting_for_writer("read")
+
+    def test_fifo_does_not_block_permission_hardening(self):
+        self.assert_fifo_rejected_without_waiting_for_writer("harden")
+
+
 class SettingsProcessCrashTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ayaneo3-process-crash-")

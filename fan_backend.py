@@ -37,7 +37,13 @@ for attempt in range(5):
     try:
         if owner.read_text().strip() != token:
             sys.exit(0)
-        matches = [p for p in root.glob('hwmon*') if (p / 'name').read_text().strip() == 'ayaneo_ec']
+        matches = []
+        for p in root.glob('hwmon*'):
+            try:
+                if (p / 'name').read_text().strip() == 'ayaneo_ec':
+                    matches.append(p)
+            except OSError:
+                continue
         if len(matches) == 1:
             enable = matches[0] / 'pwm1_enable'
             if owner.read_text().strip() != token:
@@ -67,8 +73,15 @@ class FanController:
 
     def _hwmon(self):
         try:
-            matches = [path for path in self.hwmon_root.glob("hwmon*")
-                       if (path / "name").read_text().strip() == "ayaneo_ec"]
+            matches = []
+            for path in self.hwmon_root.glob("hwmon*"):
+                try:
+                    if (path / "name").read_text().strip() == "ayaneo_ec":
+                        matches.append(path)
+                except OSError:
+                    # An unrelated hwmon can disappear during enumeration.
+                    # Only a verified AYANEO interface participates in control.
+                    continue
         except OSError as error:
             raise RuntimeError(f"AYANEO fan discovery failed: {error}") from error
         if len(matches) != 1:

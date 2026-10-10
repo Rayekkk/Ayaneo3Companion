@@ -1,8 +1,12 @@
 import datetime as dt
+import contextlib
 import importlib.util
+import io
 import pathlib
 import struct
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "build_audio_calibration_efi.py"
@@ -38,6 +42,43 @@ class AudioCalibrationEfiTests(unittest.TestCase):
         timestamp = dt.datetime.now(dt.timezone.utc)
         with self.assertRaisesRegex(ValueError, "CAL_R values"):
             MODULE.build_candidate(self.make_blob(), (0, 11477), 23, timestamp)
+
+    def run_builder(self, original, output):
+        arguments = [str(SCRIPT), str(original), str(output), "--left", "11956",
+            "--right", "11477", "--ambient", "23", "--timestamp", "2026-10-10T12:00:00Z"]
+        with patch.object(MODULE.sys, "argv", arguments), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return MODULE.main()
+
+    def test_output_created_after_precheck_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            original, output = root / "original.bin", root / "candidate.bin"
+            original.write_bytes(self.make_blob())
+            def create_between_check_and_write(path):
+                self.assertEqual(path, output)
+                output.write_bytes(b"another process's candidate")
+                return False
+            with patch.object(MODULE.pathlib.Path, "exists", new=create_between_check_and_write):
+                with self.assertRaises(SystemExit) as rejected:
+                    self.run_builder(original, output)
+            self.assertEqual(rejected.exception.code, 2)
+            self.assertEqual(output.read_bytes(), b"another process's candidate")
+
+    def test_dangling_output_symlink_is_rejected_without_creating_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            original, output, victim = root / "original.bin", root / "candidate.bin", root / "victim.bin"
+            original.write_bytes(self.make_blob())
+            try:
+                output.symlink_to(victim)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            with self.assertRaises(SystemExit) as rejected:
+                self.run_builder(original, output)
+            self.assertEqual(rejected.exception.code, 2)
+            self.assertFalse(victim.exists())
+            self.assertTrue(output.is_symlink())
 
 
 if __name__ == "__main__":

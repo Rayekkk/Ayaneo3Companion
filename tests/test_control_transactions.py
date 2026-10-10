@@ -33,7 +33,7 @@ class ControlTransactionTests(unittest.TestCase):
                             ('LEGACY_INPUT_DEVICE_TARGET', self.legacy), ('LEGACY_INPUT_MAP_TARGETS', ())]:
             self.stack.enter_context(patch.object(main, name, value))
         self.stack.enter_context(patch.object(main.Plugin, '_state', state))
-        self.stack.enter_context(patch.object(main.Plugin, '_snapshot', side_effect=lambda: copy.deepcopy(main.Plugin._state)))
+        self.stack.enter_context(patch.object(main.Plugin, '_snapshot', side_effect=lambda *args: copy.deepcopy(main.Plugin._state)))
         self.stack.enter_context(patch.object(main, 'button_map_owned',
             side_effect=lambda path: path.is_file() and path.read_bytes().startswith(b'# Managed')))
         self.program = self.stack.enter_context(patch.object(main, 'program_rear_buttons'))
@@ -132,6 +132,8 @@ class ControlTransactionTests(unittest.TestCase):
     def test_late_audio_restore_does_not_reenable_disabled_fix(self):
         main.Plugin._state['audio_fix_enabled'] = False
         with patch.object(main, 'apply_audio_fix') as apply, \
+             patch.object(main, 'audio_fix_supported', return_value=True), \
+             patch.object(main, 'audio_fix_installed', return_value=False), \
              patch.object(main, 'audio_fix_ready') as ready:
             self.assertTrue(self.plugin._restore_audio_once())
         apply.assert_not_called()

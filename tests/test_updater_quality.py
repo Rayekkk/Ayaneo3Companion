@@ -32,6 +32,8 @@ def package(version=NEW, extra=None, manifest=None):
             "package.json": json.dumps({"name": "ayaneo3companion", "version": version}),
             "main.py": "# release payload\n", "dist/index.js": "export default {};\n",
         }
+        files.update({name: "# runtime fixture\n" for name in updates.REQUIRED_RUNTIME_FILES
+                      if name not in files})
         for name, content in files.items():
             archive.writestr(updates.ARCHIVE_ROOT + "/" + name, content)
         for name, content in (extra or []):
@@ -304,8 +306,24 @@ class ArchiveChecks(unittest.TestCase):
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, "w") as archive:
             archive.writestr(updates.ARCHIVE_ROOT + "/plugin.json", "{}")
-        with self.assertRaises(KeyError):
+        with self.assertRaises(ValueError):
             self.validate(stream.getvalue())
+
+    def test_each_required_runtime_file_must_exist_and_be_nonempty(self):
+        for required in updates.REQUIRED_RUNTIME_FILES:
+            for replacement in (None, b""):
+                with self.subTest(required=required, replacement=replacement):
+                    stream = io.BytesIO()
+                    with zipfile.ZipFile(io.BytesIO(package())) as source, \
+                            zipfile.ZipFile(stream, "w") as output:
+                        for entry in source.infolist():
+                            if entry.filename == f"{updates.ARCHIVE_ROOT}/{required}":
+                                if replacement is not None:
+                                    output.writestr(entry, replacement)
+                            else:
+                                output.writestr(entry, source.read(entry))
+                    with self.assertRaisesRegex(ValueError, "required plugin file"):
+                        self.validate(stream.getvalue())
 
     def test_path_traversal_duplicate_windows_paths_and_file_directory_conflicts(self):
         for name in ("../evil", "/absolute", "Ayaneo3Companion/../evil", "Other/main.py",

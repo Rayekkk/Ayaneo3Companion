@@ -21,7 +21,8 @@ import main
 import safe_settings
 
 
-TASK_NAMES = ("_restore_task", "_edid_task", "_ac_task", "_module_task", "_tm_guard_task", "_audio_task")
+TASK_NAMES = ("_restore_task", "_edid_task", "_ac_task", "_charge_task", "_module_task", "_tm_guard_task",
+              "_vibration_gain_task", "_audio_task")
 BASE_TDP = {"spl": 15, "sppt": 20, "fppt": 25}
 NEXT_TDP = {"spl": 20, "sppt": 25, "fppt": 30}
 
@@ -64,6 +65,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         patch("write_charge_bypass", side_effect=lambda value: self.write("charge_bypass", value))
         patch("apply_controller", side_effect=lambda value, *a, **kw: self.write("controller", value))
         patch("apply_tdp", side_effect=self.apply_tdp)
+        patch("tdp_capabilities", return_value={"tdp_backend": "RyzenAdj", "tdp_supported": True, "tdp_error": ""})
         patch("updater", new=types.SimpleNamespace(
             reset=mock.Mock(), close=mock.Mock(), ssl_context=mock.Mock(return_value=None),
             plugin_version=mock.Mock(return_value="1.0.2"),
@@ -71,6 +73,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             download_latest=mock.Mock(return_value={"success": False})))
         main.Plugin._state = {
             "supported": True, "initializing": False, "startup_error": "",
+            "tdp_backend": "RyzenAdj", "tdp_supported": True, "tdp_error": "",
             "tdp": dict(BASE_TDP), "tdp_preset": "Custom", "controller": copy.deepcopy(self.controller),
             "cpu_boost": False, "charge_bypass": False,
             "cpu_boost_supported": True, "charge_bypass_supported": True,
@@ -79,7 +82,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         }
         main.Plugin._active_app = "480"
         self.snapshot_patcher = mock.patch.object(
-            main.Plugin, "_snapshot", side_effect=lambda: copy.deepcopy(main.Plugin._state))
+            main.Plugin, "_snapshot", side_effect=lambda *args: copy.deepcopy(main.Plugin._state))
         self.snapshot_patcher.start()
         self.plugin = main.Plugin()
 

@@ -26,6 +26,11 @@ MAX_METADATA = 1024 * 1024
 MAX_DOWNLOAD = 32 * 1024 * 1024
 MAX_EXPANDED = 128 * 1024 * 1024
 MAX_MEMBERS = 1024
+REQUIRED_RUNTIME_FILES = (
+    "main.py", "dist/index.js", "plugin.json", "package.json",
+    "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py",
+    "assets/ayaneo.ayaneo3.oled.lua", "assets/ayaneo3-companion.yaml",
+)
 REQUEST_TIMEOUT = 6
 METADATA_SECONDS = 20
 DOWNLOAD_SECONDS = 120
@@ -330,10 +335,13 @@ class Updater:
                             raise ValueError("The release ZIP has an invalid entry size.")
                 if count != member.file_size:
                     raise ValueError("The release ZIP is incomplete.")
-            for required in ("main.py", "dist/index.js", "plugin.json", "package.json"):
-                info = archive.getinfo(f"{ARCHIVE_ROOT}/{required}")
+            for required in REQUIRED_RUNTIME_FILES:
+                try:
+                    info = archive.getinfo(f"{ARCHIVE_ROOT}/{required}")
+                except KeyError as error:
+                    raise ValueError(f"The release ZIP is missing a required plugin file: {required}") from error
                 if info.is_dir() or info.file_size == 0:
-                    raise ValueError("The release ZIP is missing a required plugin file.")
+                    raise ValueError(f"The release ZIP is missing a required plugin file: {required}")
             for filename in ("plugin.json", "package.json"):
                 name = f"{ARCHIVE_ROOT}/{filename}"
                 if archive.getinfo(name).file_size > 65536:

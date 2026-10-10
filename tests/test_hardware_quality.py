@@ -186,57 +186,54 @@ class HardwareQualityTests(unittest.TestCase):
         playback.wait.assert_called_once_with(timeout=2)
         self.assertTrue(stderr.closed)
 
-    def powerstation(self, *, fail_second=False, ignore_second=False):
-        state = {"TDP": 15.0, "Boost": 3.0}
-        writes = []
+    def test_powerstation_cannot_accept_any_three_limit_preset_or_bypass_its_writer(self):
+        values = [*main.PRESETS.values(), {"spl": 35, "sppt": 37, "fppt": 37}]
+        with mock.patch.object(main, "_powerstation_active", return_value=True), \
+             mock.patch.object(main, "_ensure_ryzenadj") as download, \
+             mock.patch.object(main.subprocess, "run") as command:
+            for value in values:
+                with self.subTest(value=value), self.assertRaisesRegex(main.TdpUnavailableError, "37 W"):
+                    main.apply_tdp(value)
+        download.assert_not_called()
+        command.assert_not_called()
 
-        def command(args, **kwargs):
-            self.assertIsInstance(kwargs.get("timeout"), (float, int))
-            prop = args[6]
-            if args[2] == "get-property":
-                return types.SimpleNamespace(returncode=0, stdout=f"d {state[prop]}", stderr="")
-            value = float(args[8])
-            writes.append((prop, value))
-            if len(writes) == 2 and fail_second:
-                return types.SimpleNamespace(returncode=1, stdout="", stderr="second write failed")
-            if not (len(writes) == 2 and ignore_second):
-                state[prop] = value
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    def test_ryzenadj_receives_all_three_normalized_limits(self):
+        with mock.patch.object(main, "_powerstation_active", return_value=False), \
+             mock.patch.object(main, "_ensure_ryzenadj"), \
+             mock.patch.object(main.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
+            main.apply_tdp({"spl": 35, "sppt": 999, "fppt": 999})
+        self.assertEqual(command.call_args.args[0][1:],
+                         ["--stapm-limit=35000", "--slow-limit=37000", "--fast-limit=37000"])
 
-        for patcher in (mock.patch.object(main, "_powerstation_card", return_value="/GPU/card0"),
-                        mock.patch.object(main.subprocess, "run", side_effect=command)):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        return state, writes
+    def test_powerstation_bus_owner_blocks_tdp_without_a_gpu_property_probe(self):
+        with mock.patch.object(main.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
+            self.assertTrue(main._powerstation_active())
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0][2], "status")
 
-    def test_powerstation_partial_failure_restores_both_original_properties(self):
-        state, writes = self.powerstation(fail_second=True)
-        with self.assertRaisesRegex(RuntimeError, "second write failed"):
-            main.apply_tdp({"spl": 25, "sppt": 30, "fppt": 35})
-        self.assertEqual(state, {"TDP": 15.0, "Boost": 3.0})
-        self.assertEqual(writes[-2:], [("TDP", 15.0), ("Boost", 3.0)])
+    def test_powerstation_service_startup_and_reload_are_treated_as_active(self):
+        for state, active in (("active", True), ("activating", True), ("reloading", True),
+                              ("deactivating", True), ("inactive", False)):
+            with self.subTest(state=state), mock.patch.object(main.subprocess, "run", side_effect=[
+                    types.SimpleNamespace(returncode=1), types.SimpleNamespace(returncode=0, stdout=state)]):
+                self.assertEqual(main._powerstation_active(), active)
 
-    def test_powerstation_successful_command_with_wrong_readback_is_rolled_back(self):
-        state, _ = self.powerstation(ignore_second=True)
-        with self.assertRaisesRegex(RuntimeError, "did not retain Boost"):
-            main.apply_tdp({"spl": 25, "sppt": 30, "fppt": 35})
-        self.assertEqual(state, {"TDP": 15.0, "Boost": 3.0})
+    def test_uncertain_powerstation_state_cannot_trigger_a_ryzenadj_write(self):
+        with mock.patch.object(main.subprocess, "run", side_effect=[
+                types.SimpleNamespace(returncode=1), types.SimpleNamespace(returncode=1)]), \
+             mock.patch.object(main, "_ensure_ryzenadj") as download:
+            with self.assertRaisesRegex(RuntimeError, "Could not verify"):
+                main.apply_tdp(main.DEFAULT_TDP)
+        download.assert_not_called()
 
-    def test_powerstation_success_preserves_existing_tdp_headroom_mapping(self):
-        state, writes = self.powerstation()
-        main.apply_tdp({"spl": 25, "sppt": 30, "fppt": 35})
-        self.assertEqual(state, {"TDP": 25.0, "Boost": 5.0})
-        self.assertEqual(writes, [("TDP", 25.0), ("Boost", 5.0)])
-
-    def test_powerstation_rejects_invalid_baseline_before_any_write(self):
-        for value in ("d nan", "d inf", "d -1", "s 15", "", "d 15 trailing"):
-            with self.subTest(value=value), \
-                 mock.patch.object(main, "_powerstation_card", return_value="/GPU/card0"), \
-                 mock.patch.object(main.subprocess, "run", return_value=types.SimpleNamespace(
-                     returncode=0, stdout=value, stderr="")) as command:
-                with self.assertRaisesRegex(RuntimeError, "invalid PowerStation"):
-                    main.apply_tdp(main.DEFAULT_TDP)
-                self.assertTrue(all(call.args[0][2] == "get-property" for call in command.call_args_list))
+    def test_powerstation_starting_during_binary_download_blocks_the_final_write(self):
+        with mock.patch.object(main, "_powerstation_active", side_effect=[False, True]), \
+             mock.patch.object(main, "_ensure_ryzenadj") as download, \
+             mock.patch.object(main.subprocess, "run") as command:
+            with self.assertRaises(main.TdpUnavailableError):
+                main.apply_tdp(main.DEFAULT_TDP)
+        download.assert_called_once()
+        command.assert_not_called()
 
     def test_cpu_boost_write_failure_restores_actual_original_value(self):
         path = self.root / "boost"

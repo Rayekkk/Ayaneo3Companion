@@ -76,6 +76,10 @@ def _validate_directory(directory: str) -> str:
 def _open_readonly_nofollow(path: str) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
+    # A user-owned settings directory can be changed between lstat and open.
+    # Opening a replacement FIFO must not wait forever for a writer; fstat
+    # below still rejects every non-regular descriptor before reading/chmod.
+    flags |= getattr(os, "O_NONBLOCK", 0)
     try:
         return os.open(path, flags)
     except OSError:
@@ -319,8 +323,11 @@ class AtomicSettingsManager:
     @property
     def recovery_error(self) -> str:
         """Why all saved copies were lost; empty for new or recovered storage."""
-        with self._lock:
-            return self._recovery_error
+        # Publish an immutable string under the writer's lock, but let async
+        # admission/status checks read it without waiting for commit's fsync.
+        # Acquiring the settings lock here stalls Decky's entire event loop,
+        # including independent fan recovery, while storage is slow.
+        return self._recovery_error
 
     def _quarantine_corrupt_primary(self) -> None:
         try:

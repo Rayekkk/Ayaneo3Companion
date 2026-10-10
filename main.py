@@ -83,6 +83,8 @@ ALLOWED_DOWNLOAD_HOSTS = frozenset({
     "github.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com",
 })
 MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024
+HARDWARE_DOWNLOAD_SECONDS = 60.0
+HARDWARE_NETWORK_TIMEOUT = 10.0
 CA_BUNDLES = (
     "/etc/ssl/certs/ca-certificates.crt",
     "/etc/ssl/cert.pem",
@@ -235,6 +237,16 @@ CONTROLLER_RESUME_THRESHOLD = 1.0
 HID_COMMAND_ATTEMPTS = 3
 HID_AYANEO_DRIVER_NAMES = frozenset({"hid-ayaneo", "hid_ayaneo"})
 CONTROLLER_COLOR_TOLERANCE = 1
+TDP_DIAGNOSTIC_INTERVAL = 5.0
+TDP_DIAGNOSTIC_FIELDS = ("tdp_backend", "tdp_supported", "tdp_error")
+# Only diagnostic fields are remembered by a status read. Applied values and
+# game identity remain owned by their transactions and background monitors.
+SNAPSHOT_DIAGNOSTICS = (
+    "gpu_power_w", "tdp_backend", "tdp_supported", "tdp_error",
+    "controller_supported", "controller_error", "cpu_boost_supported",
+    "screen_conflict", "edid_patched", "edid_game_nits",
+    "charge_bypass_supported", "module_eject_supported", "module_reset_supported",
+)
 AYA3_GAMEPAD_PHYS_PATHS = frozenset({
     # InputPlumber's AYANEO 3 source definitions. The PCI topology differs
     # between the Ryzen 7 8840U and Ryzen AI 9 HX 370 variants.
@@ -270,6 +282,7 @@ fan_controller = FanController()
 _lock = threading.RLock()
 _tdp_apply_lock = threading.Lock()
 _tdp_mutation_lock = threading.RLock()
+_charge_mutation_lock = threading.RLock()
 _cpu_boost_lock = threading.Lock()
 _ec_lock = threading.Lock()
 _charge_apply_lock = threading.Lock()
@@ -671,6 +684,7 @@ def remove_audio_fix(reload_dsp: bool = True) -> None:
 
 
 def _download_audio_calibration() -> bytes:
+    deadline = time.monotonic() + HARDWARE_DOWNLOAD_SECONDS
     request = urllib.request.Request(
         _checked_download_url(AUDIO_CALIBRATION_URL),
         headers={"User-Agent": f"Ayaneo3Companion/{updater.plugin_version()}"},
@@ -680,9 +694,7 @@ def _download_audio_calibration() -> bytes:
         declared = response.headers.get("Content-Length")
         if declared and int(declared) > 64 * 1024:
             raise RuntimeError("audio calibration file is unexpectedly large")
-        data = response.read(64 * 1024 + 1)
-    if len(data) > 64 * 1024:
-        raise RuntimeError("audio calibration file exceeded the download limit")
+        data = b"".join(_hardware_download_chunks(response, 64 * 1024, deadline))
     if hashlib.sha256(data).hexdigest() != AUDIO_CALIBRATION_SHA256:
         raise RuntimeError("audio calibration file checksum mismatch")
     return data
@@ -1267,8 +1279,28 @@ def _write_ec_register(register: int, value: int) -> None:
         raise RuntimeError("AYANEO EC write access is unavailable")
     with _ec_lock, path.open("r+b", buffering=0) as ec:
         ec.seek(register)
-        if ec.write(bytes([value])) != 1:
-            raise RuntimeError(f"could not write AYANEO EC register 0x{register:02x}")
+        previous = ec.read(1)
+        if len(previous) != 1:
+            raise RuntimeError(f"could not read AYANEO EC register 0x{register:02x}")
+        expected = bytes([value])
+        try:
+            ec.seek(register)
+            if ec.write(expected) != 1:
+                raise RuntimeError(f"could not write AYANEO EC register 0x{register:02x}")
+            ec.seek(register)
+            if ec.read(1) != expected:
+                raise RuntimeError(f"AYANEO EC register 0x{register:02x} did not retain the setting")
+        except Exception as error:
+            try:
+                ec.seek(register)
+                if ec.write(previous) != 1:
+                    raise RuntimeError("short EC rollback write")
+                ec.seek(register)
+                if ec.read(1) != previous:
+                    raise RuntimeError("EC rollback readback mismatch")
+            except Exception as recovery:
+                raise RuntimeError(f"{error}; EC recovery failed: {recovery}") from error
+            raise
 
 
 def _native_controller_power() -> bool:
@@ -1362,9 +1394,9 @@ def module_states_from_presence(presence: dict) -> tuple[dict, dict]:
 
 def set_controller_power(enabled: bool) -> None:
     require_supported_device("controller power")
+    if type(enabled) is not bool:
+        raise ValueError("controller power must be a boolean")
     if AYANEO_EC_ROOT.exists():
-        if type(enabled) is not bool:
-            raise ValueError("controller power must be a boolean")
         path = AYANEO_EC_ROOT / "controller_power"
         with _ec_lock:
             previous = _native_controller_power()
@@ -1670,6 +1702,19 @@ def read_controller() -> dict:
     }
 
 
+def _write_verified_controller(fd, config: dict) -> None:
+    """An ACK is insufficient: require a matching custom-mode state report."""
+    command = controller_command(config)
+    for _ in range(2):
+        if not _hid_exchange(fd, command):
+            raise RuntimeError("controller rejected configuration")
+        report = _hid_exchange(fd, AYA_CHECK)
+        if (controller_response_matches(report, config)
+                and not controller_requires_custom(report)):
+            return
+    raise RuntimeError("controller did not confirm the requested configuration")
+
+
 def apply_controller(config: dict, vibration_feedback: bool = False,
                      previous_vibration: str | None = None,
                      persist_firmware: bool = True) -> None:
@@ -1692,18 +1737,7 @@ def apply_controller(config: dict, vibration_feedback: bool = False,
         try:
             check = _hid_exchange(fd, AYA_CHECK)
             _switch_to_custom_mode_fd(fd, check)
-            command = controller_command(config)
-            if not _hid_exchange(fd, command):
-                raise RuntimeError("controller rejected configuration")
-            verification = _hid_exchange(fd, AYA_CHECK)
-            if (verification and verification[3] == AYA_CHECK[4]
-                    and not controller_response_matches(verification, config)):
-                if not _hid_exchange(fd, command):
-                    raise RuntimeError("controller rejected configuration retry")
-                verification = _hid_exchange(fd, AYA_CHECK)
-                if (verification and verification[3] == AYA_CHECK[4]
-                        and not controller_response_matches(verification, config)):
-                    raise RuntimeError("controller did not retain configuration")
+            _write_verified_controller(fd, config)
             # The configuration command applies the new level immediately.
             # Confirm it before the slower non-volatile save operation.
             if vibration_feedback and feedback_level != "off":
@@ -1762,8 +1796,7 @@ def reconcile_controller(config: dict, recover_custom: bool,
                 status = "configuration_restored"
             else:
                 return "healthy", path
-            if not _hid_exchange(fd, controller_command(config)):
-                raise RuntimeError("controller rejected automatic configuration restore")
+            _write_verified_controller(fd, config)
         finally:
             os.close(fd)
     # FF_GAIN belongs to the evdev node and is reset independently when that
@@ -1872,10 +1905,7 @@ def _rumble_event_node() -> str | None:
     """Return AYANEO's physical gamepad without selecting an external pad."""
     nodes = sorted(glob.glob("/dev/input/event*"),
                    key=lambda path: int("".join(filter(str.isdigit, Path(path).name)) or 0))
-    candidates = []
     for node in nodes:
-        if not _event_has_rumble(node):
-            continue
         vendor, product, phys = _input_event_identity(node)
         # The controller firmware exposes an Xbox 360-compatible xpad node
         # (045e:028e); development firmware can retain AYANEO's 1c4f VID.
@@ -1883,13 +1913,12 @@ def _rumble_event_node() -> str | None:
         # must scale the physical device itself.
         if not ((vendor == "045e" and product == "028e") or vendor == "1c4f"):
             continue
-        if phys in AYA3_GAMEPAD_PHYS_PATHS:
+        # VID/PID alone identifies Xbox-compatible hardware, not its owner.
+        # Wait for a verified internal path instead of touching the sole
+        # external pad while Magic Modules' evdev node is absent.
+        if phys in AYA3_GAMEPAD_PHYS_PATHS and _event_has_rumble(node):
             return node
-        candidates.append(node)
-    # Older or future kernels may expose a different physical path. A single
-    # hardware candidate is still safe; multiple candidates are ambiguous and
-    # must not make Companion modify an attached Xbox-compatible controller.
-    return candidates[0] if len(candidates) == 1 else None
+    return None
 
 
 def _device_node_token(path: str) -> tuple[str, int | None, int | None]:
@@ -1991,47 +2020,36 @@ def play_vibration_test(level: str, duration_ms: int = 500) -> None:
             os.close(fd)
 
 
-def _powerstation_card():
+def _powerstation_active():
+    try:
+        return _probe_powerstation_active()
+    except (OSError, subprocess.SubprocessError) as error:
+        # Ownership failed before any hardware write. Mark the capability
+        # unavailable and avoid a rollback that only repeats the same stalled
+        # service probe while reserving the public settings queue.
+        raise TdpUnavailableError(
+            f"Could not verify whether PowerStation owns TDP control: {error}") from error
+
+
+def _probe_powerstation_active():
     if subprocess.run(["busctl", "--system", "status", "org.shadowblip.PowerStation"],
                       capture_output=True, timeout=5,
-                      env=_clean_subprocess_env()).returncode != 0:
-        return None
-    for card in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
-        path = f"/org/shadowblip/Performance/GPU/{Path(card).name}"
-        probe = subprocess.run(["busctl", "--system", "get-property", "org.shadowblip.PowerStation",
-                                path, "org.shadowblip.GPU.Card.TDP", "TDP"], capture_output=True,
-                               timeout=5, env=_clean_subprocess_env())
-        if probe.returncode == 0:
-            return path
-    return None
-
-
-def _read_powerstation_property(card: str, prop: str) -> float:
-    result = subprocess.run([
-        "busctl", "--system", "get-property", "org.shadowblip.PowerStation",
-        card, "org.shadowblip.GPU.Card.TDP", prop,
-    ], capture_output=True, text=True, timeout=10, env=_clean_subprocess_env())
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or f"could not read PowerStation {prop}")
-    fields = result.stdout.split()
-    try:
-        if len(fields) != 2 or fields[0] != "d":
-            raise ValueError("unexpected property type")
-        value = float(fields[1])
-        if not math.isfinite(value) or value < 0:
-            raise ValueError("invalid power value")
-        return value
-    except ValueError as error:
-        raise RuntimeError(f"invalid PowerStation {prop} response") from error
-
-
-def _write_powerstation_property(card: str, prop: str, value: float) -> None:
-    result = subprocess.run([
-        "busctl", "--system", "set-property", "org.shadowblip.PowerStation",
-        card, "org.shadowblip.GPU.Card.TDP", prop, "d", str(float(value)),
-    ], capture_output=True, text=True, timeout=10, env=_clean_subprocess_env())
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or f"could not set PowerStation {prop}")
+                      env=_clean_subprocess_env()).returncode == 0:
+        return True
+    # Also detect startup/reload periods before D-Bus owns its name. A missing
+    # GPU TDP property must never cause a fallback to a competing RyzenAdj write.
+    result = subprocess.run(["systemctl", "show", "powerstation.service", "--property=ActiveState", "--value"],
+                            capture_output=True, text=True, timeout=5, env=_clean_subprocess_env())
+    if result.returncode not in (0, 4):
+        raise TdpUnavailableError("Could not verify whether PowerStation owns TDP control")
+    if result.returncode == 4:
+        return False
+    state = result.stdout.strip()
+    if state in ("inactive", "failed"):
+        return False
+    if state in ("active", "activating", "reloading", "deactivating", "refreshing", "maintenance"):
+        return True
+    raise TdpUnavailableError("Could not verify whether PowerStation owns TDP control")
 
 
 def _checked_download_url(url: str) -> str:
@@ -2044,6 +2062,9 @@ def _checked_download_url(url: str) -> str:
 
 
 class _HardwareDownloadRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 5
+    max_repeats = 2
+
     def redirect_request(self, request, fp, code, message, headers, new_url):
         # Validate before following a redirect; checking only the final URL
         # would still send a privileged request to an untrusted destination.
@@ -2054,7 +2075,25 @@ class _HardwareDownloadRedirect(urllib.request.HTTPRedirectHandler):
 def _open_hardware_download(request):
     opener = urllib.request.build_opener(
         _HardwareDownloadRedirect(), urllib.request.HTTPSHandler(context=_ssl_context()))
-    return opener.open(request, timeout=30)
+    return opener.open(request, timeout=HARDWARE_NETWORK_TIMEOUT)
+
+
+def _hardware_download_chunks(response, limit: int, deadline: float):
+    """Bound transfer duration as well as bytes, even when the peer drips data."""
+    reader = getattr(response, "read1", response.read)
+    total = 0
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("hardware download exceeded its time limit")
+        chunk = reader(min(65536, limit + 1 - total))
+        if time.monotonic() >= deadline:
+            raise TimeoutError("hardware download exceeded its time limit")
+        if not chunk:
+            return
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError("hardware download exceeded the size limit")
+        yield chunk
 
 
 def _ssl_context():
@@ -2079,6 +2118,7 @@ def _ssl_context():
 
 
 def _download_archive(target: Path) -> None:
+    deadline = time.monotonic() + HARDWARE_DOWNLOAD_SECONDS
     request = urllib.request.Request(
         _checked_download_url(RYZENADJ_URL),
         headers={"User-Agent": f"Ayaneo3Companion/{updater.plugin_version()}"},
@@ -2088,15 +2128,8 @@ def _download_archive(target: Path) -> None:
         declared = response.headers.get("Content-Length")
         if declared and int(declared) > MAX_DOWNLOAD_BYTES:
             raise RuntimeError("RyzenAdj archive is unexpectedly large")
-        total = 0
         with target.open("wb") as output:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_DOWNLOAD_BYTES:
-                    raise RuntimeError("RyzenAdj archive exceeded the download limit")
+            for chunk in _hardware_download_chunks(response, MAX_DOWNLOAD_BYTES, deadline):
                 output.write(chunk)
 
 
@@ -2145,7 +2178,7 @@ def _ensure_ryzenadj() -> None:
 
 
 def tdp_backend() -> str:
-    return "PowerStation" if _powerstation_card() else "RyzenAdj"
+    return "PowerStation" if _powerstation_active() else "RyzenAdj"
 
 
 def read_cpu_boost() -> bool:
@@ -2179,36 +2212,37 @@ def write_cpu_boost(enabled: bool) -> None:
             raise RuntimeError(f"could not change CPU Boost: {error}") from error
 
 
+POWERSTATION_TDP_ERROR = (
+    "TDP control is unavailable while PowerStation is active: its TDP/Boost API "
+    "cannot verify SPL, SPPT and FPPT or enforce the 37 W fast-limit ceiling."
+)
+
+
+class TdpUnavailableError(RuntimeError):
+    """The available writer cannot safely implement three independent limits."""
+
+
+def tdp_capabilities():
+    try:
+        backend = tdp_backend()
+        return {"tdp_backend": backend, "tdp_supported": backend != "PowerStation",
+                "tdp_error": POWERSTATION_TDP_ERROR if backend == "PowerStation" else ""}
+    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        return {"tdp_backend": "Unavailable", "tdp_supported": False, "tdp_error": str(error)}
+
+
 def _apply_tdp_unlocked(config: dict) -> None:
     require_supported_device("TDP control")
     values = normalize_tdp(config)
-    card = _powerstation_card()
-    if card:
-        # PowerStation exposes sustained TDP plus boost headroom. Its backend
-        # derives fast PPT, so keep the user-facing three-limit relationship.
-        boost = max(0, values["sppt"] - values["spl"])
-        wanted = {"TDP": float(values["spl"]), "Boost": float(boost)}
-        previous = {prop: _read_powerstation_property(card, prop) for prop in wanted}
-        try:
-            for prop, value in wanted.items():
-                _write_powerstation_property(card, prop, value)
-            for prop, value in wanted.items():
-                if not math.isclose(_read_powerstation_property(card, prop), value, abs_tol=0.01):
-                    raise RuntimeError(f"PowerStation did not retain {prop}")
-        except Exception as error:
-            failures = []
-            for prop, value in previous.items():
-                try:
-                    _write_powerstation_property(card, prop, value)
-                    if not math.isclose(_read_powerstation_property(card, prop), value, abs_tol=0.01):
-                        raise RuntimeError("rollback readback mismatch")
-                except Exception as recovery:
-                    failures.append(f"{prop}: {recovery}")
-            if failures:
-                raise RuntimeError(f"{error}; PowerStation recovery failed: {'; '.join(failures)}") from error
-            raise
-        return
+    if _powerstation_active():
+        # Neither the RyzenAdj nor hwmon PowerStation adapter exposes a verified
+        # three-limit contract. Do not guess FPPT or bypass its active writer.
+        raise TdpUnavailableError(POWERSTATION_TDP_ERROR)
     _ensure_ryzenadj()
+    # Initial verified downloads can take time; do not rely on the pre-download
+    # ownership check if the system started another writer in the meantime.
+    if _powerstation_active():
+        raise TdpUnavailableError(POWERSTATION_TDP_ERROR)
     env = _clean_subprocess_env()
     env["LD_LIBRARY_PATH"] = str(BIN_DIR)
     result = subprocess.run([str(RYZENADJ), f"--stapm-limit={values['spl'] * 1000}",
@@ -2480,11 +2514,15 @@ def remove_button_fix() -> None:
 @guard_public_calls
 class Plugin:
     _state = {}
+    _tdp_observation_epoch = 0
+    _tdp_writes = 0
     _restore_task = None
     _edid_task = None
     _ac_task = None
+    _charge_task = None
     _module_task = None
     _tm_guard_task = None
+    _vibration_gain_task = None
     _audio_task = None
     _fan_task = None
     _active_app = ""
@@ -2493,12 +2531,17 @@ class Plugin:
         self._closing = False
         self._initializing = False
         self._rpc_lock = asyncio.Lock()
+        # Fan transactions do not mutate persisted settings or SMU/controller
+        # state. Keep Auto available while those unrelated operations run.
+        self._fan_rpc_lock = asyncio.Lock()
         self._rpc_owner = None
         self._rpc_jobs = set()
         self._workers = set()
         self._audio_mutation_lock = threading.RLock()
         self._startup_task = None
         self._cleanup_task = None
+        self._tdp_diagnostic_task = None
+        self._tdp_diagnostic_after = 0.0
 
     def _check_write_allowed(self):
         error = getattr(settings, "recovery_error", "")
@@ -2554,6 +2597,9 @@ class Plugin:
         try:
             apply()
             Plugin._save_values(values)
+        except TdpUnavailableError:
+            # This capability rejection occurs before any device write.
+            raise
         except Exception as error:
             try:
                 restore()
@@ -2563,10 +2609,28 @@ class Plugin:
 
     @classmethod
     def _apply_tdp_target(cls, target):
-        apply_tdp(target)
-        boost = settings.getSetting("cpu_boost", None)
-        if type(boost) is bool:
-            write_cpu_boost(boost)
+        with _lock:
+            cls._tdp_writes += 1
+            cls._tdp_observation_epoch += 1
+        try:
+            apply_tdp(target)
+            boost = settings.getSetting("cpu_boost", None)
+            if type(boost) is bool:
+                write_cpu_boost(boost)
+        except TdpUnavailableError as error:
+            with _lock:
+                cls._state.update(tdp_backend="PowerStation" if str(error) == POWERSTATION_TDP_ERROR else "Unavailable",
+                                  tdp_supported=False, tdp_error=str(error))
+            raise
+        else:
+            with _lock:
+                cls._state.update(tdp_backend="RyzenAdj", tdp_supported=True, tdp_error="")
+        finally:
+            # Invalidate older observations even when a successful write leaves
+            # the cached capability values equal, or ownership rejects a write.
+            with _lock:
+                cls._tdp_writes -= 1
+                cls._tdp_observation_epoch += 1
 
     @classmethod
     def _tdp_rollback(cls, target):
@@ -2588,12 +2652,41 @@ class Plugin:
 
     @classmethod
     def _reapply_current_tdp(cls):
-        """Apply the newest committed TDP without racing an RPC or app change."""
+        """Apply this game's desired limits, including a deferred profile."""
         with _tdp_mutation_lock:
             with _lock:
                 target = dict(cls._state["tdp"])
-            cls._apply_tdp_target(target)
+            cls._apply_tracked_tdp(target)
             return target
+
+    @classmethod
+    def _apply_tracked_tdp(cls, target):
+        """Keep requested game context separate from the last applied limits."""
+        with _lock:
+            previous = dict(cls._state.get("_applied_tdp", cls._state["tdp"]))
+        restore = cls._tdp_rollback(previous)
+        try:
+            cls._apply_tdp_target(target)
+        except TdpUnavailableError as error:
+            # Ownership rejection happens before a write. Keep the current
+            # game's target pending so a later availability change can apply it.
+            with _lock:
+                cls._state.update(tdp_profile_pending=True,
+                                  tdp_profile_error=str(error),
+                                  tdp_supported=False, tdp_error=str(error))
+            raise
+        except Exception as error:
+            try:
+                restore()
+            except Exception as recovery:
+                error = RuntimeError(f"{error}; TDP rollback failed: {recovery}")
+            with _lock:
+                cls._state.update(tdp_profile_pending=True,
+                                  tdp_profile_error=str(error))
+            raise error
+        with _lock:
+            cls._state.update(tdp_profile_pending=False, tdp_profile_error="",
+                              tdp_supported=True, tdp_error="", _applied_tdp=dict(target))
 
     @classmethod
     def _reconcile_current_controller(cls, recover_custom: bool,
@@ -2625,25 +2718,45 @@ class Plugin:
     def _restore_current_vibration_gain(cls):
         with _controller_apply_lock:
             with _lock:
+                if (cls._state.get("modules_reconnecting", False)
+                        or not cls._state.get("modules_connected", False)):
+                    raise RuntimeError("Waiting for controller modules")
                 gain = cls._state["controller"]["ff_gain"]
             set_vibration_gain(gain)
             return gain
 
     @classmethod
-    def _snapshot(cls):
+    def _copy_state(cls):
+        """Acknowledge confirmed writes without unrelated hardware probes."""
         with _lock:
             state = dict(cls._state)
+            state.pop("_applied_tdp", None)
+            state["active_app_id"] = cls._active_app
             state["tdp"] = dict(state.get("tdp", DEFAULT_TDP))
             state["controller"] = dict(state.get("controller", DEFAULT_CONTROLLER))
             state["module_left"] = dict(state.get("module_left", _module_info("left", status="detecting")))
             state["module_right"] = dict(state.get("module_right", _module_info("right", status="detecting")))
         state["settings_error"] = getattr(settings, "recovery_error", "")
+        return state
+
+    @classmethod
+    def _snapshot(cls, probe_tdp=True):
+        with _lock:
+            state = cls._copy_state()
+            identity = cls._state
+            tdp_epoch = cls._tdp_observation_epoch
+        missing = object()
+        before = {key: state.get(key, missing) for key in SNAPSHOT_DIAGNOSTICS}
         if state["settings_error"] or state.get("initializing") or state.get("startup_error"):
             return state
         if not state.get("supported", False):
             # Never probe AYANEO-specific EC or HID registers merely because a
             # privileged Decky RPC was called on another machine.
             state["gpu_power_w"] = None
+            state["tdp_supported"] = False
+            state["tdp_error"] = "This device is not an AYANEO 3"
+            state["controller_supported"] = False
+            state["controller_error"] = "This device is not an AYANEO 3"
             state["cpu_boost_supported"] = False
             state["cpu_boost"] = False
             state["charge_bypass_supported"] = False
@@ -2654,6 +2767,17 @@ class Plugin:
         # outside the shared state lock so the monitor loops and RPC writes do
         # not stall behind the QAM's periodic refresh.
         state["gpu_power_w"] = gpu_power_watts()
+        if probe_tdp:
+            state.update(tdp_capabilities())
+        try:
+            _vendor_hidraw()  # Discovery only; never issue a vendor command here.
+            state["controller_supported"] = True
+            state["controller_error"] = ""
+        except (OSError, RuntimeError) as error:
+            state["controller_supported"] = False
+            state["controller_error"] = str(error)
+            state["module_left"] = _module_info("left", status="unavailable")
+            state["module_right"] = _module_info("right", status="unavailable")
         try:
             state["cpu_boost"] = read_cpu_boost()
             state["cpu_boost_supported"] = True
@@ -2676,18 +2800,65 @@ class Plugin:
         try:
             presence = module_presence()
             state["modules_connected"] = all(presence.values())
-            state["module_eject_supported"] = True
-            state["module_reset_supported"] = True
+            state["module_eject_supported"] = state["controller_supported"]
+            state["module_reset_supported"] = state["controller_supported"]
             if not state["modules_connected"]:
                 state["module_left"], state["module_right"] = \
                     module_states_from_presence(presence)
         except (OSError, RuntimeError):
             state["module_eject_supported"] = False
             state["module_reset_supported"] = False
+        with _lock:
+            if cls._state is not identity:
+                return state
+            for key in SNAPSHOT_DIAGNOSTICS:
+                # A slow read must not undo newer capability information from
+                # a transaction or monitor. Never publish its copied settings.
+                if key in TDP_DIAGNOSTIC_FIELDS:
+                    continue
+                if key in state and cls._state.get(key, missing) == before[key]:
+                    cls._state[key] = state[key]
+            if (probe_tdp and not cls._tdp_writes and tdp_epoch == cls._tdp_observation_epoch
+                    and all(cls._state.get(key, missing) == before[key]
+                            for key in TDP_DIAGNOSTIC_FIELDS)):
+                cls._state.update({key: state[key] for key in TDP_DIAGNOSTIC_FIELDS})
         return state
 
+    def _schedule_tdp_diagnostic(self):
+        # This cache is only for UI status. Every TDP write still checks live
+        # ownership before touching RyzenAdj, including after a download.
+        if self._closing or time.monotonic() < self._tdp_diagnostic_after:
+            return
+        if self._tdp_diagnostic_task is not None and not self._tdp_diagnostic_task.done():
+            return
+        with _lock:
+            state = Plugin._state
+            if (Plugin._tdp_writes or not state.get("supported") or state.get("initializing")
+                    or state.get("startup_error") or getattr(settings, "recovery_error", "")):
+                return
+            epoch = Plugin._tdp_observation_epoch
+            before = {key: state.get(key) for key in TDP_DIAGNOSTIC_FIELDS}
+
+        async def observe():
+            try:
+                observed = await self._offload(tdp_capabilities)
+                with _lock:
+                    if (not self._closing and not Plugin._tdp_writes and Plugin._state is state
+                            and Plugin._tdp_observation_epoch == epoch
+                            and all(state.get(key) == before[key] for key in TDP_DIAGNOSTIC_FIELDS)):
+                        state.update(observed)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                decky.logger.warning(f"{LOG} TDP diagnostic failed: {error}")
+            finally:
+                self._tdp_diagnostic_after = time.monotonic() + TDP_DIAGNOSTIC_INTERVAL
+
+        self._tdp_diagnostic_task = asyncio.create_task(observe())
+
     async def get_state(self):
-        return await self._offload(self._snapshot)
+        self._schedule_tdp_diagnostic()
+        return await self._offload(self._snapshot, False)
 
     async def get_battery_status(self):
         return await self._offload(battery_status)
@@ -2704,8 +2875,10 @@ class Plugin:
     async def check_for_updates(self):
         return await self._offload(updater.check)
 
-    async def perform_update(self):
-        return await self._offload(updater.download_latest)
+    async def perform_update(self, expected_version):
+        if expected_version is None:
+            raise ValueError("Select a release version before downloading")
+        return await self._offload(updater.download, expected_version)
 
     async def set_tdp(self, raw, preset=None, expected_app_id=None):
         value = normalize_tdp(raw)
@@ -2714,7 +2887,7 @@ class Plugin:
         def mutate():
             with _tdp_mutation_lock:
                 self._check_game(expected_app_id)
-                previous = dict(Plugin._state["tdp"])
+                previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
                 self._apply_and_save(
                     lambda: self._apply_tdp_target(value),
                     self._tdp_rollback(previous),
@@ -2722,9 +2895,11 @@ class Plugin:
                 with _lock:
                     Plugin._state["tdp"] = value
                     Plugin._state["tdp_preset"] = profile_name
+                    Plugin._state.update(tdp_profile_pending=False, tdp_profile_error="",
+                                         _applied_tdp=dict(value))
 
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def set_cpu_boost(self, enabled):
         value = self._boolean(enabled)
@@ -2737,17 +2912,20 @@ class Plugin:
                     Plugin._state["cpu_boost"] = value
                     Plugin._state["cpu_boost_supported"] = True
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def get_game_profile(self, app_id):
         app_id = self._app_id(app_id)
-        with _lock:
+        def read():
+            # A settings commit holds its own lock across disk I/O. Waiting
+            # for a consistent profile belongs in a worker, never in asyncio.
             profiles = settings.getSetting("game_profiles", {})
-        value = profiles.get(str(app_id)) if isinstance(profiles, dict) else None
-        return {"exists": isinstance(value, dict),
-                "profile": normalize_tdp(value) if isinstance(value, dict) else {},
-                "preset": tdp_preset(value, value.get("preset"))
-                if isinstance(value, dict) else ""}
+            value = profiles.get(app_id) if isinstance(profiles, dict) else None
+            return {"exists": isinstance(value, dict),
+                    "profile": normalize_tdp(value) if isinstance(value, dict) else {},
+                    "preset": tdp_preset(value, value.get("preset"))
+                    if isinstance(value, dict) else ""}
+        return await self._offload(read)
 
     async def set_game_profile(self, app_id, raw, preset=None, expected_app_id=None):
         app_id = self._app_id(app_id)
@@ -2760,7 +2938,7 @@ class Plugin:
                 with _lock:
                     if not app_id or app_id != Plugin._active_app:
                         raise RuntimeError("game is no longer active")
-                    previous = dict(Plugin._state["tdp"])
+                    previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
                     profiles = settings.getSetting("game_profiles", {})
                     profiles = dict(profiles) if isinstance(profiles, dict) else {}
                     if app_id not in profiles and len(profiles) >= 512:
@@ -2771,9 +2949,11 @@ class Plugin:
                 with _lock:
                     Plugin._state["tdp"] = value
                     Plugin._state["tdp_preset"] = profile_name
+                    Plugin._state.update(tdp_profile_pending=False, tdp_profile_error="",
+                                         _applied_tdp=dict(value))
 
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def delete_game_profile(self, app_id, expected_app_id=None):
         app_id = self._app_id(app_id)
@@ -2789,7 +2969,7 @@ class Plugin:
                     profile_name = tdp_preset(
                         target, settings.getSetting("tdp_preset", None))
                     active = bool(app_id and app_id == Plugin._active_app)
-                    previous = dict(Plugin._state["tdp"])
+                    previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
                 if active:
                     self._apply_and_save(lambda: self._apply_tdp_target(target),
                         self._tdp_rollback(previous), {"game_profiles": profiles})
@@ -2799,9 +2979,11 @@ class Plugin:
                     if active:
                         Plugin._state["tdp"] = target
                         Plugin._state["tdp_preset"] = profile_name
+                        Plugin._state.update(tdp_profile_pending=False, tdp_profile_error="",
+                                             _applied_tdp=dict(target))
 
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def set_active_app(self, app_id):
         app_id = self._app_id(app_id)
@@ -2810,9 +2992,18 @@ class Plugin:
                 Plugin._active_app = app_id
             return
 
+        with _lock:
+            # Do not reserve the public queue behind the monitor's slow TDP
+            # transaction when this heartbeat has no work to perform.
+            if app_id == Plugin._active_app:
+                return
+
         def mutate():
             with _tdp_mutation_lock:
                 with _lock:
+                    # The power monitor owns retries of a pending target. A
+                    # six-second frontend heartbeat must not start a second
+                    # slow ownership probe while holding the public RPC queue.
                     if app_id == Plugin._active_app:
                         return None
                     profiles = settings.getSetting("game_profiles", {})
@@ -2825,20 +3016,17 @@ class Plugin:
                         target,
                         profile.get("preset") if isinstance(profile, dict)
                         else settings.getSetting("tdp_preset", None))
-                previous = dict(Plugin._state["tdp"])
-                restore = self._tdp_rollback(previous)
-                try:
-                    self._apply_tdp_target(target)
-                except Exception as error:
-                    try:
-                        restore()
-                    except Exception as rollback_error:
-                        raise RuntimeError(f"{error}; TDP rollback failed: {rollback_error}") from error
-                    raise
-                with _lock:
+                    # App tracking is independent of SMU/PowerStation availability.
+                    # A snapshot must never pair a new game ID with the old profile.
+                    previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
+                    Plugin._state["_applied_tdp"] = previous
                     Plugin._active_app = app_id
-                    Plugin._state["tdp"] = target
-                    Plugin._state["tdp_preset"] = profile_name
+                    Plugin._state.update(tdp=target, tdp_preset=profile_name,
+                                         tdp_profile_pending=True, tdp_profile_error="")
+                try:
+                    self._apply_tracked_tdp(target)
+                except TdpUnavailableError:
+                    return None
                 return isinstance(profile, dict)
 
         used_profile = await self._offload(mutate)
@@ -2846,35 +3034,53 @@ class Plugin:
             decky.logger.info(
                 f"{LOG} applied {'game ' + app_id if used_profile else 'global'} TDP")
 
-    async def set_controller(self, raw):
-        value = normalize_controller(raw)
-
-        def mutate():
-            with _controller_apply_lock:
+    def _set_controller_transaction(self, patch, feedback=False):
+        with _controller_apply_lock:
+            with _lock:
                 previous = dict(Plugin._state["controller"])
-                self._apply_and_save(lambda: apply_controller(value),
-                    lambda: apply_controller(previous), {"controller": value})
-                with _lock:
-                    Plugin._state["controller"] = value
+            # Merge only after earlier writes and monitor recovery finish. A
+            # remounted panel may still be displaying their older snapshot.
+            value = normalize_controller({**previous, **patch})
+            gain_changed = value["ff_gain"] != previous["ff_gain"]
 
-        await self._offload(mutate)
-        return await self.get_state()
+            def apply():
+                if feedback:
+                    apply_controller(value, True, previous["vibration"], False)
+                else:
+                    apply_controller(value)
+                if gain_changed:
+                    set_vibration_gain(value["ff_gain"])
+
+            def restore():
+                # Always attempt both devices even if firmware recovery fails.
+                failures = []
+                try:
+                    apply_controller(previous)
+                except Exception as error:
+                    failures.append(f"firmware: {error}")
+                if gain_changed:
+                    try:
+                        set_vibration_gain(previous["ff_gain"])
+                    except Exception as error:
+                        failures.append(f"FF Gain: {error}")
+                if failures:
+                    raise RuntimeError("; ".join(failures))
+
+            self._apply_and_save(apply, restore, {"controller": value})
+            with _lock:
+                Plugin._state["controller"] = value
+
+    async def set_controller(self, raw):
+        if not isinstance(raw, dict):
+            raise ValueError("Expected controller settings")
+        await self._offload(self._set_controller_transaction, dict(raw))
+        return self._copy_state()
 
     async def set_controller_with_vibration_feedback(self, raw):
-        value = normalize_controller(raw)
-
-        def mutate():
-            with _controller_apply_lock:
-                with _lock:
-                    previous = dict(Plugin._state["controller"])
-                self._apply_and_save(
-                    lambda: apply_controller(value, True, previous["vibration"], False),
-                    lambda: apply_controller(previous), {"controller": value})
-                with _lock:
-                    Plugin._state["controller"] = value
-
-        await self._offload(mutate)
-        return await self.get_state()
+        if not isinstance(raw, dict):
+            raise ValueError("Expected controller settings")
+        await self._offload(self._set_controller_transaction, dict(raw), True)
+        return self._copy_state()
 
     async def set_vibration_gain(self, percent):
         value = _clamp(percent, 0, 100)
@@ -2891,7 +3097,7 @@ class Plugin:
                     Plugin._state["controller"] = controller
 
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def test_vibration(self, duration_ms=VIBRATION_TEST_MS):
         with _lock:
@@ -2906,7 +3112,7 @@ class Plugin:
     async def set_charge_bypass(self, enabled):
         value = self._boolean(enabled)
         def mutate():
-            with _tdp_mutation_lock:
+            with _charge_mutation_lock:
                 previous = read_charge_bypass()
                 self._apply_and_save(lambda: write_charge_bypass(value),
                     lambda: write_charge_bypass(previous), {"charge_bypass": value})
@@ -2914,14 +3120,15 @@ class Plugin:
                     Plugin._state["charge_bypass"] = value
                     Plugin._state["charge_bypass_supported"] = True
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def set_fan(self, mode, percent=None):
         def mutate():
             require_supported_device("fan control")
             return fan_controller.set(mode, percent)
         result = await self._offload(mutate)
-        if mode == "manual" and (Plugin._fan_task is None or Plugin._fan_task.done()):
+        if (mode == "manual" and not self._closing
+                and (Plugin._fan_task is None or Plugin._fan_task.done())):
             Plugin._fan_task = asyncio.create_task(self._fan_loop())
         return result
 
@@ -2954,7 +3161,7 @@ class Plugin:
                         audio_calibration_available=value,
                         audio_profile="AYANEO v0.65" if value else "Generic fallback")
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def reapply_audio_fix(self):
         with _lock:
@@ -2992,7 +3199,7 @@ class Plugin:
                 Plugin._state["audio_calibration_available"] = ready
                 Plugin._state["audio_fix_error"] = str(error)
             raise
-        return await self.get_state()
+        return self._copy_state()
 
     async def eject_modules(self, side):
         side = str(side or "").lower()
@@ -3026,7 +3233,7 @@ class Plugin:
                 Plugin._state["module_right"] = right
             raise
         decky.logger.info(f"{LOG} ejected {side} controller module(s)")
-        return await self.get_state()
+        return self._copy_state()
 
     async def reset_modules(self):
         with _lock:
@@ -3065,7 +3272,7 @@ class Plugin:
                 Plugin._state["module_left"] = left
                 Plugin._state["module_right"] = right
             raise
-        return await self.get_state()
+        return self._copy_state()
 
     async def set_screen_fix(self, enabled, replace_existing=False):
         enabled = self._boolean(enabled)
@@ -3113,7 +3320,7 @@ class Plugin:
         except Exception as error:
             decky.logger.error(f"{LOG} display definition change failed: {error}")
             raise
-        return await self.get_state()
+        return self._copy_state()
 
     async def _edid_loop(self):
         """Reapply after every gamescope session recreates its EDID copy."""
@@ -3173,7 +3380,7 @@ class Plugin:
                 with _lock:
                     Plugin._state["button_fix_installed"] = value
         await self._offload(mutate)
-        return await self.get_state()
+        return self._copy_state()
 
     async def set_tm_guard(self, enabled):
         value = self._boolean(enabled)
@@ -3199,7 +3406,7 @@ class Plugin:
                     with _lock:
                         Plugin._state["tm_guard_recoveries"] += 1
                         Plugin._state["tm_guard_status"] = "Custom mode restored"
-        return await self.get_state()
+        return self._copy_state()
 
     async def _restore_hardware(self):
         """Retry pending boot work; each attempt reads the latest saved choices."""
@@ -3223,11 +3430,16 @@ class Plugin:
                     decky.logger.info(f"{LOG} restored {key} after startup")
                 except asyncio.CancelledError:
                     raise
+                except TdpUnavailableError as error:
+                    pending.remove(key)
+                    decky.logger.info(f"{LOG} {error}")
                 except Exception as error:
                     decky.logger.warning(f"{LOG} {key} restore attempt failed: {error}")
 
     def _restore_saved_control(self, key, only_if_changed=False):
-        with _tdp_mutation_lock:
+        # CPU Boost is reapplied by TDP writes; charge control is independent.
+        mutation_lock = _tdp_mutation_lock if key == "cpu_boost" else _charge_mutation_lock
+        with mutation_lock:
             value = settings.getSetting(key, None)
             if type(value) is not bool:
                 return
@@ -3259,23 +3471,48 @@ class Plugin:
     def _restore_audio_once(self):
         with self._audio_mutation_lock:
             with _lock:
-                if not Plugin._state.get("audio_fix_enabled", False):
+                state = Plugin._state
+                enabled = state.get("audio_fix_enabled", False)
+                if self._closing:
                     return True
+            if not enabled:
+                # Discovery also runs for a saved disabled choice, without
+                # touching DSPs. Late ALSA availability must allow enabling
+                # tuning without restarting the plugin.
+                supported = audio_fix_supported()
+                installed = audio_fix_installed()
+                with _lock:
+                    if not self._closing and Plugin._state is state:
+                        state.update(audio_fix_supported=supported,
+                            audio_fix_installed=installed, audio_calibration_available=False,
+                            audio_profile="Installed, not verified" if installed else "Generic fallback",
+                            audio_fix_error="")
+                return supported
             if not audio_fix_ready():
+                supported = audio_fix_supported()
+                with _lock:
+                    if not self._closing and Plugin._state is state:
+                        state["audio_fix_supported"] = supported
+                if not supported:
+                    return False
+                if self._closing:
+                    return True
                 apply_audio_fix()
                 if not audio_fix_ready():
                     raise RuntimeError("both AYANEO speaker DSPs did not enter the tuned profile")
             with _lock:
-                Plugin._state.update(audio_fix_supported=True, audio_fix_installed=True,
-                    audio_calibration_available=True, audio_profile="AYANEO v0.65",
-                    audio_fix_error="")
+                if not self._closing and Plugin._state is state:
+                    state.update(audio_fix_supported=True, audio_fix_installed=True,
+                        audio_calibration_available=True, audio_profile="AYANEO v0.65",
+                        audio_fix_error="")
             return True
 
     async def _ac_loop(self):
-        """Restore after charger/resume events and check managed CPU/charge drift."""
+        """Restore deferred profiles, charger/resume limits and CPU drift."""
         previous = None
         suspend_offset = _suspend_clock_offset()
         next_control_check = 0.0
+        next_profile_retry = time.monotonic() + 5.0
         pending_delays = []
         settle_at = 0.0
         while True:
@@ -3293,25 +3530,70 @@ class Plugin:
                     next_control_check = 0.0
                 previous = current
                 now = time.monotonic()
+                tdp_attempted = False
                 if pending_delays is not None and settle_at and now >= settle_at:
                     # Advance only after success; transient failures are retried.
+                    tdp_attempted = True
                     try:
                         await self._offload(Plugin._reapply_current_tdp)
-                    except Exception:
+                    except TdpUnavailableError as error:
+                        # The profile remains pending. A separate retry handles
+                        # ownership changes without requiring another AC event.
+                        settle_at = 0.0
+                        pending_delays = []
+                        decky.logger.debug(f"{LOG} TDP restoration deferred: {error}")
+                    except Exception as error:
                         settle_at = now + 5.0
-                        raise
-                    settle_at = now + pending_delays.pop(0) if pending_delays else 0.0
+                        decky.logger.warning(f"{LOG} TDP restoration retrying: {error}")
+                    else:
+                        settle_at = now + pending_delays.pop(0) if pending_delays else 0.0
+                    next_profile_retry = now + 5.0
+                with _lock:
+                    profile_pending = Plugin._state.get("tdp_profile_pending", False)
+                if profile_pending and not tdp_attempted and now >= next_profile_retry:
+                    next_profile_retry = now + 5.0
+                    try:
+                        await self._offload(Plugin._reapply_current_tdp)
+                    except TdpUnavailableError as error:
+                        decky.logger.debug(f"{LOG} game profile waiting for TDP control: {error}")
+                    except Exception as error:
+                        decky.logger.warning(f"{LOG} game profile restoration retrying: {error}")
                 if now >= next_control_check:
                     next_control_check = now + 15.0
-                    for key in ("cpu_boost", "charge_bypass"):
-                        try:
-                            await self._offload(self._restore_saved_control, key, True)
-                        except Exception as error:
-                            decky.logger.debug(f"{LOG} {key} verification deferred: {error}")
+                    try:
+                        await self._offload(self._restore_saved_control, "cpu_boost", True)
+                    except Exception as error:
+                        decky.logger.debug(f"{LOG} cpu_boost verification deferred: {error}")
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 decky.logger.warning(f"{LOG} power monitor retrying: {error}")
+
+    async def _charge_loop(self):
+        """Verify charging independently of slow TDP retries and downloads."""
+        previous = None
+        suspend_offset = _suspend_clock_offset()
+        next_check = 0.0
+        while True:
+            await asyncio.sleep(1)
+            try:
+                current = await self._offload(ac_online)
+                offset = _suspend_clock_offset()
+                resumed = (offset is not None and suspend_offset is not None
+                           and offset - suspend_offset > CONTROLLER_RESUME_THRESHOLD)
+                if offset is not None:
+                    suspend_offset = offset
+                changed = previous is not None and current != previous
+                previous = current
+                now = time.monotonic()
+                if now < next_check and not changed and not resumed:
+                    continue
+                next_check = now + 15.0
+                await self._offload(self._restore_saved_control, "charge_bypass", True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                decky.logger.debug(f"{LOG} charge_bypass verification deferred: {error}")
 
     async def _fan_loop(self):
         """Renew an independent fan safety timer only while Decky stays alive."""
@@ -3347,6 +3629,9 @@ class Plugin:
         while True:
             await asyncio.sleep(retry_delay)
             try:
+                # Cutting controller power also removes its vendor HID node.
+                # Read the independent EC first so physical reinsertion can
+                # restore power before requiring the USB interface to exist.
                 powered = await self._offload(controller_powered)
                 presence = await self._offload(module_presence)
                 retry_delay = 0.5
@@ -3383,6 +3668,22 @@ class Plugin:
                     # base controller remains powered, so power state alone is
                     # not enough to detect that RGB needs to be sent again.
                     restore_pending = True
+                try:
+                    # This discovery still rejects a kernel-owned hid-ayaneo
+                    # device before any raw controller transaction is attempted.
+                    await self._offload(_vendor_hidraw)
+                except (OSError, RuntimeError) as error:
+                    with _lock:
+                        Plugin._state["controller_supported"] = False
+                        Plugin._state["controller_error"] = str(error)
+                        Plugin._state["module_left"] = _module_info("left", status="unavailable")
+                        Plugin._state["module_right"] = _module_info("right", status="unavailable")
+                    retry_delay = 2.0
+                    identify_pending = True
+                    continue
+                with _lock:
+                    Plugin._state["controller_supported"] = True
+                    Plugin._state["controller_error"] = ""
                 if restore_pending:
                     with _lock:
                         Plugin._state["module_left"] = _module_info("left", status="activating")
@@ -3428,6 +3729,10 @@ class Plugin:
                             f"{LOG} modules detected: left {left['label']} (0x{left['code']:02X}), "
                             f"right {right['label']} (0x{right['code']:02X})")
                     except Exception as error:
+                        with _lock:
+                            Plugin._state["module_left"] = _module_info("left", status="unavailable")
+                            Plugin._state["module_right"] = _module_info("right", status="unavailable")
+                            Plugin._state["controller_error"] = str(error)
                         identify_delay = min(30.0, identify_delay * 2)
                         identify_at = time.monotonic() + identify_delay
                         decky.logger.debug(f"{LOG} module identification pending: {error}")
@@ -3450,12 +3755,47 @@ class Plugin:
                 set_controller_power(True)
             return True
 
+    async def _vibration_gain_loop(self):
+        """Restore evdev gain independently of vendor HID availability."""
+        last_token = None
+        restore_pending = False
+        last_suspend_offset = _suspend_clock_offset()
+        while True:
+            await asyncio.sleep(CONTROLLER_GAIN_CHECK_INTERVAL)
+            suspend_offset = _suspend_clock_offset()
+            if (suspend_offset is not None and last_suspend_offset is not None
+                    and suspend_offset - last_suspend_offset > CONTROLLER_RESUME_THRESHOLD):
+                restore_pending = True
+            if suspend_offset is not None:
+                last_suspend_offset = suspend_offset
+            with _lock:
+                ready = (Plugin._state.get("modules_connected", False)
+                         and not Plugin._state.get("modules_reconnecting", False))
+            if not ready:
+                last_token = None
+                continue
+            try:
+                token = await self._offload(_rumble_event_token)
+                if token is None:
+                    last_token = None
+                    continue
+                if token != last_token or restore_pending:
+                    # Recheck module intent and read the latest gain under the
+                    # controller lock, after any earlier slider/reset operation.
+                    await self._offload(Plugin._restore_current_vibration_gain)
+                    last_token = token
+                    restore_pending = False
+                    decky.logger.info(f"{LOG} restored FF_GAIN on the physical input device")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # Keep a failed incarnation/resume pending for the next cycle.
+                decky.logger.debug(f"{LOG} FF_GAIN restoration waiting: {error}")
+
     async def _tm_guard_loop(self):
         """Repair controller resets and optionally undo accidental TM changes."""
         was_available = None
         last_device_token = None
-        last_rumble_token = None
-        next_gain_check = 0.0
         last_suspend_offset = _suspend_clock_offset()
         retry_delay = TM_GUARD_INTERVAL
         while True:
@@ -3475,8 +3815,6 @@ class Plugin:
             if reconnecting or not connected:
                 was_available = None
                 last_device_token = None
-                last_rumble_token = None
-                next_gain_check = 0.0
                 with _lock:
                     Plugin._state["tm_guard_status"] = (
                         "Waiting for modules" if enabled else "Disabled")
@@ -3498,17 +3836,6 @@ class Plugin:
                 if resumed and status in ("mode_restored", "configuration_restored"):
                     decky.logger.info(
                         f"{LOG} restored controller configuration after system resume")
-                now = time.monotonic()
-                if now >= next_gain_check:
-                    rumble_token = await self._offload(_rumble_event_token)
-                    if rumble_token != last_rumble_token:
-                        if rumble_token is not None and status in ("healthy", "tm_mode"):
-                            await self._offload(
-                                Plugin._restore_current_vibration_gain)
-                            decky.logger.info(
-                                f"{LOG} restored FF_GAIN after input-device recreation")
-                        last_rumble_token = rumble_token
-                    next_gain_check = now + CONTROLLER_GAIN_CHECK_INTERVAL
                 with _lock:
                     if status == "mode_restored":
                         Plugin._state["tm_guard_recoveries"] += 1
@@ -3543,6 +3870,8 @@ class Plugin:
             return await complete(self._startup_task)
         self._closing = False
         self._initializing = True
+        self._tdp_diagnostic_task = None
+        self._tdp_diagnostic_after = 0.0
         updater.reset()
         with _lock:
             Plugin._state = {"initializing": True}
@@ -3629,7 +3958,6 @@ class Plugin:
         audio_enabled = settings.getSetting("audio_fix_enabled", True) is not False
         tm_guard_enabled = settings.getSetting("tm_guard_enabled", True) is not False
         audio_installed = await self._offload(audio_fix_installed) if hardware_allowed else False
-        audio_ready = await self._offload(audio_fix_ready) if audio_installed else False
         ec_control = await self._offload(ensure_controller_control) if hardware_allowed else None
         charge_control = await self._offload(ensure_charge_bypass_control) if hardware_allowed else None
         try:
@@ -3644,16 +3972,20 @@ class Plugin:
         except RuntimeError:
             cpu_boost = False
             cpu_boost_supported = False
-        Plugin._state = {
+        initial_state = {
             "supported": is_supported,
             "settings_error": storage_error,
             "initializing": False,
             "startup_error": "",
             "device": _dmi("product_name") or "unknown",
             "version": updater.plugin_version(),
-            "tdp_backend": await self._offload(tdp_backend) if hardware_allowed else "Unavailable",
+            "tdp_backend": "Checking" if hardware_allowed else "Unavailable",
+            "tdp_supported": False,
+            "tdp_error": "Checking TDP ownership" if hardware_allowed else "Hardware controls are unavailable",
             "tdp": saved_tdp,
             "tdp_preset": tdp_preset(saved_tdp, settings.getSetting("tdp_preset", None)),
+            "tdp_profile_pending": hardware_allowed,
+            "tdp_profile_error": "",
             "presets": PRESETS,
             "cpu_boost_supported": cpu_boost_supported,
             "cpu_boost": cpu_boost,
@@ -3676,25 +4008,29 @@ class Plugin:
             "tm_guard_status": "Monitoring" if tm_guard_enabled else "Disabled",
             "tm_guard_recoveries": 0,
             "gpu_power_w": None,
-            "audio_fix_supported": (
-                await self._offload(audio_fix_supported) if hardware_allowed else False),
+            # ALSA commands have multi-second timeouts. Their background
+            # discovery must not delay unrelated controls during startup.
+            "audio_fix_supported": False,
             "audio_fix_enabled": audio_enabled,
             "audio_fix_installed": audio_installed,
-            "audio_calibration_available": audio_enabled and audio_ready,
+            "audio_calibration_available": False,
             "audio_calibration_last": settings.getSetting("audio_calibration_last", ""),
-            "audio_profile": "AYANEO v0.65" if audio_ready else
-                             ("Pending" if audio_enabled else "Generic fallback"),
+            "audio_profile": "Pending" if audio_enabled else "Checking",
             "audio_fix_error": "",
         }
-        Plugin._active_app = ""
+        with _lock:
+            Plugin._state = initial_state
+            Plugin._active_app = ""
+        self._schedule_tdp_diagnostic()
         if hardware_allowed and not self._closing:
             Plugin._restore_task = asyncio.create_task(self._restore_hardware())
             Plugin._edid_task = asyncio.create_task(self._edid_loop())
             Plugin._ac_task = asyncio.create_task(self._ac_loop())
+            Plugin._charge_task = asyncio.create_task(self._charge_loop())
             Plugin._module_task = asyncio.create_task(self._module_loop())
             Plugin._tm_guard_task = asyncio.create_task(self._tm_guard_loop())
-            if audio_enabled:
-                Plugin._audio_task = asyncio.create_task(self._restore_audio())
+            Plugin._vibration_gain_task = asyncio.create_task(self._vibration_gain_loop())
+            Plugin._audio_task = asyncio.create_task(self._restore_audio())
         decky.logger.info(f"{LOG} started on {Plugin._state['device']}")
 
     async def _unload(self):
@@ -3708,8 +4044,10 @@ class Plugin:
                 await asyncio.gather(self._startup_task, return_exceptions=True)
             tasks = [task for task in (
                 Plugin._audio_task, Plugin._restore_task, Plugin._edid_task,
-                Plugin._ac_task, Plugin._module_task, Plugin._tm_guard_task,
+                Plugin._ac_task, Plugin._charge_task, Plugin._module_task, Plugin._tm_guard_task,
+                Plugin._vibration_gain_task,
                 Plugin._fan_task,
+                self._tdp_diagnostic_task,
             ) if task is not None]
             for task in tasks:
                 task.cancel()
@@ -3717,9 +4055,10 @@ class Plugin:
                 await asyncio.gather(*tasks, return_exceptions=True)
             while self._rpc_jobs or self._workers:
                 await asyncio.gather(*tuple(self._rpc_jobs | self._workers), return_exceptions=True)
-            for name in ("_audio_task", "_restore_task", "_edid_task", "_ac_task",
-                         "_module_task", "_tm_guard_task", "_fan_task"):
+            for name in ("_audio_task", "_restore_task", "_edid_task", "_ac_task", "_charge_task",
+                         "_module_task", "_tm_guard_task", "_vibration_gain_task", "_fan_task"):
                 setattr(Plugin, name, None)
+            self._tdp_diagnostic_task = None
             try:
                 await self._offload(fan_controller.close)
             except Exception as error:

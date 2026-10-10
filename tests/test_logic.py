@@ -7,6 +7,14 @@ install()
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
 
+def controller_report(config):
+    packet = main.controller_command(config)
+    response = bytearray(64)
+    response[3] = main.AYA_CHECK[4]
+    response[7:15] = packet[8:16]
+    response[21:24] = packet[22:25]
+    return bytes(response)
+
 class LogicTests(unittest.TestCase):
     def test_battery_status_uses_upower_time_to_full(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -284,6 +292,8 @@ class LogicTests(unittest.TestCase):
 
         def exchange(_fd, command, timeout=0.4):
             commands.append((command, timeout))
+            if command == packet:
+                response[23] = packet[24]
             return bytes(response) if command == main.AYA_CHECK else bytes(64)
 
         with mock.patch.object(main, "supported_device", return_value=True), \
@@ -296,7 +306,7 @@ class LogicTests(unittest.TestCase):
             status, path = main.reconcile_controller(config, True)
 
         self.assertEqual((status, path), ("configuration_restored", "/dev/hidraw7"))
-        self.assertEqual([command for command, _ in commands], [main.AYA_CHECK, packet])
+        self.assertEqual([command for command, _ in commands], [main.AYA_CHECK, packet, main.AYA_CHECK])
         self.assertNotIn(main.AYA_SAVE, [command for command, _ in commands])
         gain.assert_called_once_with(60)
 
@@ -419,6 +429,7 @@ class LogicTests(unittest.TestCase):
 
         try:
             with mock.patch.object(main.asyncio, "sleep", side_effect=stop_after_one_iteration), \
+                 mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
                  mock.patch.object(main, "controller_powered", return_value=False), \
                  mock.patch.object(main, "module_presence", return_value={"left": True, "right": True}), \
                  mock.patch.object(main, "set_controller_power") as set_power, \
@@ -507,7 +518,7 @@ class LogicTests(unittest.TestCase):
         finally:
             main.Plugin._state = previous_state
 
-    def test_controller_monitor_restores_gain_when_event_device_is_recreated(self):
+    def test_gain_monitor_restores_gain_when_event_device_is_recreated(self):
         previous_state = main.Plugin._state
         main.Plugin._state = {
             "controller": {**main.DEFAULT_CONTROLLER, "ff_gain": 60},
@@ -539,7 +550,7 @@ class LogicTests(unittest.TestCase):
                  mock.patch.object(main, "CONTROLLER_GAIN_CHECK_INTERVAL", 0), \
                  mock.patch.object(main, "set_vibration_gain") as gain:
                 with self.assertRaises(asyncio.CancelledError):
-                    asyncio.run(main.Plugin()._tm_guard_loop())
+                    asyncio.run(main.Plugin()._vibration_gain_loop())
             self.assertEqual(gain.call_args_list, [mock.call(60), mock.call(60)])
         finally:
             main.Plugin._state = previous_state
@@ -671,7 +682,7 @@ class LogicTests(unittest.TestCase):
 
         def exchange(_fd, command, timeout=0.4):
             calls.append(("hid", command[4], timeout))
-            return bytes(64)
+            return controller_report(config) if command == main.AYA_CHECK else bytes(64)
 
         with mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
              mock.patch.object(main, "supported_device", return_value=True), \
@@ -739,7 +750,7 @@ class LogicTests(unittest.TestCase):
 
         def exchange(_fd, command, timeout=0.4):
             commands.append(command)
-            return bytes(64)
+            return controller_report(config) if command == main.AYA_CHECK else bytes(64)
 
         with mock.patch.object(main, "_vendor_hidraw", return_value="/dev/fake"), \
              mock.patch.object(main, "supported_device", return_value=True), \
@@ -981,8 +992,8 @@ class LogicTests(unittest.TestCase):
     def test_unload_does_not_probe_or_write_controller_after_device_mismatch(self):
         previous_state = main.Plugin._state
         task_names = (
-            "_audio_task", "_restore_task", "_edid_task", "_ac_task",
-            "_module_task", "_tm_guard_task",
+            "_audio_task", "_restore_task", "_edid_task", "_ac_task", "_charge_task",
+            "_module_task", "_tm_guard_task", "_vibration_gain_task",
         )
         previous_tasks = {name: getattr(main.Plugin, name) for name in task_names}
         main.Plugin._state = {"supported": True}
@@ -1003,8 +1014,8 @@ class LogicTests(unittest.TestCase):
     def test_unload_does_not_undo_an_in_progress_module_eject(self):
         previous_state = main.Plugin._state
         task_names = (
-            "_audio_task", "_restore_task", "_edid_task", "_ac_task",
-            "_module_task", "_tm_guard_task",
+            "_audio_task", "_restore_task", "_edid_task", "_ac_task", "_charge_task",
+            "_module_task", "_tm_guard_task", "_vibration_gain_task",
         )
         previous_tasks = {name: getattr(main.Plugin, name) for name in task_names}
         main.Plugin._state = {"supported": True, "modules_reconnecting": True}
@@ -1114,15 +1125,16 @@ class LogicTests(unittest.TestCase):
                 self.assertTrue(target.exists())
 
     def test_display_switch_keeps_installed_definition_when_edid_retry_is_needed(self):
-        state = {"screen_installed": True}
         with mock.patch.object(main, "install_display_script") as install_display, \
              mock.patch.object(main, "patch_published_edid", side_effect=OSError("busy")), \
-             mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value=state)), \
+             mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock()) as diagnostics, \
              mock.patch.object(main.decky.logger, "warning") as warning:
             result = asyncio.run(main.Plugin().set_screen_fix(True))
         install_display.assert_called_once_with(False)
         warning.assert_called_once()
-        self.assertIs(result, state)
+        self.assertTrue(result["screen_installed"])
+        self.assertTrue(main.Plugin._state["screen_installed"])
+        diagnostics.assert_not_called()
 
     def test_input_map_upgrades_owned_legacy_file_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1268,6 +1280,7 @@ class LogicTests(unittest.TestCase):
 
         try:
             with mock.patch.object(main, "apply_controller", side_effect=apply), \
+                 mock.patch.object(main, "set_vibration_gain"), \
                  mock.patch.object(main, "reconcile_controller", side_effect=reconcile), \
                  mock.patch.object(main.Plugin, "get_state",
                                    new=mock.AsyncMock(return_value={})):

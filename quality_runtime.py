@@ -14,8 +14,17 @@ async def complete(operation):
         except asyncio.CancelledError:
             cancelled = True
             if task.done():
-                result = task.result()
+                try:
+                    result = task.result()
+                except Exception:
+                    # Retrieve the worker error, but preserve the caller's
+                    # cancellation so a monitor cannot catch it and retry.
+                    raise asyncio.CancelledError from None
                 break
+        except Exception:
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
     if cancelled:
         raise asyncio.CancelledError
     return result
@@ -44,6 +53,15 @@ def guard_public_calls(cls):
                 async def execute():
                     if method in READ_CALLS or method in NETWORK_CALLS:
                         return await fn(self, *args, **kwargs)
+                    if method == 'set_fan':
+                        # This operation has its own hardware lock and touches
+                        # no shared settings. Serialize fan commands together,
+                        # retaining admission checks and shutdown tracking.
+                        async with self._fan_rpc_lock:
+                            if self._closing:
+                                raise RuntimeError('Plugin is shutting down')
+                            self._check_write_allowed()
+                            return await fn(self, *args, **kwargs)
                     async with self._rpc_lock:
                         if self._closing:
                             raise RuntimeError('Plugin is shutting down')
