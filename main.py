@@ -2534,6 +2534,7 @@ class Plugin:
         # Fan transactions do not mutate persisted settings or SMU/controller
         # state. Keep Auto available while those unrelated operations run.
         self._fan_rpc_lock = asyncio.Lock()
+        self._fan_generation = 0
         self._rpc_owner = None
         self._rpc_jobs = set()
         self._workers = set()
@@ -3127,9 +3128,10 @@ class Plugin:
             require_supported_device("fan control")
             return fan_controller.set(mode, percent)
         result = await self._offload(mutate)
-        if (mode == "manual" and not self._closing
-                and (Plugin._fan_task is None or Plugin._fan_task.done())):
-            Plugin._fan_task = asyncio.create_task(self._fan_loop())
+        if mode == "manual" and not self._closing:
+            self._fan_generation += 1
+            if Plugin._fan_task is None or Plugin._fan_task.done():
+                Plugin._fan_task = asyncio.create_task(self._fan_loop())
         return result
 
     async def set_audio_fix(self, enabled):
@@ -3600,6 +3602,7 @@ class Plugin:
         suspend_offset = _suspend_clock_offset()
         while True:
             await asyncio.sleep(FAN_RENEW_SECONDS)
+            generation = self._fan_generation
             try:
                 offset = _suspend_clock_offset()
                 resumed = (offset is not None and suspend_offset is not None
@@ -3608,13 +3611,20 @@ class Plugin:
                     suspend_offset = offset
                 if resumed:
                     await self._offload(fan_controller.close)
+                    if generation != self._fan_generation:
+                        continue
                     decky.logger.info(f"{LOG} restored automatic fan mode after resume")
                     return
                 if not await self._offload(fan_controller.renew):
-                    return
+                    # A completed worker can report the old lease after a new
+                    # manual RPC has succeeded. Keep that new lease monitored.
+                    if generation == self._fan_generation:
+                        return
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if generation != self._fan_generation:
+                    continue
                 decky.logger.warning(f"{LOG} manual fan mode ended: {error}")
                 return
 
