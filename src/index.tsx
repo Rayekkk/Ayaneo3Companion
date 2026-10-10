@@ -259,13 +259,19 @@ const Content: FC = () => {
   const pendingActionRef = useRef<ActionKey | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [stateReadError, setStateReadError] = useState<string | null>(null);
+  const [profileReadError, setProfileReadError] = useState<string | null>(null);
   const [rgbEdit, setRgbEdit] = useState<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
   const [game, setGame] = useState<RunningGame | null>(AppWatcher.currentGame());
   const [perGame, setPerGame] = useState(false);
   const [profileLoading, setProfileLoading] = useState(true);
   const [savedGamePreset, setSavedGamePreset] = useState<Preset | undefined>(undefined);
   const [battery, setBattery] = useState<BatteryStatus | null>(null);
+  const [batteryReadError, setBatteryReadError] = useState("");
+  const readingBattery = useRef(false);
+  const refreshBattery = useRef<(() => Promise<void>) | null>(null);
   const gameRequest = useRef(0);
+  const readingGameProfile = useRef(false);
+  const refreshGameProfile = useRef<(() => Promise<void>) | null>(null);
   const profileReady = useRef(!game);
   const contextStateReady = useRef(false);
   const busy = pendingAction !== null || Boolean(state?.settings_error || state?.initializing);
@@ -356,6 +362,7 @@ const Content: FC = () => {
     const request = ++gameRequest.current;
     const context = game?.appId ?? "";
     let retry: ReturnType<typeof setTimeout> | undefined;
+    setProfileReadError(null);
     if (!tdpDirty.current) setPerGame(false);
     setSavedGamePreset(undefined);
     if (!visible || !game) {
@@ -366,10 +373,13 @@ const Content: FC = () => {
     setProfileLoading(true);
     const current = () => request === gameRequest.current && validContext(context) && visibleRef.current;
     const lookup = async () => {
-      if (!current()) return;
+      if (!current() || readingGameProfile.current || profileReady.current
+          || pendingActionRef.current === "tdp" || pendingActionRef.current === "profile") return;
+      readingGameProfile.current = true;
       try {
         const profile = await getGameProfile(context);
         if (!current()) return;
+        setProfileReadError(null);
         profileReady.current = true;
         setProfileLoading(!contextStateReady.current);
         if (!tdpDirty.current) setPerGame(profile.exists);
@@ -380,13 +390,23 @@ const Content: FC = () => {
         }
       } catch (error) {
         if (current()) {
-          setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+          setProfileReadError(error instanceof Error ? error.message : String(error));
           retry = setTimeout(() => { retry = undefined; void lookup(); }, 3000);
         }
+      } finally {
+        readingGameProfile.current = false;
+        // Rapid QAM/game changes invalidate results but cannot cancel backend
+        // workers. After the old read drains, query only the latest context.
+        if (request !== gameRequest.current) void refreshGameProfile.current?.();
       }
     };
+    refreshGameProfile.current = lookup;
     void lookup();
-    return () => { gameRequest.current += 1; if (retry) clearTimeout(retry); };
+    return () => {
+      gameRequest.current += 1;
+      if (refreshGameProfile.current === lookup) refreshGameProfile.current = null;
+      if (retry) clearTimeout(retry);
+    };
   }, [game?.appId, visible]);
 
   useEffect(() => {
@@ -409,22 +429,42 @@ const Content: FC = () => {
   useEffect(() => {
     if (!visible || activeSection !== "battery") return;
     let cancelled = false;
-    let readingBattery = false;
     const updateBattery = async () => {
-      if (cancelled || readingBattery) return;
-      readingBattery = true;
+      if (cancelled || readingBattery.current) return;
+      readingBattery.current = true;
       try {
         const next = await getBatteryStatus();
-        if (!cancelled) setBattery(next);
+        if (!cancelled) { setBattery(next); setBatteryReadError(""); }
       } catch (error) {
-        console.warn("[ayaneo3companion] battery status unavailable", error);
-      } finally { readingBattery = false; }
+        if (!cancelled) setBatteryReadError(error instanceof Error ? error.message : String(error));
+      } finally {
+        readingBattery.current = false;
+        // Navigation invalidates the reply, not the running backend worker.
+        // Start the reopened page's read only after that worker has completed.
+        if (cancelled) void refreshBattery.current?.();
+      }
     };
+    refreshBattery.current = updateBattery;
     void updateBattery();
     const timer = setInterval(() => void updateBattery(), 10000);
-    return () => { cancelled = true; clearInterval(timer); };
+    return () => {
+      cancelled = true;
+      if (refreshBattery.current === updateBattery) refreshBattery.current = null;
+      clearInterval(timer);
+    };
   }, [activeSection, visible]);
 
+  const finishAction = () => {
+    ++revision.current;
+    pendingActionRef.current = null;
+    if (mounted.current) {
+      setPendingAction(null);
+      void refresh();
+      // A QAM reopen during a profile transaction defers its lookup. Resume
+      // it only after commit/rollback so a pre-write snapshot cannot win.
+      if (!profileReady.current) void refreshGameProfile.current?.();
+    }
+  };
 
   const run = async (action: ActionKey, work: () => Promise<State>, title: string, success?: string) => {
     if (pendingActionRef.current || state?.settings_error || state?.initializing) return;
@@ -442,9 +482,7 @@ const Content: FC = () => {
       notifyFailure(title, error);
       if (canAccept()) setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      ++revision.current;
-      pendingActionRef.current = null;
-      if (mounted.current) { setPendingAction(null); void refresh(); }
+      finishAction();
     }
   };
 
@@ -552,9 +590,7 @@ const Content: FC = () => {
         setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
       }
     } finally {
-      ++revision.current;
-      pendingActionRef.current = null;
-      if (mounted.current) { setPendingAction(null); void refresh(); }
+      finishAction();
     }
   };
   const togglePerGame = async (enabled: boolean) => {
@@ -596,9 +632,7 @@ const Content: FC = () => {
         setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
       }
     } finally {
-      ++revision.current;
-      pendingActionRef.current = null;
-      if (mounted.current) { setPendingAction(null); void refresh(); }
+      finishAction();
     }
   };
   const flushController = (): Promise<boolean> => {
@@ -744,9 +778,11 @@ const Content: FC = () => {
   const audioSummary = state.audio_fix_enabled
     ? state.audio_fix_installed ? state.audio_profile : "Tuning pending"
     : "Generic SteamOS profile";
-  const readFailure = stateReadError && <PanelSection title="Device Status">
-    <PanelSectionRow><Field focusable label="Status refresh failed"
-      description={`Showing last confirmed values. Retrying automatically. ${stateReadError}`} /></PanelSectionRow>
+  const readFailure = (stateReadError || profileReadError) && <PanelSection title="Device Status">
+    {stateReadError && <PanelSectionRow><Field focusable label="Status refresh failed"
+      description={`Showing last confirmed values. Retrying automatically. ${stateReadError}`} /></PanelSectionRow>}
+    {profileReadError && <PanelSectionRow><Field focusable label="Game profile lookup failed"
+      description={`TDP profile changes are waiting for a confirmed profile. Retrying automatically. ${profileReadError}`} /></PanelSectionRow>}
   </PanelSection>;
 
   if (!activeSection) return <PageShell>
@@ -869,7 +905,7 @@ const Content: FC = () => {
     </PanelSection>}
 
     {activeSection === "battery" && <BatteryPage
-      state={state} battery={battery} busy={busy}
+      state={state} battery={battery} error={batteryReadError} busy={busy}
       onBypass={enabled => void run("battery", () => setChargeBypass(enabled), "Charge bypass failed", enabled ? "Charging bypass enabled." : "Automatic charging restored.")}
     />}
 

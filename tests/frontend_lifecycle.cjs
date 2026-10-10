@@ -90,6 +90,105 @@ const count = (h, name) => h.calls.filter(c => c.name === name).length;
 const open = (h, title) => { const field = find(h.render(), 'title', title); assert.ok(field, title); field.props.onClick(); return h.render(); };
 const ready = async () => { const h = harness(); h.render(); h.respond('get_state', state); await settle(); h.render(); return h; };
 (async () => {
+  for (const operation of ['save', 'delete']) for (const failed of [false, true]) {
+    const profileWrite = harness(); profileWrite.Router.MainRunningApp = { appid: 111, display_name: 'A' };
+    profileWrite.watcher.start(); profileWrite.respond('set_active_app'); await settle(); profileWrite.render();
+    profileWrite.respond('get_state', state);
+    profileWrite.respond('get_game_profile', { exists: true, profile: state.tdp, preset: 'Balanced' }); await settle(); open(profileWrite, 'TDP');
+    if (operation === 'save') find(profileWrite.render(), 'children', 'Performance').props.onClick();
+    else find(profileWrite.render(), 'label', 'Per Game Profile').props.onChange(false);
+    await settle();
+    profileWrite.visible(false); profileWrite.visible(true); profileWrite.render();
+    assert.equal(count(profileWrite, 'get_game_profile'), 1,
+      `${operation}: reopening QAM must not read the pre-commit profile during a pending write`);
+    const writeName = operation === 'save' ? 'set_game_profile' : 'delete_game_profile';
+    const saved = operation === 'save' && !failed;
+    const finalState = { ...state, tdp: saved ? state.presets.Performance : state.tdp, tdp_preset: saved ? 'Performance' : 'Balanced' };
+    if (failed) profileWrite.reject(writeName); else profileWrite.respond(writeName, finalState);
+    await settle();
+    assert.equal(count(profileWrite, 'get_game_profile'), 2,
+      `${operation}: refresh the reopened profile after success or rollback without waiting for another menu open`);
+    const exists = operation !== 'delete' || failed;
+    profileWrite.respond('get_game_profile', { exists, profile: exists ? finalState.tdp : {}, preset: finalState.tdp_preset });
+    profileWrite.respond('get_state', finalState); await settle(); open(profileWrite, 'TDP');
+    assert.equal(find(profileWrite.render(), 'label', 'Per Game Profile').props.checked, exists);
+    assert.equal(find(profileWrite.render(), 'label', 'Per Game Profile').props.disabled, false);
+    profileWrite.unmount(); profileWrite.watcher.stop();
+  }
+
+  const slowProfile = harness(); slowProfile.Router.MainRunningApp = { appid: 111, display_name: 'A' };
+  slowProfile.watcher.start(); slowProfile.render(); slowProfile.respond('get_state', { ...state, active_app_id: '111' }); await settle();
+  for (let reopen = 0; reopen < 3; reopen++) { slowProfile.visible(false); slowProfile.visible(true); }
+  assert.equal(count(slowProfile, 'get_game_profile'), 1,
+    'QAM navigation must not accumulate concurrent slow game-profile reads');
+  slowProfile.Router.MainRunningApp = { appid: 222, display_name: 'B' }; slowProfile.fire('interval', 2000); slowProfile.render();
+  slowProfile.Router.MainRunningApp = { appid: 333, display_name: 'C' }; slowProfile.fire('interval', 2000); slowProfile.render();
+  assert.equal(count(slowProfile, 'get_game_profile'), 1, 'game switches wait for the pending read without adding workers');
+  slowProfile.reject('get_game_profile'); await settle(); slowProfile.render();
+  assert.equal(count(slowProfile, 'get_game_profile'), 2, 'the latest game is read immediately after an obsolete failure');
+  assert.equal(slowProfile.calls.filter(c => c.name === 'get_game_profile')[1].args[0], '333');
+  assert.equal(find(slowProfile.render(), 'label', 'Action failed'), undefined, 'obsolete profile errors stay hidden');
+  assert.equal(find(slowProfile.render(), 'label', 'Game profile lookup failed'), undefined, 'obsolete reads cannot set the dedicated profile error');
+  slowProfile.respond('get_game_profile', { exists: true, profile: state.tdp, preset: 'Balanced' }); await settle();
+  slowProfile.visible(false); slowProfile.visible(true);
+  assert.equal(count(slowProfile, 'get_game_profile'), 3);
+  slowProfile.unmount(); const profileWritesAfterUnmount = slowProfile.writes;
+  slowProfile.reject('get_game_profile'); await settle(); slowProfile.fire('timeout', 3000);
+  assert.equal(count(slowProfile, 'get_game_profile'), 3, 'unmounted profile lookups cannot retry');
+  assert.equal(slowProfile.writes, profileWritesAfterUnmount);
+  slowProfile.watcher.stop();
+
+  const slowBattery = await ready(); open(slowBattery, 'Battery');
+  for (let reopen = 0; reopen < 3; reopen++) {
+    slowBattery.visible(false); slowBattery.visible(true); open(slowBattery, 'Battery');
+    slowBattery.fire('interval', 10000);
+  }
+  assert.equal(count(slowBattery, 'get_battery_status'), 1,
+    'closing and reopening Battery must not accumulate concurrent slow RPC reads');
+  slowBattery.respond('get_battery_status', { available: true, percent: 10, status: 'Discharging', seconds_to_full: null }); await settle();
+  assert.equal(count(slowBattery, 'get_battery_status'), 2,
+    'the reopened page needs one fresh read once the obsolete request finishes');
+  let slowBatteryPage = findComponent(slowBattery.render(), 'BatteryPage');
+  assert.equal(slowBatteryPage.props.battery, null, 'an obsolete battery result must stay discarded');
+  slowBattery.respond('get_battery_status', { available: true, percent: 60, status: 'Charging', seconds_to_full: 3600 }); await settle();
+  slowBatteryPage = findComponent(slowBattery.render(), 'BatteryPage');
+  assert.equal(slowBatteryPage.props.battery.percent, 60);
+  slowBattery.fire('interval', 10000);
+  slowBattery.visible(false); slowBattery.unmount();
+  const batteryCallsAtUnmount = count(slowBattery, 'get_battery_status');
+  const batteryWritesAtUnmount = slowBattery.writes;
+  slowBattery.reject('get_battery_status'); await settle();
+  assert.equal(count(slowBattery, 'get_battery_status'), batteryCallsAtUnmount, 'unmount must not restart a battery read');
+  assert.equal(slowBattery.writes, batteryWritesAtUnmount, 'unmount must suppress late battery errors');
+
+  const failedBattery = await ready(); open(failedBattery, 'Battery');
+  const batteryTree = h => { const page = findComponent(h.render(), 'BatteryPage'); return page.type(page.props); };
+  failedBattery.reject('get_battery_status'); await settle();
+  assert.ok(find(batteryTree(failedBattery), 'label', 'Battery status unavailable'),
+    'an initial battery read failure must replace the indefinite spinner');
+  failedBattery.fire('interval', 10000);
+  failedBattery.respond('get_battery_status', { available: true, percent: 65, status: 'Charging', seconds_to_full: 3600, power_w: 15, source: 'sysfs' }); await settle();
+  assert.equal(find(batteryTree(failedBattery), 'label', 'Battery status unavailable'), undefined);
+  failedBattery.fire('interval', 10000); failedBattery.reject('get_battery_status'); await settle();
+  assert.ok(find(batteryTree(failedBattery), 'label', 'Battery refresh failed'),
+    'cached battery values must be marked after their refresh fails');
+  assert.ok(find(batteryTree(failedBattery), 'label', '65% · Charging'));
+  failedBattery.fire('interval', 10000);
+  failedBattery.respond('get_battery_status', { available: true, percent: 70, status: 'Charging', seconds_to_full: 3000, power_w: 15, source: 'sysfs' }); await settle();
+  assert.equal(find(batteryTree(failedBattery), 'label', 'Battery refresh failed'), undefined);
+  failedBattery.unmount();
+
+  const obsoleteBattery = await ready(); open(obsoleteBattery, 'Battery');
+  obsoleteBattery.visible(false); obsoleteBattery.visible(true); open(obsoleteBattery, 'Battery');
+  obsoleteBattery.reject('get_battery_status'); await settle();
+  assert.equal(find(batteryTree(obsoleteBattery), 'label', 'Battery status unavailable'), undefined,
+    'a late failure from the closed battery page must not overwrite its new read');
+  const reopenedBatteryRead = obsoleteBattery.calls.filter(call => call.name === 'get_battery_status' && !call.settled).at(-1);
+  reopenedBatteryRead.settled = true;
+  reopenedBatteryRead.resolve({ available: true, percent: 50, status: 'Discharging', seconds_to_full: null, power_w: 10, source: 'none' }); await settle();
+  assert.ok(find(batteryTree(obsoleteBattery), 'label', '50% · Discharging'));
+  obsoleteBattery.unmount();
+
   const failedStatus = await ready();
   failedStatus.fire('interval', 1500);
   failedStatus.reject('get_state'); await settle();
@@ -440,11 +539,36 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   game.unmount(); game.watcher.stop();
 
   const retry = harness(); retry.Router.MainRunningApp = { appid: 333, display_name: 'C' }; retry.watcher.start(); retry.respond('set_active_app'); await settle();
-  retry.render(); retry.respond('get_state', state); retry.reject('get_game_profile'); await settle(); retry.fire('timeout', 3000);
+  retry.render(); retry.respond('get_state', state); await settle(); open(retry, 'TDP');
+  retry.reject('get_game_profile'); await settle();
+  assert.ok(find(retry.render(), 'label', 'Game profile lookup failed'), 'profile lookup failure is visible on the open TDP page');
+  assert.equal(find(retry.render(), 'label', 'Per Game Profile').props.disabled, true);
+  retry.fire('timeout', 3000);
   assert.equal(count(retry, 'get_game_profile'), 2, 'transient profile lookup retries without another menu open');
   retry.respond('get_game_profile', { exists: true, profile: state.tdp, preset: 'Balanced' }); await settle();
-  open(retry, 'TDP'); assert.equal(find(retry.render(), 'label', 'Per Game Profile').props.checked, true);
+  assert.equal(JSON.stringify(retry.render()).includes('RPC failed'), false,
+    'successful automatic profile retry clears its error without navigating away');
+  assert.equal(find(retry.render(), 'label', 'Per Game Profile').props.checked, true);
+  assert.equal(find(retry.render(), 'label', 'Per Game Profile').props.disabled, false);
   retry.unmount(); retry.watcher.stop();
+
+  const profileError = harness(); profileError.Router.MainRunningApp = { appid: 111, display_name: 'A' };
+  profileError.watcher.start(); profileError.respond('set_active_app'); await settle(); profileError.render();
+  profileError.respond('get_state', state); profileError.reject('get_game_profile'); await settle();
+  assert.ok(find(profileError.render(), 'label', 'Game profile lookup failed'), 'lookup failure also appears in the overview');
+  open(profileError, 'TDP');
+  assert.ok(find(profileError.render(), 'label', 'Game profile lookup failed'), 'navigation cannot dismiss an unresolved read failure');
+  find(profileError.render(), 'label', 'CPU Boost').props.onChange(true); await settle();
+  profileError.reject('set_cpu_boost'); await settle();
+  profileError.fire('timeout', 3000); profileError.respond('get_game_profile', { exists: false, profile: {} }); await settle();
+  assert.equal(find(profileError.render(), 'label', 'Game profile lookup failed'), undefined);
+  assert.ok(JSON.stringify(profileError.render()).includes('RPC failed'), 'successful profile recovery preserves the separate CPU action failure');
+  profileError.Router.MainRunningApp = { appid: 222, display_name: 'B' }; profileError.fire('interval', 2000); profileError.render();
+  profileError.reject('get_game_profile'); await settle();
+  assert.ok(find(profileError.render(), 'label', 'Game profile lookup failed'));
+  profileError.Router.MainRunningApp = null; profileError.fire('interval', 2000); profileError.render(); profileError.render();
+  assert.equal(find(profileError.render(), 'label', 'Game profile lookup failed'), undefined, 'game exit removes the obsolete profile error');
+  profileError.unmount(); profileError.watcher.stop();
 
   const transition = harness(); transition.Router.MainRunningApp = { appid: 111, display_name: 'A' };
   transition.watcher.start(); transition.respond('set_active_app'); await settle(); transition.render();

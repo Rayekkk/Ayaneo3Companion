@@ -34,12 +34,15 @@ export const VibrationPage: FC<{
 export const BatteryPage: FC<{
   state: State;
   battery: BatteryStatus | null;
+  error: string;
   busy: boolean;
   onBypass(enabled: boolean): void;
-}> = ({ state, battery, busy, onBypass }) => <>
+}> = ({ state, battery, error, busy, onBypass }) => <>
   <PanelSection title="Battery Status">
     {!battery
-      ? <PanelSectionRow><Spinner /></PanelSectionRow>
+      ? <PanelSectionRow>{error
+          ? <Field focusable label="Battery status unavailable" description={`${error} Retrying automatically.`} />
+          : <Spinner />}</PanelSectionRow>
       : <PanelSectionRow><Field focusable
           label={battery.available ? `${battery.percent == null ? "Battery" : `${battery.percent}%`} · ${battery.status}` : "Battery unavailable"}
           description={battery.seconds_to_full != null
@@ -48,6 +51,8 @@ export const BatteryPage: FC<{
             : battery.status.toLowerCase() === "full" ? "The battery is fully charged."
             : "Time to full is shown while the battery is charging."}
         /></PanelSectionRow>}
+    {battery && error && <PanelSectionRow><Field focusable label="Battery refresh failed"
+      description={`${error} Showing the last confirmed battery values. Retrying automatically.`} /></PanelSectionRow>}
   </PanelSection>
   <PanelSection title="Charge Control">
     <PanelSectionRow><ToggleField label="Bypass Charging" description={state.charge_bypass_supported ? "Power the console from the charger without charging the battery." : "AYANEO charge control is not exposed by the current system."} checked={state.charge_bypass} disabled={busy || !state.charge_bypass_supported} onChange={onBypass} /></PanelSectionRow>
