@@ -2,211 +2,109 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
-## [Unreleased]
+## [1.2.0] - Unreleased
 
-### Fixed
+This update adds fan control and improves how Companion handles everyday
+adjustments, game changes, and temporary hardware problems.
 
-- Clear a transient game-profile read error after automatic recovery without
-  dismissing unrelated action failures. Keep unresolved lookup errors visible
-  in the overview and on control pages, and discard them on context changes.
+### New features
 
-- Coalesce automatic game-profile reads across QAM reopen and game changes;
-  after a slow request completes, query only the latest active context.
-- Defer profile refresh during TDP/profile transactions and resume it after
-  commit or rollback, so an old read cannot undo the confirmed profile in UI.
+- **Fan Control:** see the fan's speed in RPM, keep the console's automatic
+  fan curve, or choose a manual speed from 60% to 100%. Available when supported
+  by the console's kernel.
+- **Manual fan safety timer:** an independent timer restores automatic control
+  if Companion stops responding. Stopping the plugin or resuming the console
+  also returns the fan to Auto.
 
-- Restore automatic fan control after a bounded wait even if a stalled Decky
-  process holds the lease lock. Retain the lease and retry until the interrupted
-  manual transaction finishes, then clean it up under the lock.
-- Keep battery reads single-flight across page and QAM navigation. Discard an
-  obsolete reply and start one fresh read when the previous worker completes.
-- Keep a new manual fan session monitored when an older renewal or resume
-  cleanup reports completion after the new session was accepted.
+### Improvements
 
-- Serialize fan lease changes with the independent guard across processes so
-  an expiring guard cannot delete a newly renewed manual session's protection.
-  Keep Auto available when the lease lock cannot be acquired.
-- Let a fan guard whose session was removed exit successfully instead of
-  triggering repeated systemd restarts; live leases still retry EC outages.
-- Show initial battery read failures and mark cached battery values after a
-  failed refresh. Clear the error after recovery and ignore closed-page replies.
+- **Faster startup and smoother menus.** Speaker checks, slow settings saves,
+  and other background work are less likely to hold up unrelated controls.
+- **Less waiting when navigating.** Reopening a page or quickly switching games
+  no longer piles up repeated battery and profile checks. Companion refreshes
+  the page or game you are currently using.
+- **Clearer status messages.** Temporary read failures are shown alongside the
+  last confirmed values. Messages clear after a successful refresh, while
+  separate failed actions keep their own explanation.
+- **More reliable downloads.** Update and hardware-helper downloads have time
+  limits, and an update installs the exact version shown in the menu.
+- **Broader kernel compatibility.** Companion uses newer AYANEO system controls
+  when available and keeps the fallback needed by older SteamOS kernels.
 
-- Add the repository to the temporary GitHub Actions Python step's import
-  path before loading the archive validator. Select Git Bash explicitly for
-  Windows launcher regressions, and reject dangling calibration output links
-  before exclusive creation on Windows.
+### Fixes
 
-- Keep settings recovery-status checks and game-profile reads from blocking
-  Decky's event loop during slow disk commits; fan Auto stays independent of
-  persisted-settings I/O.
-- Verify raw-EC controller power writes and restore the previous register on
-  failure, matching the native kernel path's confirmation and boolean validation.
-- Show failed status refreshes alongside the last confirmed values and clear
-  the message after a fresh successful read, including on individual control pages.
-- Treat missing or timed-out PowerStation ownership tools as a pre-write
-  capability rejection, avoiding a redundant hardware rollback and repeated
-  slow service probes. Failures after a RyzenAdj write still restore old limits.
-- Pass the Desktop installer's location as a separate argument, preserving
-  spaces, apostrophes and shell metacharacters without evaluating path contents.
-  Accept local file URIs and retain the bootstrap's exit status.
-- Merge rapid Custom TDP slider events before rendering and apply the current
-  draft, including current boost headroom. Preserve unapplied drafts after a
-  failed preset and ignore stale slider callbacks during an active apply.
-- Retain the last vibration strength and FF Gain choice when quick slider
-  movement returns to the original value before the next render.
-- Apply the latest manual fan speed even when Apply is pressed immediately
-  after the slider changes.
-- Discover and verify speaker controls in the background without delaying
-  startup of unrelated controls. Retry late ALSA discovery for disabled tuning
-  without enabling it, and expose calibration only after DSP verification.
-- Open settings for reading and permission hardening without waiting on a
-  substituted FIFO; continue rejecting non-regular descriptors before use.
-- Create offline calibration candidates exclusively, preserving files created
-  by another process and refusing dangling output symlinks.
-- Preserve cancellation after a drained worker fails, preventing a monitor
-  retry from swallowing shutdown and keeping unload pending indefinitely.
-- Block three-limit TDP writes when PowerStation is active or starting; its
-  two-property API cannot enforce or verify the plugin's FPPT ceiling.
-- Commit combined controller firmware/RGB and FF Gain edits in one transaction,
-  restoring both devices on failure.
-- Accept TDP state only for the acknowledged active game so an earlier game's
-  poll cannot replace the next game's selected preset.
-- Report missing or kernel-owned vendor HID controls as unavailable, including
-  module eject/reset, with recovery when the interface returns.
-- Recover module presence and power through EC before requiring vendor HID,
-  including eject/reinsert and startup with the controller powered off.
-- Retry the active game's pending TDP profile after PowerStation releases
-  control, and keep device diagnostics and independent controls visible when
-  game-profile synchronization fails.
-- Preserve both the Custom preset selection and its unsaved values when QAM
-  is closed and reopened for the same game.
-- Restore saved evdev FF Gain at startup, after resume and input-device
-  recreation even when vendor HID is unavailable or owned by `hid-ayaneo`.
-  Retry failed gain writes independently and pause restoration during module
-  operations.
-- Require a known internal AYANEO physical path for FF Gain and vibration tests;
-  wait for its evdev node instead of selecting a sole external Xbox-compatible pad.
-- Acknowledge successful settings writes without repeating unrelated service
-  diagnostics inside the serialized action queue. Retain observed capabilities
-  and refresh them through regular status reads without replacing newer settings.
-- Detect game changes during a pending profile RPC and immediately send the
-  latest queued context when it completes. Reuse in-flight fan reads when opening
-  the fan page and immediately retry a stale read after reopening QAM.
-- Require matching custom-mode HID readback before confirming controller writes
-  or recovery; retry one missing or mismatched response and roll back failed edits.
-- Bound RyzenAdj and audio-calibration downloads by elapsed transfer time as well
-  as size, with incremental reads and shorter individual network timeouts.
-- Leave pending TDP retries to the power monitor so same-game heartbeats cannot
-  repeat slow ownership probes inside the serialized settings queue.
-- Merge fast write acknowledgements only into their own controls, preserving
-  fresher observations of unrelated controls and device diagnostics.
-- Ignore unreadable unrelated hwmon names when finding the AYANEO fan, including
-  in the independent Auto recovery guard; still reject ambiguous AYANEO devices.
-- Return same-game heartbeats before the TDP monitor's transaction lock and
-  serialize charge control independently, keeping unrelated settings responsive.
-- Accept global control acknowledgements across game changes while preserving
-  strict context checks for TDP and per-game profile edits.
-- Flush and confirm the complete controller queue before a vibration test;
-  skip tests after failed writes or unmount, refresh restored settings immediately
-  after failure and disable FF Gain while an action is in progress.
-- Send only edited controller fields and merge them with the latest confirmed
-  settings inside the backend transaction, preserving pending changes across
-  panel remounts. Brightness changes no longer replace color or vibration.
-- Observe PowerStation ownership in one background status task, reusing its
-  result for five seconds between probes so slow service diagnostics do not
-  delay startup or unrelated status fields. TDP writes still check live ownership.
-- Discard ownership observations from before or during a newer TDP write, or
-  another backend lifetime. Publish capability changes from live TDP writes
-  immediately and drain pending diagnostics during shutdown.
-- Preserve failed controller fields across a queue drain, so a successful
-  unrelated patch cannot start a vibration test with unconfirmed settings.
-  A confirmed newer edit of the same field can supersede its earlier failure.
-- Serialize fan commands separately from persistent settings transactions,
-  keeping Auto available during slow TDP or audio operations while retaining
-  hardware validation, write admission and shutdown tracking.
-- Avoid starting a fan monitor when a manual write completes during shutdown;
-  drain the admitted write and restore Auto without leaving a late task.
-- Monitor charge bypass independently of TDP retries and downloads, preserving
-  periodic verification and prompt checks after charger changes or resume.
-- Discover the bootstrap install directory from Decky's service configuration
-  and restore the complete previous plugin, owned maps and service state after
-  an installation failure.
-- Match Decky's privileged-directory fallbacks, exclude concurrent installers,
-  verify restarted services before removing backups and retain the live
-  deployment if rollback cannot stop the Loader.
-- Bind update downloads to the version displayed in the panel and reject ZIPs
-  missing any required runtime module or hardware asset.
-- Replace the obsolete build dependency chain and check npm advisories in CI.
+#### TDP and game profiles
 
-### Internal
+- Changing games quickly no longer lets the previous game's response replace
+  the current game's preset or power limits.
+- Saving or deleting a profile while reopening the menu no longer brings back
+  the old preset or incorrectly re-enables Per Game Profile.
+- Custom TDP values and the selected preset survive closing and reopening the
+  menu for the same game. Failed preset changes also preserve unsaved edits.
+- Rapid slider changes followed by Apply use the latest values, including the
+  extra power allowed for short boosts.
+- When PowerStation controls TDP, Companion explains why its own TDP controls
+  are unavailable. Pending game profiles are retried when PowerStation releases
+  control, and other hardware controls remain usable.
+- A temporary profile lookup failure retries automatically. Its error clears
+  after recovery without hiding an unrelated failed action.
 
-- Cover profile read coalescing, game switches, unmount and QAM reopen during
-  successful or failed profile saves/removals. Complete the fan monitor tests
-  for renewal/resume failures and starting a session after cleanup.
+#### Fan and battery
 
-- Add regressions for a stalled fan lease holder, superseded guard ownership,
-  and repeated battery-page navigation during a slow read and after unmount.
-- Cover delayed fan renewal failures, expiry and resume cleanup across a new
-  manual write, including normal monitor shutdown and restart.
+- Auto remains available during slow TDP or audio operations and after a
+  temporary fan status failure. Auto status can also be read on kernels that
+  do not allow reading manual speed while automatic control is active.
+- Rapid manual fan changes and delayed responses no longer interfere with
+  monitoring the latest setting. The safety timer can still restore Auto if
+  Companion gets stuck, and retries when the fan interface is unavailable.
+- Moving the manual fan slider and immediately pressing Apply uses the latest
+  speed rather than the previous value.
+- Battery read failures no longer leave a spinner running indefinitely or
+  silently present old readings as current. Automatic refresh clears the error
+  once readings are available again.
+- Charging bypass is checked independently of TDP, including after plugging in
+  a charger or resuming the console.
 
-- Exercise a guard/manual-write interleaving, cross-process lease exclusion,
-  removed-session exit and Auto fallback. Cover battery read failure, recovery
-  and obsolete responses using the actual frontend components.
+#### Controller, RGB, and vibration
 
-- Add event-loop regressions for slow settings commits, raw-EC power readback
-  and rollback faults, pre-write ownership failures and post-write TDP recovery.
-  Exercise cached status-read failures, recovery and obsolete poll completions.
-- Run the shipped Desktop launcher with harmless temporary bootstrap scripts
-  for special paths, local URIs, rejected remote locations and failed installs.
-- Exercise batched slider/apply events, failed-preset draft recovery, 300
-  interleaved TDP changes, audio startup and shutdown, late disabled-audio
-  discovery and speaker readiness UI. Add POSIX child-process FIFO regressions.
-- Cover failed partial-write queues, vibration-test admission, independent fan
-  operations and their ordering, late fan-monitor startup, independent charge
-  drift recovery, charger/resume scheduling, retry pacing and monitor shutdown.
-- Cover partial controller commits and rollback, panel remount ordering,
-  blocked service probes, diagnostic expiry, TDP observation races, startup
-  responsiveness and diagnostic shutdown on isolated hardware/service doubles.
-- Add regression tests for controller transactions, game-state ordering, HID
-  availability, installer rollback and incomplete archives; validate the built
-  package with the updater's archive checks.
-- Cover module power recovery, pending game profiles, profile-error diagnostics,
-  Custom draft reopening, installer locking and service verification failures.
-- Cover independent FF Gain recovery, missing input devices, failed writes,
-  module-operation races and monitor shutdown.
-- Cover actual rumble-device selection and event writes on temporary files,
-  blocked diagnostics, fast write acknowledgements, game-transition coalescing
-  and fan-page refresh ordering.
-- Cover missing HID confirmation, recovery readback, transfer deadlines,
-  heartbeat retry ownership, unrelated state preservation and fan discovery
-  across disappearing hwmon entries.
-- Cover blocked TDP monitors without delaying charge/heartbeat/RGB actions,
-  charge restoration after commit, global acknowledgements during game changes
-  and vibration tests with pending, failed or interrupted controller writes.
+- Fast changes to color, brightness, vibration strength, and vibration gain
+  (FF Gain) no longer overwrite one another. The latest choices are kept when
+  leaving the page.
+- Failed controller changes restore the previous settings. Vibration tests
+  wait for pending adjustments and do not run with unconfirmed values.
+- Saved FF Gain is restored after startup, resume, or controller reconnection.
+  Recovery waits for the built-in controller instead of using an external pad.
+- Magic Modules recover their power, RGB, and vibration settings more reliably
+  after removal, reinsertion, or startup with the controller powered off.
+- Unavailable controller features are clearly marked and recover when the
+  required interface returns.
 
-## [1.2.0] - 2026-09-24
+#### Audio, display, and buttons
 
-### Added
+- Speaker setup no longer delays unrelated controls. Recalibration becomes
+  available after both speakers are confirmed ready.
+- The OLED fix and key-binding switches remember your choice and restore their
+  system files when a SteamOS update replaces them.
+- InputPlumber is reloaded only when its button mapping needs to change.
 
-- Add native AYANEO EC fan status and guarded Auto/manual fan control when the
-  kernel exposes the required hwmon interface.
+#### Installation, updates, and reliability
 
-### Fixed
+- The desktop installer handles folders with spaces and special characters.
+- Installation finds the correct Decky folder, checks the full update package,
+  and verifies that the required services start successfully.
+- Failed installations restore the previous plugin and button mappings. If
+  recovery cannot finish safely, the backup files are kept for repair.
+- Incomplete update packages are rejected, and concurrent installations cannot
+  replace each other's files.
+- Settings and calibration tools better protect existing files from accidental
+  replacement. Plugin shutdown also handles unfinished work more reliably.
 
-- Prefer the native `ayaneo-ec` controller power and module-presence controls on
-  newer kernels while retaining the raw EC fallback on SteamOS 3.8/kernel 6.16.
-- Save the OLED and key-binding switches and restore their system definitions
-  after SteamOS replaces `/etc`; reload InputPlumber only when its map changes.
-- Keep the fan recovery action available after a temporary status failure and
-  retry independent Auto restoration across longer EC outages.
-- Keep Auto fan status available when the EC rejects a manual PWM read; continue
-  to require PWM readback before confirming manual control.
+### Quality checks
 
-### Internal
-
-- Split the hardware overview into focused pages and extend regression coverage
-  for kernel compatibility, startup recovery, fan safety and QAM navigation.
-- Drop the unused React Icons package from the frontend and release payload.
+- Expanded regression tests cover rapid adjustments, navigation, game changes,
+  temporary hardware failures, fan recovery, and failed installations.
+- Automated checks cover Linux and Windows, frontend builds, dependencies, and
+  install-package contents. Unused frontend dependencies were removed.
 
 ## [1.1.0] - 2026-09-06
 
