@@ -40,14 +40,27 @@ class DesktopLauncherTests(unittest.TestCase):
 
     def run_launcher(self, location):
         environment = os.environ.copy()
-        bash = shutil.which("bash")
-        if not bash and os.name == "nt":
-            bash = r"C:\Program Files\Git\bin\bash.exe"
+        # A Windows runner's first bash.exe may be the WSL launcher, which
+        # cannot consume Windows paths or run without an installed distro.
+        # Git Bash runs the harmless fixture with native Windows arguments.
+        bash = (str(Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+                    / "Git" / "bin" / "bash.exe")
+                if os.name == "nt" else shutil.which("bash"))
         if not bash or not Path(bash).is_file():
             self.skipTest("Bash is unavailable")
         environment["PATH"] = str(Path(bash).parent) + os.pathsep + environment.get("PATH", "")
         return subprocess.run(self.command(location), input="\n", capture_output=True,
                               text=True, timeout=10, cwd=self.base, env=environment)
+
+    @unittest.skipUnless(os.name == "nt", "Windows Bash selection")
+    def test_windows_ignores_wsl_bash_on_path(self):
+        from unittest.mock import patch
+        launcher = self.fixture("Git Bash selection")
+        with patch.object(shutil, "which", return_value=r"C:\Windows\System32\bash.exe") as lookup:
+            result = self.run_launcher(str(launcher))
+        lookup.assert_not_called()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((launcher.parent / "ran.txt").is_file())
 
     def test_desktop_location_is_passed_as_data(self):
         self.command("/tmp/installer.desktop")

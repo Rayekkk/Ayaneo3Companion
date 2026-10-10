@@ -6,6 +6,11 @@ All notable changes to AYANEO 3 Companion, newest first.
 
 ### Fixed
 
+- Add the repository to the temporary GitHub Actions Python step's import
+  path before loading the archive validator. Select Git Bash explicitly for
+  Windows launcher regressions, and reject dangling calibration output links
+  before exclusive creation on Windows.
+
 - Keep settings recovery-status checks and game-profile reads from blocking
   Decky's event loop during slow disk commits; fan Auto stays independent of
   persisted-settings I/O.

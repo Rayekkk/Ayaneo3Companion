@@ -74,10 +74,13 @@ jobs:
         run: |
           import json
           import stat
+          import sys
           import zipfile
           from pathlib import Path, PurePosixPath
 
           root = Path.cwd()
+          # Actions executes this Python step from a temporary script directory.
+          sys.path.insert(0, str(root))
           manifest = json.loads((root / 'plugin.json').read_text(encoding='utf-8'))
           archive = root / f"Ayaneo3Companion-{manifest['version']}.zip"
           from lego_updater import Updater

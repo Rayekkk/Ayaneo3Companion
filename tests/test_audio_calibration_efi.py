@@ -80,6 +80,20 @@ class AudioCalibrationEfiTests(unittest.TestCase):
             self.assertFalse(victim.exists())
             self.assertTrue(output.is_symlink())
 
+    def test_symlink_output_is_rejected_before_exclusive_open(self):
+        # Exercise the Windows-sensitive admission check even on hosts that
+        # lack privileges to create a real symlink.
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            original, output = root / "original.bin", root / "candidate.bin"
+            original.write_bytes(self.make_blob())
+            with patch.object(MODULE.pathlib.Path, "is_symlink", return_value=True), \
+                 patch.object(MODULE.pathlib.Path, "open") as opened:
+                with self.assertRaises(SystemExit) as rejected:
+                    self.run_builder(original, output)
+            self.assertEqual(rejected.exception.code, 2)
+            opened.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -117,7 +117,9 @@ def main() -> int:
     output_resolved = args.output.resolve()
     if str(output_resolved).startswith("/sys/firmware/efi"):
         parser.error("refusing to write directly to efivarfs")
-    if args.output.exists():
+    # Windows exclusive opens can follow a dangling symlink. Reject the link
+    # itself rather than checking only whether its target currently exists.
+    if args.output.is_symlink() or args.output.exists():
         parser.error(f"output already exists: {args.output}")
 
     original = args.original.read_bytes()
