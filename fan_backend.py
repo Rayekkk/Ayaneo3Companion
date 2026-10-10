@@ -9,6 +9,8 @@ command is self-contained, so removal or failure of this plugin cannot leave
 the fan indefinitely in manual mode.
 """
 
+from contextlib import contextmanager
+import errno
 import os
 import secrets
 import stat
@@ -16,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 
@@ -25,16 +28,71 @@ FAN_MIN_PERCENT = 60
 FAN_GUARD_SECONDS = 30
 FAN_RENEW_SECONDS = 10
 
+
+@contextmanager
+def _lease_lock(owner):
+    """Serialize the independent guard and plugin across processes/lifetimes."""
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(owner.parent / "fan.lock", flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError("fan lease lock is not a regular file")
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.025)
+        yield
+    finally:
+        os.close(fd)
+
 # This runs as a systemd transient service, independently of the Decky process
 # and of the plugin's files.  The lease token prevents an old instance's timer
 # from changing a newer instance's fan setting.
 _GUARD_SCRIPT = """\
-import pathlib, sys, time
+import errno, os, pathlib, stat, sys, time
 owner = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
 token = sys.argv[3]
 for attempt in range(5):
+    lock = None
+    locked = False
     try:
+        # Same file lock as _lease_lock; this service must stay self-contained
+        # even when Decky removes the plugin files.
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
+        lock = os.open(owner.parent / 'fan.lock', flags, 0o600)
+        if not stat.S_ISREG(os.fstat(lock).st_mode):
+            raise OSError('fan lease lock is not a regular file')
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(lock, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if time.monotonic() >= deadline:
+                    # A paused or stuck Decky process must not prevent Auto.
+                    # Without the lock, retain the owner and keep retrying:
+                    # that transaction can still resume with a manual write.
+                    break
+                time.sleep(0.025)
         if owner.read_text().strip() != token:
             sys.exit(0)
         matches = []
@@ -49,12 +107,20 @@ for attempt in range(5):
             if owner.read_text().strip() != token:
                 sys.exit(0)
             enable.write_text('2\\n')
-            if enable.read_text().strip() == '2':
+            if enable.read_text().strip() == '2' and locked:
                 if owner.read_text().strip() == token:
                     owner.unlink()
                 sys.exit(0)
+    except FileNotFoundError:
+        # A removed session is complete, not a reason for Restart=on-failure.
+        # A missing hwmon with a live lease must still be retried.
+        if not owner.exists():
+            sys.exit(0)
     except (OSError, ValueError):
         pass
+    finally:
+        if lock is not None:
+            os.close(lock)
     time.sleep(1)
 sys.exit(1)
 """
@@ -215,6 +281,20 @@ class FanController:
                                   not FAN_MIN_PERCENT <= percent <= 100):
             raise ValueError(f"manual fan speed must be {FAN_MIN_PERCENT}–100%")
         with self._lock:
+            try:
+                self._prepare_lease_dir()
+                with _lease_lock(self._owner):
+                    return self._set_locked(mode, percent)
+            except (OSError, RuntimeError):
+                if mode != "auto":
+                    raise
+                # Auto must remain possible even if the lease directory or
+                # lock is unavailable. Retain its owner so the guard can retry.
+                self._write_mode(self._hwmon(), 2)
+                return self.status()
+
+    def _set_locked(self, mode, percent=None):
+        with self._lock:
             path = self._hwmon()
             if mode == "auto":
                 try:
@@ -261,6 +341,14 @@ class FanController:
                 raise
 
     def renew(self):
+        with self._lock:
+            if self._token is None:
+                return False
+            self._prepare_lease_dir()
+            with _lease_lock(self._owner):
+                return self._renew_locked()
+
+    def _renew_locked(self):
         """Keep manual mode only while Decky's loop and systemd both work."""
         with self._lock:
             token = self._token
@@ -292,6 +380,14 @@ class FanController:
                 raise
 
     def close(self):
+        with self._lock:
+            if self._token is None:
+                return
+            self._prepare_lease_dir()
+            with _lease_lock(self._owner):
+                self._close_locked()
+
+    def _close_locked(self):
         """Return only this instance's manual session to hardware auto."""
         with self._lock:
             token = self._token
@@ -305,6 +401,14 @@ class FanController:
             self._auto(self._hwmon(), commands)
 
     def recover_abandoned(self):
+        with self._lock:
+            if not self._owner.exists():
+                return
+            self._prepare_lease_dir()
+            with _lease_lock(self._owner):
+                self._recover_abandoned_locked()
+
+    def _recover_abandoned_locked(self):
         """On Decky restart, repair an owned manual session immediately."""
         with self._lock:
             if not self._owner.exists():

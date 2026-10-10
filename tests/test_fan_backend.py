@@ -206,7 +206,8 @@ class FanBackendTests(unittest.TestCase):
     def test_restart_recovers_only_a_prior_owned_session(self):
         self.controller.set("manual", 80)
         replacement = fan_backend.FanController(self.hwmon_root, self.lease_dir)
-        replacement.recover_abandoned()
+        with mock.patch.object(replacement, "_prepare_lease_dir"):
+            replacement.recover_abandoned()
         self.assertEqual((self.device / "pwm1_enable").read_text().strip(), "2")
         self.assertFalse(self.controller._owner.exists())
         (self.device / "pwm1_enable").write_text("1\n")
