@@ -17,7 +17,7 @@ interface UpdateInfo {
 
 const getVersion = callable<[], { version: string }>("get_version");
 const checkForUpdates = callable<[], UpdateInfo>("check_for_updates");
-const performUpdate = callable<[], { success: boolean; path?: string; error?: string }>("perform_update");
+const performUpdate = callable<[string], { success: boolean; version?: string; path?: string; error?: string }>("perform_update");
 
 interface UpdateView { info: UpdateInfo | null; checking: boolean; downloading: boolean; path: string | null }
 let updateView: UpdateView = { info: null, checking: false, downloading: false, path: null };
@@ -75,11 +75,14 @@ export const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }
   const download = useCallback(async () => {
     if (updateView.checking || updateView.downloading) return;
     const generation = updateGeneration;
+    const expectedVersion = updateView.info?.latest_version;
+    if (!expectedVersion) return;
     publishUpdate({ downloading: true });
     try {
-      const result = await performUpdate();
+      const result = await performUpdate(expectedVersion);
       if (generation !== updateGeneration) return;
-      if (result.success && result.path) publishUpdate({ path: result.path });
+      if (result.success && result.path && result.version === expectedVersion) publishUpdate({ path: result.path });
+      else if (result.success) throw new Error("The downloaded release does not match the selected version. Check for updates again.");
       else throw new Error(result.error ?? "Unknown error");
     } catch (error) {
       if (generation === updateGeneration) {

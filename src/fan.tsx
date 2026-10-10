@@ -61,15 +61,23 @@ export function useFanControl(visible: boolean, pageOpen: boolean) {
         setReadError(failure instanceof Error ? failure.message : "Could not read the fan controller.");
     } finally {
       if (reading.current === request) reading.current = null;
+      if (mounted.current && visibleRef.current && ticket !== revision.current && !writing.current)
+        void refresh();
     }
   }, []);
 
   useEffect(() => {
     ++revision.current;
+    return () => { ++revision.current; };
+  }, [visible]);
+
+  useEffect(() => {
     if (!visible) return;
     void refresh();
     const timer = setInterval(() => void refresh(), pageOpen ? 5000 : 30000);
-    return () => { clearInterval(timer); ++revision.current; };
+    // Overview and page use the same data. Changing only the polling interval
+    // must not invalidate a useful in-flight read.
+    return () => clearInterval(timer);
   }, [visible, pageOpen, refresh]);
 
   const apply = async (mode: FanMode, percent?: number) => {
@@ -105,9 +113,15 @@ export const FanPage: FC<{
   onApply(mode: FanMode, percent?: number): void;
 }> = ({ status, available, error, busy, onApply }) => {
   const [draft, setDraft] = useState(100);
+  const desiredDraft = useRef(100);
+  const updateDraft = (value: number) => {
+    if (!Number.isFinite(value)) return;
+    desiredDraft.current = Math.max(60, Math.min(100, Math.round(value)));
+    setDraft(desiredDraft.current);
+  };
   useEffect(() => {
     if (status?.mode === "manual" && status.percent != null)
-      setDraft(Math.max(60, Math.min(100, Math.round(status.percent))));
+      updateDraft(status.percent);
   }, [status?.mode, status?.percent]);
 
   return <>
@@ -125,8 +139,8 @@ export const FanPage: FC<{
     {available && <PanelSection title="Fan Control">
       <PanelSectionRow><Field focusable label="Automatic mode" description="The console adjusts fan speed itself. Manual control returns to Auto when Companion stops or its safety timer expires." /></PanelSectionRow>
       <StackedAction title="Restore Automatic Control" description="Use the console's built-in fan curve." disabled={busy || Boolean(status?.supported && status.mode === "auto" && !error)} onClick={() => onApply("auto")}>{busy ? <Spinner /> : "Auto"}</StackedAction>
-      <PanelSectionRow><SliderField label="Manual speed" description="Choose 60–100%. Apply to change the fan; moving the slider alone does not affect cooling." value={draft} min={60} max={100} step={5} notchCount={9} notchTicksVisible validValues="steps" minimumDpadGranularity={5} valueSuffix="%" onChange={setDraft} disabled={busy || !status?.supported || Boolean(error)} /></PanelSectionRow>
-      <StackedAction title={status?.mode === "manual" ? "Apply Manual Speed" : "Enable Manual Control"} description="Companion checks the result and restores Auto if manual control is interrupted." disabled={busy || !status?.supported || Boolean(error) || (status.mode === "manual" && status.percent === draft)} onClick={() => onApply("manual", draft)}>{busy ? <Spinner /> : `Apply ${draft}%`}</StackedAction>
+      <PanelSectionRow><SliderField label="Manual speed" description="Choose 60–100%. Apply to change the fan; moving the slider alone does not affect cooling." value={draft} min={60} max={100} step={5} notchCount={9} notchTicksVisible validValues="steps" minimumDpadGranularity={5} valueSuffix="%" onChange={updateDraft} disabled={busy || !status?.supported || Boolean(error)} /></PanelSectionRow>
+      <StackedAction title={status?.mode === "manual" ? "Apply Manual Speed" : "Enable Manual Control"} description="Companion checks the result and restores Auto if manual control is interrupted." disabled={busy || !status?.supported || Boolean(error) || (status.mode === "manual" && status.percent === draft)} onClick={() => onApply("manual", desiredDraft.current)}>{busy ? <Spinner /> : `Apply ${draft}%`}</StackedAction>
     </PanelSection>}
   </>;
 };

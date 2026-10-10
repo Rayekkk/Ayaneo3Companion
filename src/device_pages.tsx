@@ -24,8 +24,9 @@ export const VibrationPage: FC<{
   onGain(value: number): void;
   onTest(): void;
 }> = ({ state, busy, testing, onLevel, onGain, onTest }) => <PanelSection title="Vibration">
-  <PanelSectionRow><SliderField label={`Firmware Strength · ${titleCase(state.controller.vibration)}`} description="Off · Low · Medium · High" value={vibrationLevels.indexOf(state.controller.vibration)} min={0} max={3} step={1} notchCount={4} notchTicksVisible validValues="steps" minimumDpadGranularity={1} showValue={false} onChange={onLevel} /></PanelSectionRow>
-  <PanelSectionRow><SliderField label="FF Gain" description="Scales force-feedback effects from games and vibration tests." value={state.controller.ff_gain} min={0} max={100} step={10} notchCount={11} notchTicksVisible validValues="steps" minimumDpadGranularity={10} showValue valueSuffix="%" onChange={onGain} /></PanelSectionRow>
+  {state.controller_error && <PanelSectionRow><Field label="Controller control unavailable" description={state.controller_error} /></PanelSectionRow>}
+  <PanelSectionRow><SliderField label={`Firmware Strength · ${titleCase(state.controller.vibration)}`} disabled={busy || state.controller_supported === false} description="Off · Low · Medium · High" value={vibrationLevels.indexOf(state.controller.vibration)} min={0} max={3} step={1} notchCount={4} notchTicksVisible validValues="steps" minimumDpadGranularity={1} showValue={false} onChange={onLevel} /></PanelSectionRow>
+  <PanelSectionRow><SliderField label="FF Gain" description="Scales force-feedback effects from games and vibration tests." value={state.controller.ff_gain} min={0} max={100} step={10} notchCount={11} notchTicksVisible validValues="steps" minimumDpadGranularity={10} showValue valueSuffix="%" onChange={onGain} disabled={busy} /></PanelSectionRow>
   <StackedAction title="Test Vibration" description="Play a short 500 ms rumble pulse." disabled={busy || state.controller.vibration === "off" || state.controller.ff_gain === 0} onClick={onTest}>{testing ? <Spinner /> : "Test"}</StackedAction>
   <PanelSectionRow><Field focusable label="Two-stage control" description="Firmware Strength selects the controller's base level; FF Gain scales Linux force-feedback effects from 0 to 100%." /></PanelSectionRow>
 </PanelSection>;
@@ -61,6 +62,7 @@ export const MagicModulesPage: FC<{
   onEject(side: "left" | "right" | "both"): void;
   onReset(): void;
 }> = ({ state, busy, pending, onEject, onReset }) => <>
+  {state.controller_error && <PanelSectionRow><Field label="Controller control unavailable" description={state.controller_error} /></PanelSectionRow>}
   <PanelSection title="Installed Modules">
     <PanelSectionRow><Field focusable label={`Left · ${state.module_left.label}`} description={[state.module_left.layout, state.module_left.code == null ? "" : `Module ID 0x${state.module_left.code.toString(16).toUpperCase().padStart(2, "0")}`].filter(Boolean).join(" · ")} /></PanelSectionRow>
     <PanelSectionRow><Field focusable label={`Right · ${state.module_right.label}`} description={[state.module_right.layout, state.module_right.code == null ? "" : `Module ID 0x${state.module_right.code.toString(16).toUpperCase().padStart(2, "0")}`].filter(Boolean).join(" · ")} /></PanelSectionRow>
@@ -83,8 +85,8 @@ export const AudioPage: FC<{
   onRecalibrate(): void;
 }> = ({ state, busy, pending, onEnabled, onReapply, onRecalibrate }) => <>
   <PanelSection title="Smart Amp Tuning">
-    <PanelSectionRow><ToggleField label="AYANEO Speaker Tuning" description={state.audio_fix_supported ? "Load the official AYANEO 3 profile for both CS35L41 smart amplifiers." : "The required SteamOS firmware or CS35L41 controls are unavailable."} checked={state.audio_fix_enabled} disabled={busy || !state.audio_fix_supported} onChange={onEnabled} /></PanelSectionRow>
-    <PanelSectionRow><Field focusable label={state.audio_fix_installed ? state.audio_profile : state.audio_profile === "Pending" ? "Applying..." : "Not applied"} description={state.audio_fix_error || (state.audio_fix_installed ? "Both speaker DSPs use the device-specific v0.65 tuning." : "SteamOS is using the generic Cirrus speaker profile.")} /></PanelSectionRow>
+    <PanelSectionRow><ToggleField label="AYANEO Speaker Tuning" description={state.audio_fix_supported ? "Load the official AYANEO 3 profile for both CS35L41 smart amplifiers." : state.audio_profile === "Checking" || state.audio_profile === "Pending" ? "Waiting for the SteamOS speaker controls." : "The required SteamOS firmware or CS35L41 controls are unavailable."} checked={state.audio_fix_enabled} disabled={busy || !state.audio_fix_supported} onChange={onEnabled} /></PanelSectionRow>
+    <PanelSectionRow><Field focusable label={state.audio_fix_installed ? state.audio_profile : state.audio_profile === "Pending" ? "Applying..." : "Not applied"} description={state.audio_fix_error || (state.audio_profile === "AYANEO v0.65" ? "Both speaker DSPs use the device-specific v0.65 tuning." : state.audio_profile === "Pending" || state.audio_profile === "Checking" ? "Waiting to verify the speaker profile." : state.audio_fix_installed ? "Tuning is installed, but the active speaker profile has not been confirmed." : "SteamOS is using the generic Cirrus speaker profile.")} /></PanelSectionRow>
     <StackedAction title="Reapply Audio Fix" description="Reload the tuning if audio was reset by the system." disabled={busy || !state.audio_fix_enabled || !state.audio_fix_supported} onClick={onReapply}>{pending ? <Spinner /> : "Apply"}</StackedAction>
   </PanelSection>
   {state.audio_calibration_available && <PanelSection title="Speaker Calibration">
@@ -99,7 +101,8 @@ export const ButtonsPage: FC<{
   onButtonFix(enabled: boolean): void;
   onTmGuard(enabled: boolean): void;
 }> = ({ state, busy, onButtonFix, onTmGuard }) => <PanelSection title="Controller Buttons">
-  <PanelSectionRow><ToggleField label="Fix Key Binding" description="Program LC1/RC1 as L5/R5 while preserving native LC/RC as L4/R4. Menu/QAM variants are detected automatically." checked={state.button_fix_installed} disabled={busy} onChange={onButtonFix} /></PanelSectionRow>
+  {state.controller_error && <PanelSectionRow><Field label="Controller control unavailable" description={state.controller_error} /></PanelSectionRow>}
+  <PanelSectionRow><ToggleField label="Fix Key Binding" description="Program LC1/RC1 as L5/R5 while preserving native LC/RC as L4/R4. Menu/QAM variants are detected automatically." checked={state.button_fix_installed} disabled={busy || state.controller_supported === false} onChange={onButtonFix} /></PanelSectionRow>
   <PanelSectionRow><ToggleField label="TM Guard" description="Return the controller to custom gamepad mode after an accidental TM press." checked={state.tm_guard_enabled} disabled={busy} onChange={onTmGuard} /></PanelSectionRow>
   <PanelSectionRow><Field focusable label={state.tm_guard_status} description={state.tm_guard_recoveries ? `Recovered ${state.tm_guard_recoveries} TM mode change${state.tm_guard_recoveries === 1 ? "" : "s"} since plugin start.` : "The physical TM button remains available when TM Guard is disabled."} /></PanelSectionRow>
 </PanelSection>;
