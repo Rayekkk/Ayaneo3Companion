@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Boot recovery and ayaneo-ec ABI regressions, with no device access."""
+import asyncio
 from contextlib import ExitStack
 import os
 from pathlib import Path
@@ -98,6 +99,44 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.Plugin._state["button_fix_installed"])
         self.assertTrue(self.store.getSetting("screen_fix_enabled"))
         self.assertTrue(self.store.getSetting("button_fix_enabled"))
+
+    async def _start_restore_flag(self):
+        """Run _start with its monitors stubbed; return _restore_hardware's argument."""
+        self.plugin._closing = False
+        tasks = ("_restore_task", "_edid_task", "_ac_task", "_charge_task", "_module_task",
+                 "_tm_guard_task", "_vibration_gain_task", "_audio_task")
+        for name in tasks:
+            self.stack.enter_context(mock.patch.object(main.Plugin, name, None))
+        loops = {name: self.stack.enter_context(mock.patch.object(self.plugin, name, new=mock.AsyncMock()))
+                 for name in ("_restore_hardware", "_edid_loop", "_ac_loop", "_charge_loop",
+                              "_module_loop", "_tm_guard_loop", "_vibration_gain_loop", "_restore_audio")}
+        await self.plugin._start()
+        await asyncio.gather(*(getattr(main.Plugin, name) for name in tasks))
+        loops["_restore_hardware"].assert_awaited_once()
+        return loops["_restore_hardware"].await_args.args[0]
+
+    async def test_reinstalled_key_binding_also_reprograms_rear_buttons(self):
+        # Uninstall removed both the map and the LC1/RC1 firmware slots.
+        self.store.replace({"button_fix_enabled": True})
+        self.assertTrue(await self._start_restore_flag())
+
+    async def test_current_key_binding_leaves_firmware_slots_alone(self):
+        self.store.replace({"button_fix_enabled": True})
+        self._install_mapping()
+        self.assertFalse(await self._start_restore_flag())
+
+    async def test_rear_button_restore_follows_latest_choice(self):
+        controller = dict(main.DEFAULT_CONTROLLER)
+        for installed, calls in ((True, [mock.call(True, controller)]), (False, [])):
+            with self.subTest(installed=installed):
+                main.Plugin._state = {"tdp": dict(main.DEFAULT_TDP), "controller": controller,
+                                      "button_fix_installed": installed}
+                with mock.patch.object(main.asyncio, "sleep", new=mock.AsyncMock()), \
+                     mock.patch.object(main.Plugin, "_reapply_current_tdp"), \
+                     mock.patch.object(main.Plugin, "_restore_current_controller"), \
+                     mock.patch.object(main, "program_rear_buttons") as program:
+                    await self.plugin._restore_hardware(True)
+                self.assertEqual(program.call_args_list, calls)
 
     async def test_disabled_or_never_selected_fixes_stay_off(self):
         for preferences in ({}, {"screen_fix_enabled": False, "button_fix_enabled": False}):

@@ -222,5 +222,18 @@ class FanBackendTests(unittest.TestCase):
         self.assertEqual((self.device / "pwm1_enable").read_text().strip(), "2")
 
 
+class GuardCommandEnvironmentTests(unittest.TestCase):
+    def test_systemd_tools_run_without_decky_library_overrides(self):
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/decky", "LD_PRELOAD": "x.so",
+                                          "PATH": "/usr/bin"}), \
+             mock.patch.object(fan_backend.subprocess, "run", return_value=done) as run:
+            fan_backend.FanController()._run(["/usr/bin/systemctl", "status"])
+        env = run.call_args.kwargs["env"]
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+        self.assertNotIn("LD_PRELOAD", env)
+        self.assertEqual(env["PATH"], "/usr/bin")
+
+
 if __name__ == "__main__":
     unittest.main()

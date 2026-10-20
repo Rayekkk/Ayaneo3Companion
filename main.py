@@ -1040,7 +1040,7 @@ def _upower_time_to_full(battery_name: str) -> int | None:
         "busctl", "--system", "get-property", "org.freedesktop.UPower",
         f"/org/freedesktop/UPower/devices/battery_{battery_name}",
         "org.freedesktop.UPower.Device", "TimeToFull",
-    ], capture_output=True, text=True, timeout=3)
+    ], capture_output=True, text=True, timeout=3, env=_clean_subprocess_env())
     if result.returncode:
         return None
     try:
@@ -2716,6 +2716,18 @@ class Plugin:
             return controller
 
     @classmethod
+    def _restore_rear_buttons(cls):
+        """Program LC1/RC1 for the newest key-binding choice after a reinstall."""
+        with _controller_apply_lock:
+            with _lock:
+                if cls._state.get("modules_reconnecting"):
+                    raise RuntimeError("Waiting for the requested module operation")
+                if not cls._state.get("button_fix_installed"):
+                    return
+                controller = dict(cls._state["controller"])
+            program_rear_buttons(True, controller)
+
+    @classmethod
     def _restore_current_vibration_gain(cls):
         with _controller_apply_lock:
             with _lock:
@@ -3410,9 +3422,11 @@ class Plugin:
                         Plugin._state["tm_guard_status"] = "Custom mode restored"
         return self._copy_state()
 
-    async def _restore_hardware(self):
+    async def _restore_hardware(self, rear_buttons=False):
         """Retry pending boot work; each attempt reads the latest saved choices."""
         pending = {"tdp", "controller"}
+        if rear_buttons:
+            pending.add("rear_buttons")
         for key in ("charge_bypass", "cpu_boost"):
             if type(settings.getSetting(key, None)) is bool:
                 pending.add(key)
@@ -3426,6 +3440,8 @@ class Plugin:
                         await self._offload(Plugin._reapply_current_tdp)
                     elif key == "controller":
                         await self._offload(Plugin._restore_current_controller)
+                    elif key == "rear_buttons":
+                        await self._offload(Plugin._restore_rear_buttons)
                     else:
                         await self._offload(self._restore_saved_control, key)
                     pending.remove(key)
@@ -3923,12 +3939,16 @@ class Plugin:
         saved_button_fix = settings.getSetting("button_fix_enabled", None)
         desired_button_fix = (saved_button_fix if type(saved_button_fix) is bool
                               else existing_key_binding)
+        reprogram_rear_buttons = False
         if hardware_allowed and desired_button_fix:
             try:
                 if not await self._offload(button_fix_installed) or any(
                         button_map_owned(path) for path in (
                             *LEGACY_INPUT_MAP_TARGETS, LEGACY_INPUT_DEVICE_TARGET)):
                     await self._offload(install_button_fix)
+                    # Uninstall clears the LC1/RC1 firmware slots together with
+                    # this map, so a reinstalled map also needs its firmware half.
+                    reprogram_rear_buttons = True
                     await self._offload(_systemctl, "restart", "inputplumber", check=True)
             except Exception as error:
                 decky.logger.warning(f"{LOG} key-binding restoration failed: {error}")
@@ -4033,7 +4053,8 @@ class Plugin:
             Plugin._active_app = ""
         self._schedule_tdp_diagnostic()
         if hardware_allowed and not self._closing:
-            Plugin._restore_task = asyncio.create_task(self._restore_hardware())
+            Plugin._restore_task = asyncio.create_task(
+                self._restore_hardware(reprogram_rear_buttons))
             Plugin._edid_task = asyncio.create_task(self._edid_loop())
             Plugin._ac_task = asyncio.create_task(self._ac_loop())
             Plugin._charge_task = asyncio.create_task(self._charge_loop())

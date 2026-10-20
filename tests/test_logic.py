@@ -16,6 +16,13 @@ def controller_report(config):
     return bytes(response)
 
 class LogicTests(unittest.TestCase):
+    def test_upower_query_runs_without_decky_library_overrides(self):
+        done = main.subprocess.CompletedProcess([], 0, "x 5869\n", "")
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/decky"}), \
+             mock.patch.object(main.subprocess, "run", return_value=done) as run:
+            self.assertEqual(main._upower_time_to_full("BAT0"), 5869)
+        self.assertNotIn("LD_LIBRARY_PATH", run.call_args.kwargs["env"])
+
     def test_battery_status_uses_upower_time_to_full(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
