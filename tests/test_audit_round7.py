@@ -9,6 +9,10 @@ from unittest.mock import patch
 
 import test_logic
 import main
+import power_backend
+import controller_backend
+import ec_backend
+import companion_common
 from safe_settings import SettingsManager
 
 
@@ -18,20 +22,20 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         directory = self.stack.enter_context(tempfile.TemporaryDirectory())
         self.store = SettingsManager("settings", directory)
-        self.store.replace({"charge_bypass": False, "controller": main.DEFAULT_CONTROLLER})
-        self.state = {"supported": True, "controller": dict(main.DEFAULT_CONTROLLER),
-                      "tdp": dict(main.DEFAULT_TDP), "charge_bypass": False,
+        self.store.replace({"charge_bypass": False, "controller": controller_backend.DEFAULT_CONTROLLER})
+        self.state = {"supported": True, "controller": dict(controller_backend.DEFAULT_CONTROLLER),
+                      "tdp": dict(power_backend.DEFAULT_TDP), "charge_bypass": False,
                       "charge_bypass_supported": True}
         self.stack.enter_context(patch.object(main, "settings", self.store))
         self.stack.enter_context(patch.object(main.Plugin, "_state", self.state))
         self.stack.enter_context(patch.object(main.Plugin, "_active_app", "222"))
-        self.stack.enter_context(patch.object(main, "supported_device", return_value=True))
+        self.stack.enter_context(patch.object(companion_common, "supported_device", return_value=True))
         self.hardware_charge = False
         self.charge_writes = []
-        self.stack.enter_context(patch.object(main, "read_charge_bypass", side_effect=lambda: self.hardware_charge))
-        self.stack.enter_context(patch.object(main, "write_charge_bypass", side_effect=self.write_charge))
-        self.stack.enter_context(patch.object(main, "apply_controller"))
-        self.stack.enter_context(patch.object(main, "set_vibration_gain"))
+        self.stack.enter_context(patch.object(ec_backend, "read_charge_bypass", side_effect=lambda: self.hardware_charge))
+        self.stack.enter_context(patch.object(ec_backend, "write_charge_bypass", side_effect=self.write_charge))
+        self.stack.enter_context(patch.object(controller_backend, "apply_controller"))
+        self.stack.enter_context(patch.object(controller_backend, "set_vibration_gain"))
         self.plugin = main.Plugin()
 
     def write_charge(self, enabled):
@@ -53,7 +57,7 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))
             tasks.append(asyncio.create_task(self.plugin.set_charge_bypass(True)))
             tasks.append(asyncio.create_task(self.plugin.set_controller(
-                {**main.DEFAULT_CONTROLLER, "brightness": 40})))
+                {**controller_backend.DEFAULT_CONTROLLER, "brightness": 40})))
             done, _ = await asyncio.wait(tasks[1:], timeout=0.25)
             acknowledged = len(done)
         finally:
@@ -65,7 +69,7 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.getSetting("charge_bypass"))
 
     async def test_charge_drift_recovery_does_not_wait_for_tdp_transaction(self):
-        self.store.replace({"charge_bypass": True, "controller": main.DEFAULT_CONTROLLER})
+        self.store.replace({"charge_bypass": True, "controller": controller_backend.DEFAULT_CONTROLLER})
         entered, release = threading.Event(), threading.Event()
         tasks = [asyncio.create_task(self.held_tdp(entered, release))]
         try:
@@ -88,7 +92,7 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))
             tasks.append(asyncio.create_task(self.plugin.set_active_app("222")))
             tasks.append(asyncio.create_task(self.plugin.set_controller(
-                {**main.DEFAULT_CONTROLLER, "brightness": 40})))
+                {**controller_backend.DEFAULT_CONTROLLER, "brightness": 40})))
             done, _ = await asyncio.wait(tasks[1:], timeout=0.25)
             acknowledged = len(done)
         finally:
@@ -106,7 +110,7 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
             if not release.wait(3):
                 raise TimeoutError("test failed to release charge write")
         tasks = []
-        with patch.object(main, "write_charge_bypass", side_effect=delayed_write):
+        with patch.object(ec_backend, "write_charge_bypass", side_effect=delayed_write):
             try:
                 tasks.append(asyncio.create_task(self.plugin.set_charge_bypass(True)))
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))

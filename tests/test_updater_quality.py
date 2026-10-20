@@ -104,14 +104,6 @@ class UpdateChecks(_UpdateFixture):
         self.assertIsInstance(result["checked_at"], float)
         self.assertNotIn("sha256", result)  # Download trusts only backend-owned metadata.
 
-    def test_original_no_argument_download_latest_api_uses_verified_backend_metadata(self):
-        with patch.object(self.updater, "_metadata", return_value=metadata()), \
-                patch.object(self.updater, "_save", return_value="/home/user/Downloads/update.zip") as save:
-            result = self.updater.download_latest()
-        self.assertTrue(result["success"], result)
-        self.assertEqual(result["version"], NEW)
-        self.assertEqual(save.call_args.args[0]["sha256"], metadata()["assets"][0]["digest"][7:])
-
     def test_reset_after_unload_discards_old_metadata_and_reopens_network(self):
         with patch.object(self.updater, "_metadata", return_value=metadata()) as request:
             self.updater.check()

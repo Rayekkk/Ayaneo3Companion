@@ -7,7 +7,11 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import test_responsiveness
+from _harness import owner
 import main
+import power_backend
+import controller_backend
+import companion_common
 
 
 class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
@@ -25,8 +29,8 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
         expected = {**previous, "brightness": 40}
         self.assertEqual(response["controller"], expected)
         self.assertEqual(self.store.getSetting("controller"), expected)
-        main.apply_controller.assert_called_once_with(expected)
-        main.set_vibration_gain.assert_not_called()
+        controller_backend.apply_controller.assert_called_once_with(expected)
+        controller_backend.set_vibration_gain.assert_not_called()
 
     async def test_partial_feedback_and_gain_commit_preserves_rgb(self):
         previous = {**self.controller, "color": "00ff00", "brightness": 40}
@@ -35,8 +39,8 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
             {"vibration": "low", "ff_gain": 20})
         expected = {**previous, "vibration": "low", "ff_gain": 20}
         self.assertEqual(response["controller"], expected)
-        main.apply_controller.assert_called_once_with(expected, True, previous["vibration"], False)
-        main.set_vibration_gain.assert_called_once_with(20)
+        controller_backend.apply_controller.assert_called_once_with(expected, True, previous["vibration"], False)
+        controller_backend.set_vibration_gain.assert_called_once_with(20)
 
     async def test_queued_patch_merges_after_earlier_write_commits(self):
         entered, release = threading.Event(), threading.Event()
@@ -46,7 +50,7 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
                 if not release.wait(3):
                     raise TimeoutError("test did not release controller write")
         tasks = []
-        with patch.object(main, "apply_controller", side_effect=apply):
+        with patch.object(controller_backend, "apply_controller", side_effect=apply):
             try:
                 tasks.append(asyncio.create_task(self.plugin.set_controller({"color": "00ff00"})))
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
@@ -66,8 +70,8 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
                 await self.plugin.set_controller({"brightness": 40, "ff_gain": 20})
         self.assertEqual(self.state["controller"], previous)
         self.assertEqual(self.store.getSetting("controller"), previous)
-        self.assertEqual(main.apply_controller.call_args.args[0], previous)
-        self.assertEqual([call.args[0] for call in main.set_vibration_gain.call_args_list], [20, 30])
+        self.assertEqual(controller_backend.apply_controller.call_args.args[0], previous)
+        self.assertEqual([call.args[0] for call in controller_backend.set_vibration_gain.call_args_list], [20, 30])
 
     async def test_status_returns_while_service_probe_runs_and_coalesces_polling(self):
         entered, release = threading.Event(), threading.Event()
@@ -77,7 +81,7 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError("test did not release diagnostic")
             return {"tdp_backend": "PowerStation", "tdp_supported": False, "tdp_error": "ownership"}
         tasks = []
-        with patch.object(main, "tdp_capabilities", side_effect=probe) as capability:
+        with patch.object(power_backend, "tdp_capabilities", side_effect=probe) as capability:
             try:
                 tasks.append(asyncio.create_task(self.plugin.get_state()))
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
@@ -107,11 +111,11 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError("test did not release diagnostic")
             return {"tdp_backend": "PowerStation", "tdp_supported": False, "tdp_error": "stale ownership"}
         tasks = []
-        with patch.object(main, "tdp_capabilities", side_effect=probe), patch.object(main, "apply_tdp"):
+        with patch.object(power_backend, "tdp_capabilities", side_effect=probe), patch.object(power_backend, "apply_tdp"):
             try:
                 tasks.append(asyncio.create_task(self.plugin.get_state()))
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                await self.plugin.set_tdp(main.PRESETS["Max"], "Max", "111")
+                await self.plugin.set_tdp(power_backend.PRESETS["Max"], "Max", "111")
             finally:
                 release.set()
                 await asyncio.wait_for(asyncio.gather(*tasks), 3)
@@ -127,7 +131,7 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
             {"tdp_backend": "PowerStation", "tdp_supported": False, "tdp_error": "ownership"},
             {"tdp_backend": "RyzenAdj", "tdp_supported": True, "tdp_error": ""},
         ]
-        with patch.object(main, "tdp_capabilities", side_effect=observations) as probe:
+        with patch.object(power_backend, "tdp_capabilities", side_effect=observations) as probe:
             await self.plugin.get_state()
             await self.plugin._tdp_diagnostic_task
             cached = await self.plugin.get_state()
@@ -153,12 +157,12 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
             write_entered.set()
             if not write_release.wait(3):
                 raise TimeoutError("test did not release TDP write")
-        with patch.object(main, "tdp_capabilities", side_effect=probe), patch.object(main, "apply_tdp", side_effect=apply):
+        with patch.object(power_backend, "tdp_capabilities", side_effect=probe), patch.object(power_backend, "apply_tdp", side_effect=apply):
             writing = None
             try:
                 await self.plugin.get_state()
                 self.assertTrue(await asyncio.to_thread(probe_entered.wait, 2))
-                writing = asyncio.create_task(self.plugin.set_tdp(main.PRESETS["Max"], "Max", "111"))
+                writing = asyncio.create_task(self.plugin.set_tdp(power_backend.PRESETS["Max"], "Max", "111"))
                 self.assertTrue(await asyncio.to_thread(write_entered.wait, 2))
                 probe_release.set()
                 await self.plugin._tdp_diagnostic_task
@@ -180,7 +184,7 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
             if not release.wait(3):
                 raise TimeoutError("test did not release diagnostic")
             return {"tdp_backend": "PowerStation", "tdp_supported": False, "tdp_error": "old lifetime"}
-        with patch.object(main, "tdp_capabilities", side_effect=probe):
+        with patch.object(power_backend, "tdp_capabilities", side_effect=probe):
             try:
                 await self.plugin.get_state()
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
@@ -199,9 +203,9 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
             if not release.wait(3):
                 raise TimeoutError("test did not release diagnostic")
             return {"tdp_backend": "PowerStation", "tdp_supported": False, "tdp_error": "late result"}
-        with patch.object(main, "tdp_capabilities", side_effect=probe), \
+        with patch.object(power_backend, "tdp_capabilities", side_effect=probe), \
              patch.object(main.fan_controller, "close"), \
-             patch.object(main, "supported_device", return_value=False):
+             patch.object(companion_common, "supported_device", return_value=False):
             try:
                 await self.plugin.get_state()
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
@@ -230,16 +234,16 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
         for name in ("_restore_hardware", "_edid_loop", "_ac_loop", "_charge_loop", "_module_loop",
                      "_tm_guard_loop", "_vibration_gain_loop", "_restore_audio"):
             self.stack.enter_context(patch.object(main.Plugin, name, new=AsyncMock()))
-        for name, value in (("_dmi", "AYANEO 3 isolated fixture"), ("button_map_owned", False),
-                            ("_display_script_owned", False), ("ensure_charge_control", None),
+        for name, value in (("dmi", "AYANEO 3 isolated fixture"), ("button_map_owned", False),
+                            ("display_script_owned", False), ("ensure_charge_control", None),
                             ("ensure_charge_bypass_control", None), ("audio_fix_installed", False),
                             ("audio_fix_ready", False), ("audio_fix_supported", False)):
-            self.stack.enter_context(patch.object(main, name, return_value=value))
+            self.stack.enter_context(patch.object(owner(name), name, return_value=value))
         self.stack.enter_context(patch.object(main.fan_controller, "recover_abandoned"))
         self.stack.enter_context(patch.object(main.fan_controller, "close"))
-        self.stack.enter_context(patch.object(main, "updater", types.SimpleNamespace(
+        self.stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(
             reset=Mock(), close=Mock(), ssl_context=Mock(), plugin_version=Mock(return_value="1.2.0"))))
-        with patch.object(main, "tdp_capabilities", side_effect=probe):
+        with patch.object(power_backend, "tdp_capabilities", side_effect=probe):
             try:
                 starting = asyncio.create_task(self.plugin._main())
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
@@ -249,7 +253,7 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 await asyncio.wait_for(starting, 3)
-                with patch.object(main, "supported_device", return_value=False):
+                with patch.object(companion_common, "supported_device", return_value=False):
                     await self.plugin._unload()
         self.assertTrue(started_early, "initial CPU and controller controls must not wait for PowerStation")
         self.assertFalse(initial["initializing"])
@@ -258,7 +262,7 @@ class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsupported_device_never_schedules_ownership_probe(self):
         self.state["supported"] = False
-        with patch.object(main, "tdp_capabilities") as probe:
+        with patch.object(power_backend, "tdp_capabilities") as probe:
             response = await self.plugin.get_state()
         self.assertFalse(response["tdp_supported"])
         probe.assert_not_called()

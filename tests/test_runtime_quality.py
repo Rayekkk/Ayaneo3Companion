@@ -14,10 +14,13 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from _harness import owner
 if "main" not in sys.modules:
     from _harness import install
     install()
 import main
+import controller_backend
+import companion_common
 import safe_settings
 
 
@@ -37,7 +40,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         for name in TASK_NAMES:
             setattr(main.Plugin, name, None)
         self.store = safe_settings.SettingsManager("settings", self.temp.name)
-        self.controller = copy.deepcopy(main.DEFAULT_CONTROLLER)
+        self.controller = copy.deepcopy(controller_backend.DEFAULT_CONTROLLER)
         self.store.replace({"tdp": BASE_TDP, "tdp_preset": "Custom",
                             "controller": self.controller, "cpu_boost": False,
                             "charge_bypass": False, "game_profiles": {}})
@@ -48,7 +51,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         self.patchers = []
 
         def patch(name, **kwargs):
-            patcher = mock.patch.object(main, name, **kwargs)
+            patcher = mock.patch.object(owner(name), name, **kwargs)
             result = patcher.start()
             self.patchers.append(patcher)
             return result
@@ -69,8 +72,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         patch("updater", new=types.SimpleNamespace(
             reset=mock.Mock(), close=mock.Mock(), ssl_context=mock.Mock(return_value=None),
             plugin_version=mock.Mock(return_value="1.0.2"),
-            check=mock.Mock(return_value={"current_version": "1.0.2", "update_available": False}),
-            download_latest=mock.Mock(return_value={"success": False})))
+            check=mock.Mock(return_value={"current_version": "1.0.2", "update_available": False})))
         main.Plugin._state = {
             "supported": True, "initializing": False, "startup_error": "",
             "tdp_backend": "RyzenAdj", "tdp_supported": True, "tdp_error": "",
@@ -210,13 +212,13 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             attempts.append(value)
             if len(attempts) == 1:
                 raise OSError("controller disappeared after first packet")
-        with mock.patch.object(main, "apply_controller", side_effect=apply), self.assertRaisesRegex(RuntimeError, "restored"):
+        with mock.patch.object(controller_backend, "apply_controller", side_effect=apply), self.assertRaisesRegex(RuntimeError, "restored"):
             await self.plugin.set_controller(wanted)
         self.assert_restored(before)
 
     async def test_failed_hardware_rollback_is_reported_without_claiming_success(self):
         disk = self.store.data
-        with mock.patch.object(main, "apply_controller", side_effect=OSError("disconnected")), \
+        with mock.patch.object(controller_backend, "apply_controller", side_effect=OSError("disconnected")), \
                 self.assertRaisesRegex(RuntimeError, "hardware rollback failed"):
             await self.plugin.set_controller({**self.controller, "brightness": 25})
         self.assertEqual(self.store.data, disk)
@@ -284,7 +286,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.getSetting("cpu_boost"))
         self.assertFalse(self.plugin._rpc_jobs)
         self.assertFalse(self.plugin._workers)
-        self.assertEqual(main.updater.close.call_count, 1)
+        self.assertEqual(companion_common.updater.close.call_count, 1)
 
     async def test_shutdown_rejects_queued_write_but_drains_admitted_transaction(self):
         entered, release = self.blocking_boost_write()
@@ -312,7 +314,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "shutting down"):
                 await operation()
         self.assert_restored(before)
-        main.updater.check.assert_not_called()
+        companion_common.updater.check.assert_not_called()
         self.assertEqual(self.writes, [])
 
     async def test_unload_during_startup_drains_worker_and_never_leaves_late_monitors(self):
@@ -346,10 +348,10 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         Path(self.store.path).write_text("{broken", encoding="utf-8")
         Path(self.store.backup_path).write_text("[]", encoding="utf-8")
         self.snapshot_patcher.stop()
-        self.patch("_dmi", return_value="AYANEO 3 isolated fixture")
+        self.patch("dmi", return_value="AYANEO 3 isolated fixture")
         self.patch("button_map_owned", return_value=False)
-        self.patch("_display_script_owned", return_value=False)
-        self.patch("_display_script_conflict", return_value=False)
+        self.patch("display_script_owned", return_value=False)
+        self.patch("display_script_conflict", return_value=False)
         forbidden = ["ensure_charge_control", "ensure_charge_bypass_control", "audio_fix_installed",
                      "audio_fix_ready", "audio_fix_supported", "tdp_backend", "gpu_power_watts",
                      "install_button_fix", "install_display_script", "apply_audio_fix"]

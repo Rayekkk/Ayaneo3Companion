@@ -8,7 +8,10 @@ import unittest
 from unittest.mock import MagicMock, Mock, patch
 
 import test_responsiveness
+from _harness import owner
 import main
+import power_backend
+import ec_backend
 import safe_settings
 
 
@@ -64,10 +67,10 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["mode"], "auto")
 
     async def test_game_profile_waits_in_worker_without_stopping_loop(self):
-        self.store.replace({"game_profiles": {"111": {**main.PRESETS["Max"], "preset": "Max"}}})
+        self.store.replace({"game_profiles": {"111": {**power_backend.PRESETS["Max"], "preset": "Max"}}})
         result = await self.assert_loop_responsive(lambda: self.plugin.get_game_profile("111"), False)
         self.assertTrue(result["exists"])
-        self.assertEqual(result["profile"], main.PRESETS["Max"])
+        self.assertEqual(result["profile"], power_backend.PRESETS["Max"])
 
     async def test_state_refresh_does_not_block_loop_when_scheduling_diagnostic(self):
         result = await self.assert_loop_responsive(self.plugin.get_state, False)
@@ -82,16 +85,16 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
 
     async def assert_ownership_failure(self, results, expected_calls):
         with patch.object(main.subprocess, "run", side_effect=results) as command, \
-             patch.object(main, "_ensure_ryzenadj") as ensure, \
-             patch.object(main, "write_cpu_boost") as boost:
-            with self.assertRaises(main.TdpUnavailableError):
-                await self.plugin.set_tdp(main.PRESETS["Max"], "Max", "111")
+             patch.object(power_backend, "_ensure_ryzenadj") as ensure, \
+             patch.object(power_backend, "write_cpu_boost") as boost:
+            with self.assertRaises(power_backend.TdpUnavailableError):
+                await self.plugin.set_tdp(power_backend.PRESETS["Max"], "Max", "111")
         self.assertEqual(command.call_count, expected_calls, "a pre-write probe failure must not attempt TDP rollback")
         ensure.assert_not_called()
         boost.assert_not_called()
         self.assertEqual(self.state["tdp_backend"], "Unavailable")
         self.assertFalse(self.state["tdp_supported"])
-        self.assertEqual(self.state["tdp"], main.DEFAULT_TDP)
+        self.assertEqual(self.state["tdp"], power_backend.DEFAULT_TDP)
         self.assertIsNone(self.store.getSetting("tdp"))
 
     async def test_bus_probe_timeout_does_not_repeat_in_hardware_rollback(self):
@@ -120,10 +123,10 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(arguments[0], "systemctl")
             return types.SimpleNamespace(returncode=0, stdout="inactive\n")
         with patch.object(main.subprocess, "run", side_effect=command) as run, \
-             patch.object(main, "_ensure_ryzenadj") as ensure, \
-             patch.object(main, "write_cpu_boost") as boost:
-            with self.assertRaises(main.TdpUnavailableError):
-                await self.plugin.set_tdp(main.PRESETS["Max"], "Max", "111")
+             patch.object(power_backend, "_ensure_ryzenadj") as ensure, \
+             patch.object(power_backend, "write_cpu_boost") as boost:
+            with self.assertRaises(power_backend.TdpUnavailableError):
+                await self.plugin.set_tdp(power_backend.PRESETS["Max"], "Max", "111")
         self.assertEqual(run.call_count, 3)
         ensure.assert_called_once()
         boost.assert_not_called()
@@ -136,19 +139,19 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 return types.SimpleNamespace(returncode=1)
             if arguments[0] == "systemctl":
                 return types.SimpleNamespace(returncode=0, stdout="inactive\n")
-            self.assertEqual(arguments[0], str(main.RYZENADJ))
+            self.assertEqual(arguments[0], str(power_backend.RYZENADJ))
             writes.append(arguments)
             if len(writes) == 1:
                 raise main.subprocess.TimeoutExpired(arguments, 10)
             return types.SimpleNamespace(returncode=0)
         with patch.object(main.subprocess, "run", side_effect=command), \
-             patch.object(main, "_ensure_ryzenadj"), \
-             patch.object(main, "write_cpu_boost"):
+             patch.object(power_backend, "_ensure_ryzenadj"), \
+             patch.object(power_backend, "write_cpu_boost"):
             with self.assertRaisesRegex(RuntimeError, "previous hardware settings restored"):
-                await self.plugin.set_tdp(main.PRESETS["Max"], "Max", "111")
+                await self.plugin.set_tdp(power_backend.PRESETS["Max"], "Max", "111")
         self.assertEqual(len(writes), 2)
         self.assertIn("--stapm-limit=15000", writes[1])
-        self.assertEqual(self.state["tdp"], main.DEFAULT_TDP)
+        self.assertEqual(self.state["tdp"], power_backend.DEFAULT_TDP)
         self.assertIsNone(self.store.getSetting("tdp"))
 
 
@@ -160,41 +163,41 @@ class RawEcPowerTests(unittest.TestCase):
         self.path = Mock()
         self.path.open.return_value = self.ec
         for target, value in (("supported_device", True), ("ensure_charge_control", self.path)):
-            fixture = patch.object(main, target, return_value=value)
+            fixture = patch.object(owner(target), target, return_value=value)
             fixture.start()
             self.addCleanup(fixture.stop)
-        fixture = patch.object(main, "AYANEO_EC_ROOT", Mock(exists=Mock(return_value=False)))
+        fixture = patch.object(ec_backend, "AYANEO_EC_ROOT", Mock(exists=Mock(return_value=False)))
         fixture.start()
         self.addCleanup(fixture.stop)
-        self.on = bytes([main.EC_CONTROLLER_POWER_ON])
-        self.off = bytes([main.EC_CONTROLLER_POWER_OFF])
+        self.on = bytes([ec_backend.EC_CONTROLLER_POWER_ON])
+        self.off = bytes([ec_backend.EC_CONTROLLER_POWER_OFF])
 
     def test_raw_ec_power_write_requires_matching_readback(self):
         self.ec.read.side_effect = [self.off, self.on]
-        main.set_controller_power(True)
+        ec_backend.set_controller_power(True)
         self.assertEqual(self.ec.read.call_count, 2)
         self.ec.write.assert_called_once_with(self.on)
 
     def test_raw_ec_ignored_power_write_reports_failure_and_restores_previous(self):
         self.ec.read.side_effect = [self.on, self.on, self.on]
         with self.assertRaisesRegex(RuntimeError, "did not retain"):
-            main.set_controller_power(False)
+            ec_backend.set_controller_power(False)
         self.assertEqual([call.args[0] for call in self.ec.write.call_args_list], [self.off, self.on])
 
     def test_raw_ec_unreadable_previous_power_never_writes(self):
         self.ec.read.return_value = b""
         with self.assertRaisesRegex(RuntimeError, "could not read"):
-            main.set_controller_power(False)
+            ec_backend.set_controller_power(False)
         self.ec.write.assert_not_called()
 
     def test_raw_ec_failed_power_recovery_is_reported(self):
         self.ec.read.side_effect = [self.on, self.on, self.off]
         with self.assertRaisesRegex(RuntimeError, "recovery failed.*readback mismatch"):
-            main.set_controller_power(False)
+            ec_backend.set_controller_power(False)
 
     def test_raw_ec_power_rejects_non_boolean_before_write(self):
         with self.assertRaisesRegex(ValueError, "must be a boolean"):
-            main.set_controller_power(1)
+            ec_backend.set_controller_power(1)
         self.ec.write.assert_not_called()
 
 

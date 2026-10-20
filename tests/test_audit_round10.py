@@ -7,7 +7,10 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import test_responsiveness
+from _harness import owner
 import main
+import audio_backend
+import companion_common
 
 
 class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
@@ -21,14 +24,14 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         for name in ("_restore_hardware", "_edid_loop", "_ac_loop", "_charge_loop",
                      "_module_loop", "_tm_guard_loop", "_vibration_gain_loop", "_restore_audio"):
             self.stack.enter_context(patch.object(self.plugin, name, new=AsyncMock()))
-        for name, value in (("_dmi", "AYANEO 3 isolated fixture"), ("button_map_owned", False),
-                            ("_display_script_owned", False), ("ensure_controller_control", None),
+        for name, value in (("dmi", "AYANEO 3 isolated fixture"), ("button_map_owned", False),
+                            ("display_script_owned", False), ("ensure_controller_control", None),
                             ("ensure_charge_bypass_control", None), ("audio_fix_installed", True),
                             ("audio_fix_ready", True), ("audio_fix_supported", True)):
-            self.stack.enter_context(patch.object(main, name, return_value=value))
+            self.stack.enter_context(patch.object(owner(name), name, return_value=value))
         self.stack.enter_context(patch.object(main.fan_controller, "recover_abandoned"))
         self.stack.enter_context(patch.object(main.fan_controller, "close"))
-        self.stack.enter_context(patch.object(main, "updater", types.SimpleNamespace(
+        self.stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(
             reset=Mock(), close=Mock(), ssl_context=Mock(), plugin_version=Mock(return_value="1.2.0"))))
 
     async def assert_diagnostics_deferred(self, name, enabled):
@@ -40,16 +43,18 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
             if not release.wait(3):
                 raise TimeoutError("test did not release ALSA probe")
             return True
-        with patch.object(main, name, side_effect=probe):
+        with patch.object(owner(name), name, side_effect=probe):
             starting = asyncio.create_task(self.plugin._main())
             try:
-                done, _ = await asyncio.wait([starting], timeout=0.2)
+                # The probe stays blocked for up to 3 s, so finishing within 2 s
+                # proves startup did not wait for it without racing a busy host.
+                done, _ = await asyncio.wait([starting], timeout=2)
                 available = bool(done)
                 initial = main.Plugin._copy_state()
             finally:
                 release.set()
                 await asyncio.wait_for(starting, 3)
-                with patch.object(main, "supported_device", return_value=False):
+                with patch.object(companion_common, "supported_device", return_value=False):
                     await self.plugin._unload()
         self.assertTrue(available, "slow ALSA diagnostics must not delay unrelated hardware controls")
         self.assertFalse(initial["initializing"])
@@ -65,10 +70,10 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_audio_discovery_never_applies_tuning(self):
         self.state.update(audio_fix_enabled=False, audio_fix_supported=False)
-        with patch.object(main, "audio_fix_supported", return_value=True), \
-             patch.object(main, "audio_fix_installed", return_value=False), \
-             patch.object(main, "apply_audio_fix") as apply, \
-             patch.object(main, "audio_fix_ready") as ready:
+        with patch.object(audio_backend, "audio_fix_supported", return_value=True), \
+             patch.object(audio_backend, "audio_fix_installed", return_value=False), \
+             patch.object(audio_backend, "apply_audio_fix") as apply, \
+             patch.object(audio_backend, "audio_fix_ready") as ready:
             result = await self.plugin._offload(self.plugin._restore_audio_once)
         self.assertTrue(result)
         self.assertTrue(self.state["audio_fix_supported"])
@@ -78,9 +83,9 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_audio_discovery_retries_late_alsa(self):
         self.state.update(audio_fix_enabled=False, audio_fix_supported=False)
-        with patch.object(main, "audio_fix_supported", side_effect=[False, True]), \
-             patch.object(main, "audio_fix_installed", return_value=False), \
-             patch.object(main, "apply_audio_fix") as apply, \
+        with patch.object(audio_backend, "audio_fix_supported", side_effect=[False, True]), \
+             patch.object(audio_backend, "audio_fix_installed", return_value=False), \
+             patch.object(audio_backend, "apply_audio_fix") as apply, \
              patch.object(main.asyncio, "sleep", new=AsyncMock()):
             await self.plugin._restore_audio()
         self.assertTrue(self.state["audio_fix_supported"])
@@ -88,9 +93,9 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_tuning_keeps_supported_controls_available(self):
         self.state.update(audio_fix_enabled=True, audio_fix_supported=False)
-        with patch.object(main, "audio_fix_supported", return_value=True), \
-             patch.object(main, "audio_fix_ready", return_value=False), \
-             patch.object(main, "apply_audio_fix", side_effect=RuntimeError("audio is playing")):
+        with patch.object(audio_backend, "audio_fix_supported", return_value=True), \
+             patch.object(audio_backend, "audio_fix_ready", return_value=False), \
+             patch.object(audio_backend, "apply_audio_fix", side_effect=RuntimeError("audio is playing")):
             with self.assertRaisesRegex(RuntimeError, "audio is playing"):
                 await self.plugin._offload(self.plugin._restore_audio_once)
         self.assertTrue(self.state["audio_fix_supported"], "a user must still be able to disable retrying tuning")
@@ -100,8 +105,8 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         def probe():
             self.plugin._closing = True
             return True
-        with patch.object(main, "audio_fix_supported", side_effect=probe), \
-             patch.object(main, "audio_fix_installed", return_value=False):
+        with patch.object(audio_backend, "audio_fix_supported", side_effect=probe), \
+             patch.object(audio_backend, "audio_fix_installed", return_value=False):
             await self.plugin._offload(self.plugin._restore_audio_once)
         self.assertFalse(self.state["audio_fix_supported"])
 
@@ -111,8 +116,8 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         def probe():
             main.Plugin._state = newer
             return True
-        with patch.object(main, "audio_fix_supported", side_effect=probe), \
-             patch.object(main, "audio_fix_installed", return_value=False):
+        with patch.object(audio_backend, "audio_fix_supported", side_effect=probe), \
+             patch.object(audio_backend, "audio_fix_installed", return_value=False):
             await self.plugin._offload(self.plugin._restore_audio_once)
         self.assertFalse(newer["audio_fix_supported"])
 
@@ -121,9 +126,9 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         def probe():
             self.plugin._closing = True
             return False
-        with patch.object(main, "audio_fix_ready", side_effect=probe), \
-             patch.object(main, "audio_fix_supported", return_value=True), \
-             patch.object(main, "apply_audio_fix") as apply:
+        with patch.object(audio_backend, "audio_fix_ready", side_effect=probe), \
+             patch.object(audio_backend, "audio_fix_supported", return_value=True), \
+             patch.object(audio_backend, "apply_audio_fix") as apply:
             await self.plugin._offload(self.plugin._restore_audio_once)
         apply.assert_not_called()
 
@@ -146,8 +151,8 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main.asyncio, "sleep", side_effect=quick_retry), \
              patch.object(self.plugin, "_restore_audio_once", side_effect=failing_worker) as restore, \
              patch.object(main.fan_controller, "close"), \
-             patch.object(main, "supported_device", return_value=False), \
-             patch.object(main, "updater", types.SimpleNamespace(close=Mock())):
+             patch.object(companion_common, "supported_device", return_value=False), \
+             patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())):
             monitor = asyncio.create_task(self.plugin._restore_audio())
             main.Plugin._audio_task = monitor
             unloading = None

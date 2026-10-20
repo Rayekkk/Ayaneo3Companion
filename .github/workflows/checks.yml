@@ -90,7 +90,7 @@ jobs:
           required = {
               'plugin.json', 'package.json', 'package-lock.json', manifest['main'],
               manifest['bin'], 'LICENSE', 'NOTICE', 'safe_settings.py', 'quality_runtime.py',
-              'lego_updater.py', 'fan_backend.py', 'README.md', 'CHANGELOG.md', 'bootstrap.sh',
+              'lego_updater.py', 'fan_backend.py', 'input_backend.py', 'display_backend.py', 'audio_backend.py', 'power_backend.py', 'controller_backend.py', 'ec_backend.py', 'companion_common.py', 'README.md', 'CHANGELOG.md', 'bootstrap.sh',
               'bootstrap_installer.py',
               'Install AYANEO 3 Companion.desktop', 'assets/ayaneo.ayaneo3.oled.lua',
               'assets/ayaneo3-companion.yaml', 'THIRD_PARTY_LICENSES/decky-api-LGPL-2.1.txt',

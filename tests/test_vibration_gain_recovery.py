@@ -10,7 +10,11 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import test_logic  # Install the Decky import harness before loading the backend.
+from _harness import owner
 import main
+import power_backend
+import controller_backend
+import companion_common
 from safe_settings import SettingsManager
 
 
@@ -26,17 +30,17 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         directory = self.stack.enter_context(tempfile.TemporaryDirectory())
         self.store = SettingsManager("settings", directory)
-        self.state = {"supported": True, "controller": {**main.DEFAULT_CONTROLLER, "ff_gain": 60},
+        self.state = {"supported": True, "controller": {**controller_backend.DEFAULT_CONTROLLER, "ff_gain": 60},
                       "modules_connected": True, "modules_reconnecting": False,
                       "tm_guard_enabled": False, "tm_guard_recoveries": 0}
         self.store.replace({"controller": dict(self.state["controller"]), "audio_fix_enabled": False})
         self.stack.enter_context(patch.object(main, "settings", self.store))
         self.stack.enter_context(patch.object(main.Plugin, "_state", self.state))
-        self.stack.enter_context(patch.object(main, "supported_device", return_value=True))
+        self.stack.enter_context(patch.object(companion_common, "supported_device", return_value=True))
         self.stack.enter_context(patch.object(main, "_suspend_clock_offset", return_value=None))
-        self.hid = self.stack.enter_context(patch.object(main, "_vendor_hidraw",
+        self.hid = self.stack.enter_context(patch.object(controller_backend, "vendor_hidraw",
             side_effect=RuntimeError("kernel hid-ayaneo is active; direct commands are disabled")))
-        self.raw = self.stack.enter_context(patch.object(main, "_hid_exchange",
+        self.raw = self.stack.enter_context(patch.object(controller_backend, "_hid_exchange",
             side_effect=AssertionError("gain recovery must not issue raw HID commands")))
         self.hardware = {"gain": 100}
         self.writes = []
@@ -56,8 +60,8 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
             if before:
                 before(iteration)
         with patch.object(main.asyncio, "sleep", side_effect=sleep), \
-             patch.object(main, "_rumble_event_token", side_effect=tokens) as discovery, \
-             patch.object(main, "set_vibration_gain", side_effect=writer or self.write_gain):
+             patch.object(controller_backend, "rumble_event_token", side_effect=tokens) as discovery, \
+             patch.object(controller_backend, "set_vibration_gain", side_effect=writer or self.write_gain):
             with self.assertRaises(asyncio.CancelledError):
                 await self.plugin._vibration_gain_loop()
         self.raw.assert_not_called()
@@ -140,8 +144,8 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 main.Plugin._restore_current_vibration_gain()
             except RuntimeError as error:
                 errors.append(str(error))
-        with patch.object(main, "set_vibration_gain") as gain:
-            with main._controller_apply_lock:
+        with patch.object(controller_backend, "set_vibration_gain") as gain:
+            with controller_backend.controller_apply_lock:
                 thread = threading.Thread(target=worker)
                 thread.start()
                 self.assertTrue(entered.wait(2))
@@ -157,8 +161,8 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
         def worker():
             entered.set()
             results.append(main.Plugin._restore_current_vibration_gain())
-        with patch.object(main, "set_vibration_gain", side_effect=self.write_gain):
-            with main._controller_apply_lock:
+        with patch.object(controller_backend, "set_vibration_gain", side_effect=self.write_gain):
+            with controller_backend.controller_apply_lock:
                 thread = threading.Thread(target=worker)
                 thread.start()
                 self.assertTrue(entered.wait(2))
@@ -180,10 +184,10 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
             for name in TASK_NAMES:
                 stack.enter_context(patch.object(main.Plugin, name, None))
             stack.enter_context(patch.object(main, "CONTROLLER_GAIN_CHECK_INTERVAL", 0.001))
-            stack.enter_context(patch.object(main, "_rumble_event_token", return_value=TOKEN))
-            stack.enter_context(patch.object(main, "set_vibration_gain", side_effect=write))
-            stack.enter_context(patch.object(main, "supported_device", return_value=False))
-            stack.enter_context(patch.object(main, "updater", types.SimpleNamespace(close=Mock())))
+            stack.enter_context(patch.object(controller_backend, "rumble_event_token", return_value=TOKEN))
+            stack.enter_context(patch.object(controller_backend, "set_vibration_gain", side_effect=write))
+            stack.enter_context(patch.object(companion_common, "supported_device", return_value=False))
+            stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())))
             stack.enter_context(patch.object(main.fan_controller, "close"))
             monitor = asyncio.create_task(self.plugin._vibration_gain_loop())
             main.Plugin._vibration_gain_task = monitor
@@ -207,16 +211,16 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with ExitStack() as stack:
             for name in TASK_NAMES:
                 stack.enter_context(patch.object(main.Plugin, name, None))
-            for name in ("button_map_owned", "button_fix_installed", "_display_script_owned",
-                         "_is_our_display_script", "_display_script_conflict", "audio_fix_supported"):
-                stack.enter_context(patch.object(main, name, return_value=False))
+            for name in ("button_map_owned", "button_fix_installed", "display_script_owned",
+                         "is_our_display_script", "display_script_conflict", "audio_fix_supported"):
+                stack.enter_context(patch.object(owner(name), name, return_value=False))
             for name in ("ensure_controller_control", "ensure_charge_bypass_control"):
-                stack.enter_context(patch.object(main, name, return_value=None))
-            stack.enter_context(patch.object(main, "_dmi", return_value="AYANEO 3"))
-            stack.enter_context(patch.object(main, "read_cpu_boost", return_value=False))
-            stack.enter_context(patch.object(main, "tdp_capabilities", return_value={"tdp_supported": False}))
+                stack.enter_context(patch.object(owner(name), name, return_value=None))
+            stack.enter_context(patch.object(companion_common, "dmi", return_value="AYANEO 3"))
+            stack.enter_context(patch.object(power_backend, "read_cpu_boost", return_value=False))
+            stack.enter_context(patch.object(power_backend, "tdp_capabilities", return_value={"tdp_supported": False}))
             stack.enter_context(patch.object(main.fan_controller, "recover_abandoned"))
-            stack.enter_context(patch.object(main, "updater", types.SimpleNamespace(
+            stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(
                 ssl_context=Mock(), plugin_version=Mock(return_value="1.2.0"))))
             for name in ("_restore_hardware", "_edid_loop", "_ac_loop", "_charge_loop", "_module_loop", "_tm_guard_loop", "_restore_audio"):
                 stack.enter_context(patch.object(self.plugin, name, new=AsyncMock()))

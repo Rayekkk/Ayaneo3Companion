@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Rayekkk
+
+"""Shared Companion runtime: device identity, plugin paths, privileged I/O and downloads."""
+
+import contextlib
+import os
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import decky
+
+# Decky aliases its own updater module to the bare name ``updater`` before a
+# plugin is loaded, so use the collision-proof module name shared by the other
+# Rayek plugins.
+from lego_updater import Updater
+
+LOG = "[ayaneo3companion]"
+PLUGIN_DIR = Path(decky.DECKY_PLUGIN_DIR)
+
+GITHUB_RELEASES_URL = (
+    "https://api.github.com/repos/Rayekkk/Ayaneo3Companion/releases/latest"
+)
+
+
+def decky_account():
+    try:
+        import pwd
+        name = getattr(decky, "DECKY_USER", None) or os.environ.get("DECKY_USER")
+        account = pwd.getpwnam(name) if name else None
+        if account is not None and account.pw_uid > 0:
+            return dict(user_home=os.path.realpath(account.pw_dir), user_uid=account.pw_uid,
+                        user_gid=account.pw_gid)
+    except (ImportError, KeyError):
+        pass
+    return {}
+
+
+DECKY_ACCOUNT = decky_account()
+updater = Updater(
+    releases_url=GITHUB_RELEASES_URL,
+    user_agent="Ayaneo3Companion",
+    log_prefix=LOG,
+    plugin_dir=str(PLUGIN_DIR),
+    asset_name_template="Ayaneo3Companion-{version}.zip",
+    logger=decky.logger,
+    **DECKY_ACCOUNT,
+)
+ALLOWED_DOWNLOAD_HOSTS = frozenset({
+    "github.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com",
+})
+HARDWARE_DOWNLOAD_SECONDS = 60.0
+HARDWARE_NETWORK_TIMEOUT = 10.0
+
+
+def dmi(name: str) -> str:
+    try:
+        return Path(f"/sys/class/dmi/id/{name}").read_text().strip()
+    except OSError:
+        return ""
+
+
+def supported_device() -> bool:
+    return dmi("sys_vendor").upper() == "AYANEO" and dmi("product_name").upper() == "AYANEO 3"
+
+
+def require_supported_device(action: str = "hardware control") -> None:
+    """Enforce the AYANEO 3 boundary in the privileged backend."""
+    if not supported_device():
+        raise RuntimeError(f"{action} is restricted to AYANEO 3")
+
+
+def clean_subprocess_env() -> dict:
+    environment = os.environ.copy()
+    # Decky's PyInstaller runtime ships private libraries that are incompatible
+    # with SteamOS systemctl and some host multimedia utilities.
+    environment.pop("LD_LIBRARY_PATH", None)
+    environment.pop("LD_PRELOAD", None)
+    return environment
+
+
+def atomic_write_bytes(target: Path, data: bytes, mode: int = 0o644) -> None:
+    """Replace a regular configuration file without following a shared temp name."""
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp",
+                                        dir=str(target.parent))
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def clamp(value, low, high):
+    return max(low, min(high, int(value)))
+
+
+def checked_download_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if (parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_DOWNLOAD_HOSTS
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port not in (None, 443)):
+        raise RuntimeError(f"refusing untrusted hardware download host: {parsed.hostname or '?'}")
+    return url
+
+
+class _HardwareDownloadRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 5
+    max_repeats = 2
+
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        # Validate before following a redirect; checking only the final URL
+        # would still send a privileged request to an untrusted destination.
+        checked_download_url(new_url)
+        return super().redirect_request(request, fp, code, message, headers, new_url)
+
+
+def open_hardware_download(request):
+    opener = urllib.request.build_opener(
+        _HardwareDownloadRedirect(), urllib.request.HTTPSHandler(context=updater.ssl_context()))
+    return opener.open(request, timeout=HARDWARE_NETWORK_TIMEOUT)
+
+
+def hardware_download_chunks(response, limit: int, deadline: float):
+    """Bound transfer duration as well as bytes, even when the peer drips data."""
+    reader = getattr(response, "read1", response.read)
+    total = 0
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("hardware download exceeded its time limit")
+        chunk = reader(min(65536, limit + 1 - total))
+        if time.monotonic() >= deadline:
+            raise TimeoutError("hardware download exceeded its time limit")
+        if not chunk:
+            return
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError("hardware download exceeded the size limit")
+        yield chunk
+
+
+def normalized_file_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes().replace(b"\r\n", b"\n")
+    except OSError:
+        return None

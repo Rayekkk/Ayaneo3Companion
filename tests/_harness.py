@@ -17,3 +17,23 @@ def install():
         def commit(self): pass
     settings.SettingsManager = SettingsManager
     sys.modules["settings"] = settings
+
+
+# Backend modules in lookup order; main comes last because it imports from them.
+MODULES = ("companion_common", "ec_backend", "controller_backend", "power_backend",
+           "audio_backend", "display_backend", "input_backend", "main")
+
+
+def owner(name):
+    """Return the module that defines `name`, so a patch reaches every caller."""
+    import importlib
+    for module_name in MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as error:
+            if error.name != module_name:
+                raise
+            continue
+        if name in vars(module):
+            return module
+    raise AttributeError(f"no Companion module defines {name!r}")

@@ -9,6 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import test_logic  # Install the Decky test harness before importing the backend.
 import main
+import power_backend
+import controller_backend
+import ec_backend
+import companion_common
 from safe_settings import SettingsManager
 
 
@@ -23,20 +27,20 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.store = SettingsManager("settings", str(root))
-        self.base = dict(main.PRESETS["Balanced"])
-        self.wanted = dict(main.PRESETS["Max"])
+        self.base = dict(power_backend.PRESETS["Balanced"])
+        self.wanted = dict(power_backend.PRESETS["Max"])
         self.store.replace({"tdp": self.base, "tdp_preset": "Balanced",
                             "game_profiles": {"222": {**self.wanted, "preset": "Max"}}})
         self.state = {"supported": True, "tdp": dict(self.base), "tdp_preset": "Balanced",
-                      "controller": dict(main.DEFAULT_CONTROLLER),
+                      "controller": dict(controller_backend.DEFAULT_CONTROLLER),
                       "modules_connected": True, "modules_reconnecting": False,
                       "modules_detached": False}
         self.stack.enter_context(patch.object(main, "settings", self.store))
         self.stack.enter_context(patch.object(main.Plugin, "_state", self.state))
         self.stack.enter_context(patch.object(main.Plugin, "_active_app", "111"))
-        self.stack.enter_context(patch.object(main, "supported_device", return_value=True))
-        self.stack.enter_context(patch.object(main, "read_cpu_boost", return_value=False))
-        self.stack.enter_context(patch.object(main, "write_cpu_boost"))
+        self.stack.enter_context(patch.object(companion_common, "supported_device", return_value=True))
+        self.stack.enter_context(patch.object(power_backend, "read_cpu_boost", return_value=False))
+        self.stack.enter_context(patch.object(power_backend, "write_cpu_boost"))
         self.stack.enter_context(patch.object(main.Plugin, "get_state", new=AsyncMock(return_value={})))
         self.plugin = main.Plugin()
 
@@ -65,15 +69,15 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
             hardware["writes"].append(value)
             hardware["powered"] = value
 
-        left, right = main._module_info("left", 1), main._module_info("right", 1)
+        left, right = controller_backend.module_info("left", 1), controller_backend.module_info("right", 1)
         with patch.object(main.asyncio, "sleep", side_effect=sleep), \
-             patch.object(main, "_vendor_hidraw", side_effect=vendor), \
-             patch.object(main, "controller_powered", side_effect=lambda: hardware["powered"]), \
-             patch.object(main, "module_presence", side_effect=presence), \
-             patch.object(main, "both_modules_connected", side_effect=lambda: all(presence().values())), \
-             patch.object(main, "set_controller_power", side_effect=power), \
+             patch.object(controller_backend, "vendor_hidraw", side_effect=vendor), \
+             patch.object(ec_backend, "controller_powered", side_effect=lambda: hardware["powered"]), \
+             patch.object(ec_backend, "module_presence", side_effect=presence), \
+             patch.object(ec_backend, "both_modules_connected", side_effect=lambda: all(presence().values())), \
+             patch.object(ec_backend, "set_controller_power", side_effect=power), \
              patch.object(main.Plugin, "_restore_current_controller") as restore, \
-             patch.object(main, "read_module_layout", return_value=(left, right)) as layout:
+             patch.object(controller_backend, "read_module_layout", return_value=(left, right)) as layout:
             with self.assertRaises(asyncio.CancelledError):
                 await self.plugin._module_loop()
         return hardware, restore, layout
@@ -114,7 +118,7 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
         layout.assert_not_called()
 
     async def test_blocked_app_tracks_its_own_desired_profile_and_pending_error(self):
-        with patch.object(main, "apply_tdp", side_effect=main.TdpUnavailableError("PowerStation active")):
+        with patch.object(power_backend, "apply_tdp", side_effect=power_backend.TdpUnavailableError("PowerStation active")):
             await self.plugin.set_active_app("222")
         self.assertEqual(main.Plugin._active_app, "222")
         self.assertEqual(self.state["tdp"], self.wanted)
@@ -124,9 +128,9 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.getSetting("tdp"), self.base)
 
     async def test_same_app_leaves_pending_retry_to_the_power_monitor(self):
-        with patch.object(main, "apply_tdp", side_effect=main.TdpUnavailableError("PowerStation active")):
+        with patch.object(power_backend, "apply_tdp", side_effect=power_backend.TdpUnavailableError("PowerStation active")):
             await self.plugin.set_active_app("222")
-        with patch.object(main, "apply_tdp") as apply:
+        with patch.object(power_backend, "apply_tdp") as apply:
             await self.plugin.set_active_app("222")
             apply.assert_not_called()
             self.assertTrue(self.state["tdp_profile_pending"])
@@ -152,14 +156,14 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
 
         def apply(value):
             if clock < 4:
-                raise main.TdpUnavailableError("PowerStation active")
+                raise power_backend.TdpUnavailableError("PowerStation active")
             applied.append(copy.deepcopy(value))
 
         with patch.object(main.asyncio, "sleep", side_effect=sleep), \
              patch.object(main.time, "monotonic", side_effect=lambda: float(clock)), \
              patch.object(main, "_suspend_clock_offset", return_value=None), \
-             patch.object(main, "ac_online", side_effect=lambda: charger_change and clock > 2), \
-             patch.object(main, "apply_tdp", side_effect=apply), \
+             patch.object(ec_backend, "ac_online", side_effect=lambda: charger_change and clock > 2), \
+             patch.object(power_backend, "apply_tdp", side_effect=apply), \
              patch.object(main.Plugin, "_restore_saved_control"):
             with self.assertRaises(asyncio.CancelledError):
                 await self.plugin._ac_loop()
@@ -185,7 +189,7 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
             calls.append(copy.deepcopy(value))
             if len(calls) == 1:
                 raise RuntimeError("SMU temporarily rejected the request")
-        with patch.object(main, "apply_tdp", side_effect=apply):
+        with patch.object(power_backend, "apply_tdp", side_effect=apply):
             with self.assertRaisesRegex(RuntimeError, "SMU temporarily"):
                 await self.plugin.set_active_app("222")
             self.assertEqual(main.Plugin._active_app, "222")
@@ -207,7 +211,7 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
             calls.append(copy.deepcopy(value))
             if value == third:
                 raise RuntimeError("third game rejected")
-        with patch.object(main, "apply_tdp", side_effect=apply):
+        with patch.object(power_backend, "apply_tdp", side_effect=apply):
             await self.plugin.set_active_app("222")
             await self.plugin.set_active_app("333")
             with self.assertRaisesRegex(RuntimeError, "third game rejected"):
@@ -220,7 +224,7 @@ class RoundTwoBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_global_game_and_delete_writes_track_actual_applied_limits(self):
         custom = {"spl": 18, "sppt": 21, "fppt": 29}
-        with patch.object(main, "apply_tdp"):
+        with patch.object(power_backend, "apply_tdp"):
             await self.plugin.set_tdp(custom, "Custom", "111")
             self.assertEqual(self.state["_applied_tdp"], custom)
             await self.plugin.set_game_profile("111", self.wanted, "Max", "111")

@@ -12,6 +12,7 @@ if "main" not in sys.modules:
     from _harness import install
     install()
 import main
+import companion_common
 
 
 class FanMonitorLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -50,7 +51,7 @@ class FanMonitorLifecycleTests(unittest.IsolatedAsyncioTestCase):
             for target, name, value in (
                 (main, "fan_controller", fan),
                 (main, "settings", types.SimpleNamespace(recovery_error="")),
-                (main, "supported_device", lambda: True),
+                (companion_common, "supported_device", lambda: True),
                 (main, "_suspend_clock_offset", offset),
                 (main.Plugin, "_state", {"supported": True}),
                 (main.Plugin, "_fan_task", None),

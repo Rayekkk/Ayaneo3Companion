@@ -10,11 +10,18 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _harness import install
+from _harness import install, owner
 if "main" not in sys.modules:
     install()
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
+import input_backend
+import display_backend
+import audio_backend
+import power_backend
+import controller_backend
+import ec_backend
+import companion_common
 from safe_settings import SettingsManager
 
 
@@ -28,50 +35,50 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.store.replace({})
         self.lua = self.root / "etc/gamescope/displays/ayaneo.ayaneo3.oled.lua"
         self.mapping = self.root / "etc/inputplumber/capability_maps.d/ayaneo_type7.yaml"
-        self.map_bytes = main.INPUT_MAP_MARKER + b"id: fixture\n"
+        self.map_bytes = input_backend.INPUT_MAP_MARKER + b"id: fixture\n"
         for name, value in (
             ("settings", self.store), ("LUA_TARGET", self.lua),
             ("INPUT_MAP_TARGET", self.mapping),
             ("LEGACY_INPUT_MAP_TARGETS", ()),
             ("LEGACY_INPUT_DEVICE_TARGET", self.root / "legacy.yaml"),
         ):
-            self.stack.enter_context(mock.patch.object(main, name, value))
+            self.stack.enter_context(mock.patch.object(owner(name), name, value))
         self.stack.enter_context(mock.patch.object(main.Plugin, "_state", {}))
         self.stack.enter_context(mock.patch.object(main.Plugin, "_active_app", ""))
-        self.stack.enter_context(mock.patch.object(main, "supported_device", return_value=True))
-        self.stack.enter_context(mock.patch.object(main, "_dmi", return_value="AYANEO 3"))
-        self.stack.enter_context(mock.patch.object(main, "tdp_backend", return_value="fixture"))
-        self.stack.enter_context(mock.patch.object(main, "read_cpu_boost", return_value=True))
-        self.stack.enter_context(mock.patch.object(main, "ensure_charge_control", return_value=None))
-        self.stack.enter_context(mock.patch.object(main, "ensure_charge_bypass_control", return_value=None))
-        self.stack.enter_context(mock.patch.object(main, "ensure_controller_control", return_value=False,
+        self.stack.enter_context(mock.patch.object(companion_common, "supported_device", return_value=True))
+        self.stack.enter_context(mock.patch.object(companion_common, "dmi", return_value="AYANEO 3"))
+        self.stack.enter_context(mock.patch.object(power_backend, "tdp_backend", return_value="fixture"))
+        self.stack.enter_context(mock.patch.object(power_backend, "read_cpu_boost", return_value=True))
+        self.stack.enter_context(mock.patch.object(ec_backend, "ensure_charge_control", return_value=None))
+        self.stack.enter_context(mock.patch.object(ec_backend, "ensure_charge_bypass_control", return_value=None))
+        self.stack.enter_context(mock.patch.object(ec_backend, "ensure_controller_control", return_value=False,
                                                   create=True))
-        self.stack.enter_context(mock.patch.object(main, "audio_fix_installed", return_value=False))
-        self.stack.enter_context(mock.patch.object(main, "audio_fix_supported", return_value=False))
-        self.stack.enter_context(mock.patch.object(main, "_display_script_conflict", return_value=False))
-        self.stack.enter_context(mock.patch.object(main, "_display_script_owned",
+        self.stack.enter_context(mock.patch.object(audio_backend, "audio_fix_installed", return_value=False))
+        self.stack.enter_context(mock.patch.object(audio_backend, "audio_fix_supported", return_value=False))
+        self.stack.enter_context(mock.patch.object(display_backend, "display_script_conflict", return_value=False))
+        self.stack.enter_context(mock.patch.object(display_backend, "display_script_owned",
                                                   side_effect=lambda path: path.exists()))
-        self.stack.enter_context(mock.patch.object(main, "_is_our_display_script",
+        self.stack.enter_context(mock.patch.object(display_backend, "is_our_display_script",
                                                   side_effect=lambda path: path.exists() and
-                                                  path.read_bytes().startswith(main.DISPLAY_SCRIPT_MARKER)))
-        self.stack.enter_context(mock.patch.object(main, "button_map_owned",
+                                                  path.read_bytes().startswith(display_backend.DISPLAY_SCRIPT_MARKER)))
+        self.stack.enter_context(mock.patch.object(input_backend, "button_map_owned",
                                                   side_effect=lambda path: path.exists()))
-        self.stack.enter_context(mock.patch.object(main, "button_fix_installed",
+        self.stack.enter_context(mock.patch.object(input_backend, "button_fix_installed",
                                                   side_effect=lambda: self.mapping.exists() and
                                                   self.mapping.read_bytes() == self.map_bytes))
         self.stack.enter_context(mock.patch.object(main.fan_controller, "recover_abandoned"))
-        self.stack.enter_context(mock.patch.object(main.updater, "ssl_context"))
+        self.stack.enter_context(mock.patch.object(companion_common.updater, "ssl_context"))
         self.systemctl = self.stack.enter_context(mock.patch.object(main, "_systemctl"))
-        self.stack.enter_context(mock.patch.object(main, "program_rear_buttons"))
-        self.stack.enter_context(mock.patch.object(main, "patch_published_edid", return_value=True))
+        self.stack.enter_context(mock.patch.object(controller_backend, "program_rear_buttons"))
+        self.stack.enter_context(mock.patch.object(display_backend, "patch_published_edid", return_value=True))
         self.install_display = self.stack.enter_context(mock.patch.object(
-            main, "install_display_script", side_effect=self._install_display))
+            display_backend, "install_display_script", side_effect=self._install_display))
         self.install_mapping = self.stack.enter_context(mock.patch.object(
-            main, "install_button_fix", side_effect=self._install_mapping))
+            input_backend, "install_button_fix", side_effect=self._install_mapping))
         self.remove_display = self.stack.enter_context(mock.patch.object(
-            main, "remove_display_script", side_effect=lambda: self.lua.unlink(missing_ok=True)))
+            display_backend, "remove_display_script", side_effect=lambda: self.lua.unlink(missing_ok=True)))
         self.remove_mapping = self.stack.enter_context(mock.patch.object(
-            main, "remove_button_fix", side_effect=lambda: self.mapping.unlink(missing_ok=True)))
+            input_backend, "remove_button_fix", side_effect=lambda: self.mapping.unlink(missing_ok=True)))
         self.plugin = main.Plugin()
         # _start normally launches perpetual hardware monitors. They are not
         # needed to verify the boot-time desired-state transaction.
@@ -79,7 +86,7 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     def _install_display(self, *_args):
         self.lua.parent.mkdir(parents=True, exist_ok=True)
-        self.lua.write_bytes(main.DISPLAY_SCRIPT_MARKER + b"-- fixture\n")
+        self.lua.write_bytes(display_backend.DISPLAY_SCRIPT_MARKER + b"-- fixture\n")
 
     def _install_mapping(self):
         self.mapping.parent.mkdir(parents=True, exist_ok=True)
@@ -126,15 +133,15 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self._start_restore_flag())
 
     async def test_rear_button_restore_follows_latest_choice(self):
-        controller = dict(main.DEFAULT_CONTROLLER)
+        controller = dict(controller_backend.DEFAULT_CONTROLLER)
         for installed, calls in ((True, [mock.call(True, controller)]), (False, [])):
             with self.subTest(installed=installed):
-                main.Plugin._state = {"tdp": dict(main.DEFAULT_TDP), "controller": controller,
+                main.Plugin._state = {"tdp": dict(power_backend.DEFAULT_TDP), "controller": controller,
                                       "button_fix_installed": installed}
                 with mock.patch.object(main.asyncio, "sleep", new=mock.AsyncMock()), \
                      mock.patch.object(main.Plugin, "_reapply_current_tdp"), \
                      mock.patch.object(main.Plugin, "_restore_current_controller"), \
-                     mock.patch.object(main, "program_rear_buttons") as program:
+                     mock.patch.object(controller_backend, "program_rear_buttons") as program:
                     await self.plugin._restore_hardware(True)
                 self.assertEqual(program.call_args_list, calls)
 
@@ -153,7 +160,7 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.lua.parent.mkdir(parents=True, exist_ok=True)
         self.lua.write_bytes(b"-- legacy companion display\n")
         self.mapping.parent.mkdir(parents=True, exist_ok=True)
-        self.mapping.write_bytes(main.INPUT_MAP_MARKER + b"id: legacy\n")
+        self.mapping.write_bytes(input_backend.INPUT_MAP_MARKER + b"id: legacy\n")
         await self.plugin._start()
         self.install_display.assert_called_once()
         self.install_mapping.assert_called_once()
@@ -171,10 +178,10 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_switches_commit_preference_for_next_boot(self):
         self.plugin._closing = False
-        main.Plugin._state = {"supported": True, "controller": dict(main.DEFAULT_CONTROLLER),
+        main.Plugin._state = {"supported": True, "controller": dict(controller_backend.DEFAULT_CONTROLLER),
                               "screen_installed": False, "button_fix_installed": False}
         with mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})), \
-             mock.patch.object(main, "button_map_owned", side_effect=lambda path: path.exists()):
+             mock.patch.object(input_backend, "button_map_owned", side_effect=lambda path: path.exists()):
             await self.plugin.set_screen_fix(True)
             await self.plugin.set_button_fix(True)
         reopened = SettingsManager("settings", str(self.store_dir))
@@ -201,7 +208,7 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_button_map_is_restored_when_settings_commit_fails(self):
         self.plugin._closing = False
-        main.Plugin._state = {"supported": True, "controller": dict(main.DEFAULT_CONTROLLER),
+        main.Plugin._state = {"supported": True, "controller": dict(controller_backend.DEFAULT_CONTROLLER),
                               "button_fix_installed": False}
         with mock.patch.object(self.store, "commit", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(RuntimeError, "previous bindings restored"):
@@ -217,8 +224,8 @@ class NativeControllerAbiTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.native = self.root / "sys/devices/platform/ayaneo-ec"
-        self.stack.enter_context(mock.patch.object(main, "AYANEO_EC_ROOT", self.native, create=True))
-        self.stack.enter_context(mock.patch.object(main, "supported_device", return_value=True))
+        self.stack.enter_context(mock.patch.object(ec_backend, "AYANEO_EC_ROOT", self.native, create=True))
+        self.stack.enter_context(mock.patch.object(companion_common, "supported_device", return_value=True))
 
     def test_native_controller_abi_does_not_load_raw_ec(self):
         self.native.mkdir(parents=True)
@@ -226,19 +233,19 @@ class NativeControllerAbiTests(unittest.TestCase):
         modules = self.native / "controller_modules"
         power.write_text("1\n")
         modules.write_text("both\n")
-        with mock.patch.object(main, "ensure_charge_control",
+        with mock.patch.object(ec_backend, "ensure_charge_control",
                                side_effect=AssertionError("ec_sys should stay unloaded")) as raw, \
-             mock.patch.object(main, "_ec_io_path",
+             mock.patch.object(ec_backend, "_ec_io_path",
                                side_effect=AssertionError("raw EC should stay unused")), \
              mock.patch.object(main.subprocess, "run",
                                side_effect=AssertionError("modprobe should stay unused")):
-            self.assertTrue(main.ensure_controller_control())
-            self.assertTrue(main.controller_powered())
-            self.assertTrue(main.both_modules_connected())
-            self.assertEqual(main.module_presence(), {"left": True, "right": True})
-            main.set_controller_power(False)
+            self.assertTrue(ec_backend.ensure_controller_control())
+            self.assertTrue(ec_backend.controller_powered())
+            self.assertTrue(ec_backend.both_modules_connected())
+            self.assertEqual(ec_backend.module_presence(), {"left": True, "right": True})
+            ec_backend.set_controller_power(False)
             self.assertEqual(power.read_text().strip(), "0")
-            main.set_controller_power(True)
+            ec_backend.set_controller_power(True)
             self.assertEqual(power.read_text().strip(), "1")
         raw.assert_not_called()
 
@@ -253,36 +260,36 @@ class NativeControllerAbiTests(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 modules.write_text(value + "\n")
-                self.assertEqual(main.module_presence(), expected)
-                self.assertFalse(main.both_modules_connected())
+                self.assertEqual(ec_backend.module_presence(), expected)
+                self.assertFalse(ec_backend.both_modules_connected())
 
     def test_kernel_616_keeps_raw_ec_fallback(self):
         ec = self.root / "ec"
         data = bytearray(256)
-        data[main.EC_CONTROLLER_POWER_REGISTER] = main.EC_CONTROLLER_POWER_ON
-        data[main.EC_MODULE_REGISTER] = main.EC_MODULE_RIGHT
+        data[ec_backend.EC_CONTROLLER_POWER_REGISTER] = ec_backend.EC_CONTROLLER_POWER_ON
+        data[ec_backend.EC_MODULE_REGISTER] = ec_backend.EC_MODULE_RIGHT
         ec.write_bytes(data)
-        with mock.patch.object(main, "_ec_io_path", return_value=ec), \
-             mock.patch.object(main, "ensure_charge_control", return_value=ec):
-            self.assertTrue(main.ensure_controller_control())
-            self.assertTrue(main.controller_powered())
-            self.assertEqual(main.module_presence(), {"left": True, "right": False})
-            main.set_controller_power(False)
-        self.assertEqual(ec.read_bytes()[main.EC_CONTROLLER_POWER_REGISTER],
-                         main.EC_CONTROLLER_POWER_OFF)
+        with mock.patch.object(ec_backend, "_ec_io_path", return_value=ec), \
+             mock.patch.object(ec_backend, "ensure_charge_control", return_value=ec):
+            self.assertTrue(ec_backend.ensure_controller_control())
+            self.assertTrue(ec_backend.controller_powered())
+            self.assertEqual(ec_backend.module_presence(), {"left": True, "right": False})
+            ec_backend.set_controller_power(False)
+        self.assertEqual(ec.read_bytes()[ec_backend.EC_CONTROLLER_POWER_REGISTER],
+                         ec_backend.EC_CONTROLLER_POWER_OFF)
 
     def test_incomplete_native_driver_fails_closed_without_loading_raw_ec(self):
         self.native.mkdir(parents=True)
         (self.native / "controller_power").write_text("1\n")
-        with mock.patch.object(main, "ensure_charge_control",
+        with mock.patch.object(ec_backend, "ensure_charge_control",
                                side_effect=AssertionError("must not fall back across active drivers")):
-            self.assertFalse(main.ensure_controller_control())
+            self.assertFalse(ec_backend.ensure_controller_control())
 
 
 class FanRpcGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_fan_write_rejects_other_devices_even_before_state_is_ready(self):
         with mock.patch.object(main.Plugin, "_state", {}), \
-             mock.patch.object(main, "supported_device", return_value=False), \
+             mock.patch.object(companion_common, "supported_device", return_value=False), \
              mock.patch.object(main.fan_controller, "set") as write:
             with self.assertRaisesRegex(RuntimeError, "restricted to AYANEO 3"):
                 await main.Plugin().set_fan("manual", 60)

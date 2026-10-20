@@ -28,7 +28,7 @@ MAX_EXPANDED = 128 * 1024 * 1024
 MAX_MEMBERS = 1024
 REQUIRED_RUNTIME_FILES = (
     "main.py", "dist/index.js", "plugin.json", "package.json",
-    "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py",
+    "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "input_backend.py", "display_backend.py", "audio_backend.py", "power_backend.py", "controller_backend.py", "ec_backend.py", "companion_common.py",
     "assets/ayaneo.ayaneo3.oled.lua", "assets/ayaneo3-companion.yaml",
 )
 REQUEST_TIMEOUT = 6
@@ -504,10 +504,6 @@ class Updater:
                 except FileNotFoundError:
                     pass
             os.close(directory_fd)
-
-    def download_latest(self) -> dict:
-        """Download the latest release; installation remains the user's Decky action."""
-        return self.download()
 
     def download(self, expected_version: str | None = None) -> dict:
         with self._lock:

@@ -179,7 +179,7 @@ confirmed state and retries automatically. The message clears after a fresh read
   replacement so the plugin can power and identify the controller again.
 - Open **Audio** to inspect or reapply the AYANEO smart-amplifier tuning. Once
   both DSPs are verified, **Recalibrate Audio** becomes available. Put the
-  console on a clear surface and confirm the second prompt before calibration.
+  console on a clear surface in a quiet room, press **Start** and confirm the prompt.
   Fully restart the console after a successful calibration so the audio driver
   reads the new EFI values.
 - Open **Key Binding** to preserve LC/RC as L4/R4 and add LC1/RC1 as L5/R5.
