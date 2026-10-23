@@ -27,7 +27,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 | **CPU Boost and EPP** | CPU Boost and the CPU energy preference, globally or per game and charger state |
 | **Live power** | Shows the processor package's power draw on the TDP page |
 | **Charge bypass** | Powers the console from its charger while inhibiting battery charging |
-| **Fan control** | Auto mode or a guarded 60–100% manual speed when the kernel exposes the native AYANEO EC fan interface |
+| **Fan control** | Your own eight-point fan curve, optionally one per TDP preset, guarded by an independent watchdog |
 | **Charging estimate** | Shows live battery percentage, net charging power and estimated time to full only while Battery is open |
 | **Magic Modules** | Identifies every known module and upper/lower layout, ejects either side and provides Quick Reset |
 | **Vibration** | Firmware Off/Low/Medium/High strength, 0-100% Linux FF gain and a vibration test |
@@ -60,8 +60,8 @@ PowerStation writer: while PowerStation runs, TDP changes are refused and the
 TDP page says why. CPU Boost, EPP and the other controls remain available.
 Every write checks ownership again; a cached status never authorizes one.
 TDP Control keeps its own settings and serializes its own changes, so its game
-tracking never waits behind a controller or audio operation, and fan commands
-use their own queue so restoring Auto does not wait for a slow settings commit.
+tracking never waits behind a controller or audio operation. Fan Control does
+the same, so turning it off never waits for a slow settings commit.
 Saved charge bypass is verified by a separate monitor every 15 seconds and after
 charger changes or resume.
 Controller firmware, RGB, bindings and module eject/reset require the vendor HID
@@ -69,8 +69,8 @@ interface. If the kernel's `hid-ayaneo` driver owns it, these controls display a
 unavailable reason instead of issuing competing commands; evdev FF Gain remains
 independent. Module presence and power recovery continue through EC while the
 vendor HID interface is temporarily absent after ejecting the modules.
-Fan control appears only when the native `ayaneo-ec` hwmon interface is available;
-it is available on the tested SteamOS 3.10/kernel 7.2.4 system.
+Fan control needs the kernel's `ayaneo-ec` hwmon interface; it is available on
+the tested SteamOS 3.10/kernel 7.2.4 system.
 
 > [!NOTE]
 > AYANEO 3 Companion is deliberately hardware-specific. It has been tested on
@@ -168,9 +168,10 @@ retrying; the note clears after a fresh read.
 - Open **Battery** to enable or disable charge bypass. The displayed state is
   read back from the kernel charge-control interface when available, or directly
   from the embedded controller on older kernels; it is never inferred from ACPI.
-- Open **Fan Control** to inspect RPM, use the system's automatic fan curve or
-  apply a manual speed from 60% to 100%. Manual mode is protected by an
-  independent systemd timer that restores Auto if Companion stops responding.
+- Open **Fan Control** to see the APU temperature and fan RPM, and to run your
+  own curve: start from Silent, Balanced or Aggressive, move the eight points
+  with touch or the D-pad (A to edit, LB/RB to pick a point), and save. Turn it
+  off to give the fan back to the console's automatic curve.
 - Open **Magic Modules** to identify the installed module type and layout,
   eject either side or both, or run Quick Reset. Insert both modules after
   replacement so the plugin can power and identify the controller again.
@@ -210,7 +211,7 @@ closes. Status polls never overlap and stop while QAM is hidden; completed write
 game context cannot be overwritten by an older response. Per-game tracking and
 the existing recovery monitors continue independently of the panel.
 
-Custom TDP and manual fan Apply use the latest slider choice, including changes
+Custom TDP Apply uses the latest slider choice, including changes
 made immediately before pressing Apply; an unapplied Custom draft asks before a
 scope change discards it. Speaker discovery and verification run
 in the background so other controls can open while ALSA becomes available.
@@ -249,11 +250,13 @@ TDP Control is LegionGo2Companion's, adapted to the AYANEO 3:
 - Magic Module power and presence use the native `ayaneo-ec` sysfs interface
   where available. On kernel 6.16, the existing raw EC path remains in use;
   an incomplete native interface never triggers a competing raw EC write.
-- Fan control uses the kernel's `ayaneo-ec` hwmon interface. Manual mode is
-  applied only after an independent systemd guard has been armed, and the guard
-  retries until Auto is confirmed if the EC temporarily disappears.
-  Unreadable unrelated hwmon entries do not block fan discovery or Auto recovery;
-  multiple matching AYANEO devices still prevent ambiguous writes.
+- Fan control writes `pwm1_enable` and `pwm1` of the kernel's `ayaneo-ec` hwmon
+  interface and reads every duty back. Fan Control from LegionGo2Companion runs
+  the curve in its own root process with a forked backup watchdog: either one
+  returns the fan to the firmware's automatic curve when the other dies, the
+  plugin unloads or the console prepares to sleep, and the backup sets full
+  speed at 100°C on its own. Known fan programs (jupiter-fan-control, HHD,
+  fancontrol) block Fan Control instead of competing with it.
 - Magic Module identity and upper/lower layout come from AYANEO's vendor HID status,
   with the same known-module table used by HHD. Release uses the vendor eject
   command; after the latch motors finish, the plugin power-cycles the controller
@@ -333,11 +336,12 @@ diagnostics; the UI merges only the action's own fields into the latest observed
 state. TDP edits carry the game they were made for, and the backend refuses
 them once another game runs. Regular status reads refresh capabilities.
 Responsiveness tests block a slow read while subsequent controller transactions
-complete, and exercise fan reads across QAM navigation. TDP Control's own tests,
-ported from LegionGo2Companion, run its page against delayed replies and game
-changes and its backend against a temporary CPUFreq tree, a fake RyzenAdj and the
-SMU's measured clamps. Additional regressions cover HID confirmation, bounded
-hardware transfers and fan discovery with unreadable unrelated entries. They also
+complete. TDP Control's own tests, ported from LegionGo2Companion, run its page
+against delayed replies and game changes and its backend against a temporary
+CPUFreq tree, a fake RyzenAdj and the SMU's measured clamps. Fan Control's
+guardian, also from the Legion, runs as real processes on a model hwmon
+directory and is killed, frozen and suspended mid-write. Additional
+regressions cover HID confirmation and bounded hardware transfers. They also
 hold a TDP transaction while charge and RGB changes finish, verify charge recovery
 reads committed intent, and exercise vibration tests during queued saves.
 Installer regressions exercise real directory swaps, failed staging, map writes,

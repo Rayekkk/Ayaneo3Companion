@@ -23,7 +23,7 @@ if _plugin_path not in sys.path:
 
 from safe_settings import SettingsManager  # noqa: E402
 from quality_runtime import complete, guard_public_calls  # noqa: E402
-from fan_backend import FanController, FAN_RENEW_SECONDS  # noqa: E402
+import fan_backend  # noqa: E402
 import audio_backend  # noqa: E402
 import companion_common  # noqa: E402
 import controller_backend  # noqa: E402
@@ -49,7 +49,6 @@ SNAPSHOT_DIAGNOSTICS = (
 VIBRATION_TEST_MS = 500
 
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
-fan_controller = FanController()
 _lock = threading.RLock()
 _charge_mutation_lock = threading.RLock()
 
@@ -165,7 +164,6 @@ class Plugin:
     _tm_guard_task = None
     _vibration_gain_task = None
     _audio_task = None
-    _fan_task = None
 
     def __init__(self):
         _end_decky_listener_at_eof()
@@ -173,18 +171,15 @@ class Plugin:
         self._uninstalling = False  # Diagnostic sink lifetime only, never admission.
         self._initializing = False
         self._rpc_lock = asyncio.Lock()
-        # Fan transactions do not mutate persisted settings or SMU/controller
-        # state. Keep Auto available while those unrelated operations run.
-        self._fan_rpc_lock = asyncio.Lock()
-        self._fan_generation = 0
         self._rpc_owner = None
         self._rpc_jobs = set()
         self._workers = set()
         self._audio_mutation_lock = threading.RLock()
         self._startup_task = None
         self._cleanup_task = None
-        # TDP Control, ported from LegionGo2Companion, keeps its own store and RPCs.
+        # TDP and Fan Control, ported from LegionGo2Companion, keep their own stores and RPCs.
         self._tdp = tdp_backend.Plugin(self._legacy_tdp_settings, self._forget_legacy_tdp)
+        self._fan = fan_backend.Plugin()
 
     # 1.2.x kept TDP in this store; tdp_backend imports these keys once.
     LEGACY_TDP_KEYS = ("tdp", "tdp_preset", "cpu_boost", "game_profiles")
@@ -195,6 +190,15 @@ class Plugin:
             return {}  # Never import defaults that stand in for unreadable settings.
         return {key: copy.deepcopy(settings.getSetting(key, None))
                 for key in Plugin.LEGACY_TDP_KEYS if settings.getSetting(key, None) is not None}
+
+    async def _start_fan(self):
+        """Start Fan Control; a failure stays on its own page, never fatal here."""
+        module_runtime.begin_start("fan")
+        try:
+            with module_runtime.starting("fan"):
+                await self._fan._main()
+        except Exception as error:
+            diagnostics.event('fan', 'module_start_failed', level='error', error=error)
 
     async def _start_tdp(self):
         """Start TDP Control; its failure is reported by its own is_ready(), never fatal here."""
@@ -473,14 +477,22 @@ class Plugin:
     async def apply_tdp(self, spl, sppt, fppt, app_id="", preset_name="", expected_app_id=None, stored=False):
         return await self._tdp.apply_tdp(spl, sppt, fppt, app_id, preset_name, expected_app_id, stored)
 
+    # Fan Control (fan_backend) ----------------------------------------------------
+
+    async def fan_get_state(self):
+        return await self._fan.get_state()
+
+    async def fan_set_enabled(self, enabled):
+        return await self._fan.set_enabled(enabled)
+
+    async def fan_save_curve(self, scope, curve, expected_revision):
+        return await self._fan.save_curve(scope, curve, expected_revision)
+
+    async def fan_save_assignment_mode(self, enabled, expected_revision):
+        return await self._fan.save_assignment_mode(enabled, expected_revision)
+
     async def get_battery_status(self):
         return await self._offload(ec_backend.battery_status)
-
-    async def get_fan_status(self):
-        if not await self._offload(companion_common.supported_device):
-            return {"supported": False, "mode": "auto", "percent": None,
-                    "rpm": None, "reason": "This device is not an AYANEO 3"}
-        return await self._offload(fan_controller.status)
 
     async def get_version(self):
         return {"version": companion_common.updater.plugin_version()}
@@ -592,17 +604,6 @@ class Plugin:
                     Plugin._state["charge_bypass_supported"] = True
         await self._offload(mutate)
         return self._copy_state()
-
-    async def set_fan(self, mode, percent=None):
-        def mutate():
-            companion_common.require_supported_device("fan control")
-            return fan_controller.set(mode, percent)
-        result = await self._offload(mutate)
-        if mode == "manual" and not self._closing:
-            self._fan_generation += 1
-            if Plugin._fan_task is None or Plugin._fan_task.done():
-                Plugin._fan_task = module_runtime.background_task(self._fan_loop())
-        return result
 
     async def set_audio_fix(self, enabled):
         value = self._boolean(enabled)
@@ -1025,37 +1026,6 @@ class Plugin:
             except Exception as error:
                 decky.logger.debug(f"{LOG} charge_bypass verification deferred: {error}")
 
-    async def _fan_loop(self):
-        """Renew an independent fan safety timer only while Decky stays alive."""
-        suspend_offset = _suspend_clock_offset()
-        while True:
-            await asyncio.sleep(FAN_RENEW_SECONDS)
-            generation = self._fan_generation
-            try:
-                offset = _suspend_clock_offset()
-                resumed = (offset is not None and suspend_offset is not None
-                           and offset - suspend_offset > CONTROLLER_RESUME_THRESHOLD)
-                if offset is not None:
-                    suspend_offset = offset
-                if resumed:
-                    await self._offload(fan_controller.close)
-                    if generation != self._fan_generation:
-                        continue
-                    decky.logger.info(f"{LOG} restored automatic fan mode after resume")
-                    return
-                if not await self._offload(fan_controller.renew):
-                    # A completed worker can report the old lease after a new
-                    # manual RPC has succeeded. Keep that new lease monitored.
-                    if generation == self._fan_generation:
-                        return
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                if generation != self._fan_generation:
-                    continue
-                decky.logger.warning(f"{LOG} manual fan mode ended: {error}")
-                return
-
     async def _module_loop(self):
         """Track module identity and restore the controller after a module swap."""
         previous_connected = None
@@ -1341,11 +1311,6 @@ class Plugin:
         is_supported = await self._offload(companion_common.supported_device)
         storage_error = getattr(settings, "recovery_error", "")
         hardware_allowed = is_supported and not storage_error
-        if is_supported:
-            try:
-                await self._offload(fan_controller.recover_abandoned)
-            except Exception as error:
-                decky.logger.warning(f"{LOG} previous fan session recovery pending: {error}")
         try:
             await self._offload(companion_common.updater.ssl_context)
         except Exception as error:
@@ -1478,6 +1443,8 @@ class Plugin:
             Plugin._audio_task = module_runtime.background_task(self._restore_audio())
         if hardware_allowed and not self._closing:
             await self._start_tdp()
+        if hardware_allowed and not self._closing:
+            await self._start_fan()
         decky.logger.info(f"{LOG} started on {Plugin._state['device']}")
 
     async def _unload(self):
@@ -1488,6 +1455,9 @@ class Plugin:
         async def cleanup():
             diagnostics.event('plugin', 'shutdown_started', source='backend')
             module_runtime.request_stop("tdp")  # a start still running applies nothing more
+            module_runtime.request_stop("fan")
+            # EOF to the fan guardian now: it hands the fan back while the rest unloads.
+            self._fan._withdraw_lease()
             if self._startup_task is not None and not self._startup_task.done():
                 self._startup_task.cancel()
                 await asyncio.gather(self._startup_task, return_exceptions=True)
@@ -1495,7 +1465,6 @@ class Plugin:
                 Plugin._audio_task, Plugin._restore_task, Plugin._edid_task,
                 Plugin._charge_task, Plugin._module_task, Plugin._tm_guard_task,
                 Plugin._vibration_gain_task,
-                Plugin._fan_task,
             ) if task is not None]
             for task in tasks:
                 task.cancel()
@@ -1504,16 +1473,16 @@ class Plugin:
             while self._rpc_jobs or self._workers:
                 await asyncio.gather(*tuple(self._rpc_jobs | self._workers), return_exceptions=True)
             for name in ("_audio_task", "_restore_task", "_edid_task", "_charge_task",
-                         "_module_task", "_tm_guard_task", "_vibration_gain_task", "_fan_task"):
+                         "_module_task", "_tm_guard_task", "_vibration_gain_task"):
                 setattr(Plugin, name, None)
             try:
                 await self._tdp._unload()
             finally:
                 await module_runtime.drain("tdp")
             try:
-                await self._offload(fan_controller.close)
+                await self._fan._unload()
             except Exception as error:
-                decky.logger.warning(f"{LOG} fan guard will retry automatic mode: {error}")
+                decky.logger.warning(f"{LOG} fan guardian is still restoring automatic mode: {error}")
             with _lock:
                 was_supported = bool(Plugin._state.get("supported", False))
                 was_reconnecting = bool(Plugin._state.get("modules_reconnecting", False))

@@ -28,7 +28,7 @@ MAX_EXPANDED = 128 * 1024 * 1024
 MAX_MEMBERS = 1024
 REQUIRED_RUNTIME_FILES = (
     "main.py", "dist/index.js", "plugin.json", "package.json",
-    "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "active_app.py", "tdp_backend.py", "display_script_io.py", "module_runtime.py", "diagnostics.py", "system_process.py", "input_backend.py", "display_backend.py", "audio_backend.py", "controller_backend.py", "ec_backend.py", "companion_common.py",
+    "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "fan_sleep.py", "fan_guardian.py", "fan_hwmon.py", "fan_policy.py", "active_app.py", "tdp_backend.py", "display_script_io.py", "module_runtime.py", "diagnostics.py", "system_process.py", "input_backend.py", "display_backend.py", "audio_backend.py", "controller_backend.py", "ec_backend.py", "companion_common.py",
     "assets/ayaneo.ayaneo3.oled.lua", "assets/ayaneo3-companion.yaml",
 )
 REQUEST_TIMEOUT = 6

@@ -5,8 +5,7 @@ All notable changes to AYANEO 3 Companion, newest first.
 ## [1.3.0] - in development
 
 This release brings LegionGo2Companion's design and safety work to AYANEO 3
-Companion, including its TDP Control. Fan Control from Legion is still being
-ported.
+Companion, including its TDP Control and Fan Control.
 
 ### TDP Control
 
@@ -24,6 +23,21 @@ ported.
   change and after sleep.
 - RyzenAdj is kept outside the plugin folder, so updates no longer download it
   again. **Show details** shows the package power draw.
+
+### Fan Control
+
+- **Your own fan curve:** eight points from 0 to 100°C in the fan's own percent,
+  three starting curves (Silent, Balanced, Aggressive) and a full-screen editor.
+  The graph shows the live temperature and measured RPM. Below 10% the fan
+  stops; the 100°C point never goes below 40%.
+- **A curve per TDP preset**, if you want: Silent, Balanced, Performance and
+  Custom can each use their own curve, others use the global one.
+- **Safety from the Legion:** a separate watchdog returns the fan to the
+  console's automatic curve if Companion stops, crashes or the console goes to
+  sleep, and at 100°C sets full speed even if Companion is frozen. A fan that
+  does not spin up or stop as asked turns Fan Control off with the reason.
+- The fixed 60–100% manual speed and its systemd timer are gone. A manual speed
+  left by an earlier version is returned to automatic.
 
 ### Fixes
 

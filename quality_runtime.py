@@ -34,7 +34,7 @@ async def complete(operation):
     return result
 
 
-READ_CALLS = frozenset({'get_state', 'get_battery_status', 'get_fan_status', 'get_version'})
+READ_CALLS = frozenset({'get_state', 'get_battery_status', 'get_version'})
 NETWORK_CALLS = frozenset({'check_for_updates', 'perform_update'})
 # TDP Control serialises its own changes (tdp_backend._mutation_lock): never queue its
 # foreground-game heartbeat or panel lease behind a slow controller or audio write.
@@ -43,8 +43,10 @@ TDP_READS = frozenset({'is_ready', 'get_settings', 'get_cpu_power_controls', 'ge
 TDP_CALLS = TDP_READS | {'set_cpu_boost', 'set_epp', 'retry_helper', 'set_advanced_tdp_control',
                          'set_game_ac_profile', 'delete_game_profile', 'set_game_profile_active',
                          'set_plugin_enabled', 'set_panel_active', 'reapply', 'set_active_app', 'apply_tdp'}
+# Fan Control serialises its own changes too, and Auto must never wait behind another write.
+FAN_CALLS = frozenset({'fan_get_state', 'fan_set_enabled', 'fan_save_curve', 'fan_save_assignment_mode'})
 # Polled every few seconds: log health transitions only, never each call.
-QUIET_CALLS = READ_CALLS | TDP_READS | {'set_active_app', 'set_panel_active'}
+QUIET_CALLS = READ_CALLS | TDP_READS | {'set_active_app', 'set_panel_active', 'fan_get_state'}
 
 
 def _logged_rpc(function, name):
@@ -106,17 +108,8 @@ def guard_public_calls(cls):
                     raise RuntimeError('Plugin is shutting down')
 
                 async def execute():
-                    if method in READ_CALLS or method in NETWORK_CALLS or method in TDP_CALLS:
+                    if method in READ_CALLS or method in NETWORK_CALLS or method in TDP_CALLS or method in FAN_CALLS:
                         return await fn(self, *args, **kwargs)
-                    if method == 'set_fan':
-                        # This operation has its own hardware lock and touches
-                        # no shared settings. Serialize fan commands together,
-                        # retaining admission checks and shutdown tracking.
-                        async with self._fan_rpc_lock:
-                            if self._closing:
-                                raise RuntimeError('Plugin is shutting down')
-                            self._check_write_allowed()
-                            return await fn(self, *args, **kwargs)
                     async with self._rpc_lock:
                         if self._closing:
                             raise RuntimeError('Plugin is shutting down')

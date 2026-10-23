@@ -74,7 +74,6 @@ class ControllerOwnershipTests(unittest.TestCase):
         self.stack.enter_context(patch.object(controller_backend, "program_rear_buttons"))
         self.stack.enter_context(patch.object(main.input_backend, "remove_button_fix"))
         self.stack.enter_context(patch.object(main, "_systemctl"))
-        self.stack.enter_context(patch.object(main.fan_controller, "close"))
         asyncio.run(self.plugin._remove_owned())
         self.apply.assert_called_once_with(controller_backend.normalize_controller(dict(FOUND, ff_gain=70)))
         self.gain.assert_called_once_with(70)

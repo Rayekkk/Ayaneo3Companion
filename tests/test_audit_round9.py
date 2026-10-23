@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Independent fan controls and shutdown races; no live hardware writes."""
+"""Charge monitor scheduling and shutdown races; no live hardware writes."""
 import asyncio
 from contextlib import ExitStack
 import tempfile
@@ -32,105 +32,13 @@ class AuditRound9Tests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(controller_backend, "set_vibration_gain"))
         self.stack.enter_context(patch.object(ec_backend, "both_modules_connected", return_value=False))
         self.stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())))
-        self.stack.enter_context(patch.object(main.fan_controller, "close"))
         for name in ("_restore_task", "_edid_task", "_charge_task", "_module_task",
-                     "_tm_guard_task", "_vibration_gain_task", "_audio_task", "_fan_task"):
+                     "_tm_guard_task", "_vibration_gain_task", "_audio_task"):
             self.stack.enter_context(patch.object(main.Plugin, name, None))
         self.plugin = main.Plugin()
 
     async def asyncTearDown(self):
         await asyncio.wait_for(self.plugin._unload(), 3)
-
-    @staticmethod
-    def fan_result(mode, percent=None):
-        return {"supported": True, "mode": mode, "percent": percent, "rpm": 3000}
-
-    async def test_fan_auto_does_not_wait_for_a_slow_write_but_settings_still_serialize(self):
-        entered, release = threading.Event(), threading.Event()
-        def charge(value):
-            entered.set()
-            if not release.wait(3):
-                raise TimeoutError("test did not release the charge write")
-        tasks = []
-        with patch.object(ec_backend, "read_charge_bypass", return_value=False), \
-             patch.object(ec_backend, "write_charge_bypass", side_effect=charge), \
-             patch.object(main.fan_controller, "set", side_effect=self.fan_result):
-            try:
-                tasks.append(asyncio.create_task(self.plugin.set_charge_bypass(True)))
-                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                tasks.append(asyncio.create_task(self.plugin.set_controller({"brightness": 40})))
-                tasks.append(asyncio.create_task(self.plugin.set_fan("auto")))
-                done, _ = await asyncio.wait(tasks[1:], timeout=0.25)
-                fan_finished = tasks[2] in done
-                controller_finished = tasks[1] in done
-            finally:
-                release.set()
-                results = await asyncio.wait_for(asyncio.gather(*tasks), 3)
-        self.assertTrue(fan_finished, "Auto is independent of settings and must not wait behind them")
-        self.assertFalse(controller_finished, "shared settings transactions must remain serialized")
-        self.assertEqual(results[2]["mode"], "auto")
-        self.assertEqual(self.store.getSetting("controller")["brightness"], 40)
-
-    async def test_shutdown_during_manual_fan_write_cannot_start_late_monitor(self):
-        entered, release = threading.Event(), threading.Event()
-        def fan(mode, percent=None):
-            entered.set()
-            if not release.wait(3):
-                raise TimeoutError("test did not release fan write")
-            return self.fan_result(mode, percent)
-        with patch.object(main.fan_controller, "set", side_effect=fan), \
-             patch.object(self.plugin, "_fan_loop", new=AsyncMock()) as monitor:
-            writing = asyncio.create_task(self.plugin.set_fan("manual", 80))
-            try:
-                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                unloading = asyncio.create_task(self.plugin._unload())
-                await asyncio.sleep(0)
-            finally:
-                release.set()
-                await asyncio.wait_for(writing, 3)
-                await asyncio.wait_for(unloading, 3)
-            monitor.assert_not_called()
-        self.assertIsNone(main.Plugin._fan_task)
-        self.assertFalse(self.plugin._workers)
-        main.fan_controller.close.assert_called_once()
-
-    async def test_fan_commands_remain_ordered_while_auto_waits_for_manual(self):
-        entered, release = threading.Event(), threading.Event()
-        calls = []
-        def fan(mode, percent=None):
-            calls.append(mode)
-            if mode == "manual":
-                entered.set()
-                if not release.wait(3):
-                    raise TimeoutError("test did not release manual write")
-            return self.fan_result(mode, percent)
-        with patch.object(main.fan_controller, "set", side_effect=fan), \
-             patch.object(self.plugin, "_fan_loop", new=AsyncMock()):
-            manual = asyncio.create_task(self.plugin.set_fan("manual", 80))
-            try:
-                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                automatic = asyncio.create_task(self.plugin.set_fan("auto"))
-                await asyncio.sleep(0)
-                self.assertEqual(calls, ["manual"])
-            finally:
-                release.set()
-                results = await asyncio.wait_for(asyncio.gather(manual, automatic), 3)
-        self.assertEqual(calls, ["manual", "auto"])
-        self.assertEqual(results[-1]["mode"], "auto")
-
-    async def test_unavailable_plugin_blocks_fan_before_any_hardware_write(self):
-        with patch.object(main.fan_controller, "set") as fan:
-            self.state["supported"] = False
-            with self.assertRaisesRegex(RuntimeError, "not an AYANEO"):
-                await self.plugin.set_fan("auto")
-            self.state.update(supported=True, startup_error="startup failed")
-            with self.assertRaisesRegex(RuntimeError, "startup failed"):
-                await self.plugin.set_fan("manual", 80)
-            self.state.pop("startup_error")
-            self.plugin._closing = True
-            with self.assertRaisesRegex(RuntimeError, "shutting down"):
-                await self.plugin.set_fan("auto")
-        fan.assert_not_called()
 
     async def test_charge_monitor_checks_on_ac_resume_and_periodic_interval(self):
         clock = 0.0

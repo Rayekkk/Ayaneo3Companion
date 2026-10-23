@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 const ts = require(path.join(root, 'node_modules/typescript'));
 // Shared src modules always run for real, even where tests stub other pages.
-const REAL_MODULES = new Set(['./shared', './ui', './tdp_model']);
+const REAL_MODULES = new Set(['./shared', './ui', './tdp_model', './fan_model']);
 
 // Fake timers leave no native event-loop handle, so a pending top-level promise
 // would let Node exit successfully; require explicit completion instead.

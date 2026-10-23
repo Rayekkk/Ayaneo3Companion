@@ -10,7 +10,7 @@ import { confirmAction, infoRow } from "./shared";
 import { resetUpdates } from "./updates";
 import { AboutPage } from "./about";
 import { AudioPage, BatteryPage, ButtonsPage, DisplayPage, MagicModulesPage, VibrationPage } from "./device_pages";
-import { FanPage, resetFanStatus, useFanControl } from "./fan";
+import { FanPage, fanSummary, getFanState, type FanState } from "./fan";
 import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
 import { overviewSummary, type SettingsLimits } from "./tdp_model";
 import type { BatteryStatus, Controller, Hsv, RgbMode, State, Vibration } from "./model";
@@ -125,7 +125,7 @@ const Content: FC = () => {
   const lastRgbMode = useRef<RgbMode>("solid");
   const [state, setState] = useState<State | null>(confirmedState);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
-  const fan = useFanControl(visible, activeSection === "fan");
+  const [fanState, setFanState] = useState<FanState | undefined>(undefined);
   const [tdpSettings, setTdpSettings] = useState<SettingsLimits | null>(null);
   const [pendingAction, setPendingAction] = useState<ActionKey | null>(null);
   const pendingActionRef = useRef<ActionKey | null>(null);
@@ -224,6 +224,22 @@ const Content: FC = () => {
     };
     read();
     const timer = setInterval(read, 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [visible, onScreen, activeSection]);
+
+  // The Fan row: measured numbers expire after 2.5 s, so it reads every second like Fan Control's own page.
+  useEffect(() => {
+    if (!visible || !onScreen || activeSection) return;
+    let cancelled = false, reading = false;
+    const read = () => {
+      if (reading) return;
+      reading = true;
+      getFanState(() => !cancelled).then(next => { if (!cancelled) setFanState(next); })
+        .catch(() => { if (!cancelled) setFanState(previous => previous && { ...previous, readings: { valid: false, error: "" } }); })
+        .finally(() => { reading = false; });
+    };
+    read();
+    const timer = setInterval(read, 1000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [visible, onScreen, activeSection]);
 
@@ -462,9 +478,7 @@ const Content: FC = () => {
   if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
       {link("tdp", tdpSettings ? overviewSummary(tdpSettings) : "Power limits and CPU settings", undefined)}
-      {fan.available && link("fan",
-        fan.error || !fan.status?.supported ? "Status unavailable" : `${fan.status.mode === "manual" && fan.status.percent != null ? `Manual · ${fan.status.percent}%` : "Auto"}${fan.status.rpm == null ? "" : ` · ${fan.status.rpm} RPM`}`,
-        fan.error || undefined)}
+      {link("fan", fanSummary(fanState), undefined)}
       {link("vibration", `${titleCase(state.controller.vibration)} · FF Gain ${state.controller.ff_gain}%`)}
       {link("rgb", state.controller.rgb_mode === "off" ? "Off" : `${titleCase(state.controller.rgb_mode)} · #${state.controller.color.toUpperCase()}`)}
       {link("buttons", `${state.button_fix_installed ? "L5/R5 enabled" : "Native mapping"} · TM Guard ${state.tm_guard_enabled ? "on" : "off"}`)}
@@ -492,7 +506,7 @@ const Content: FC = () => {
 
     {activeSection === "vibration" && <VibrationPage state={state} busy={busy} testing={pendingAction === "vibration"} onLevel={setVibrationLevel} onGain={setFfGain} onTest={() => void runVibrationTest()} />}
 
-    {activeSection === "fan" && <FanPage status={fan.status} available={fan.available} error={fan.error} busy={fan.busy} onApply={(mode, percent) => void fan.apply(mode, percent)} />}
+    {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} />}
 
     {activeSection === "rgb" && <PanelSection title="LED Settings">
       {state.controller_error && <PanelSectionRow><Field label="Controller control unavailable" description={state.controller_error} /></PanelSectionRow>}
@@ -564,7 +578,6 @@ export default definePlugin(() => {
     icon: <Icon />,
     onDismount() {
       stopTdpWatcher(); confirmedState = null;
-      resetFanStatus();
       resetUpdates();
     },
   };

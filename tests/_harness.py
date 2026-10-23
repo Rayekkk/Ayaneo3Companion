@@ -64,7 +64,8 @@ def install():
 # Backend modules in lookup order; main follows the modules it imports from. The ported
 # modules come after it: their names (settings, _ensure_ryzenadj, ...) shadow older ones.
 MODULES = ("companion_common", "ec_backend", "controller_backend",
-           "audio_backend", "display_backend", "input_backend", "main", "active_app", "tdp_backend")
+           "audio_backend", "display_backend", "input_backend", "main", "active_app", "tdp_backend",
+           "fan_sleep", "fan_policy", "fan_hwmon", "fan_guardian", "fan_backend")
 
 
 def owner(name):

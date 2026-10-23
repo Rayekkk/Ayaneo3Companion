@@ -50,7 +50,7 @@ function harness(component = 'Content', initialVisible = true) {
     return mod.exports;
   };
   const plugin = load('index.tsx');
-  const target = component === 'UpdateSection' ? load('updates.tsx') : component === 'FanPage' ? load('fan.tsx') : plugin;
+  const target = component === 'UpdateSection' ? load('updates.tsx') : plugin;
   const render = (nextProps = props) => { props = nextProps; cursor = 0; const tree = target[component](props); pending.splice(0).forEach(fn => fn()); return tree; };
   return { render, calls, timers, callbacks, toasts, Router,
     initialize: () => plugin.default(), get writes() { return writes; },
@@ -176,15 +176,6 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   assert.equal(returningStrength.calls.find(call => call.name === 'set_controller_with_vibration_feedback').args[0].vibration, 'medium',
     'returning to the original strength in one frame cancels the intermediate choice');
   returningStrength.respond('set_controller_with_vibration_feedback', state); await settle(); returningStrength.unmount();
-
-  const instantFanApply = harness('FanPage');
-  const manualSpeeds = [];
-  const fanControls = instantFanApply.render({ status: { supported: true, mode: 'auto', percent: null, rpm: 2500 },
-    available: true, error: '', busy: false, onApply: (mode, speed) => manualSpeeds.push([mode, speed]) });
-  find(fanControls, 'label', 'Manual speed').props.onChange(75);
-  find(fanControls, 'title', 'Enable Manual Control').props.onClick();
-  assert.deepEqual(manualSpeeds, [['manual', 75]], 'Apply Manual Speed uses the slider edit made before the next render');
-  instantFanApply.unmount();
 
   const checkingAudio = harness(); checkingAudio.render();
   checkingAudio.respond('get_state', { ...state, audio_fix_enabled: true, audio_fix_installed: true,
@@ -406,89 +397,23 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   expired.remount(); expired.respond('check_for_updates', { update_available: true, latest_version: '9.9.9' }); await settle();
   assert.equal(find(expired.render(), 'title', 'Version 9.9.9 is available'), undefined, 'old plugin lifecycle cannot publish update results'); expired.unmount();
 
-  const unsupportedFan = await ready();
-  unsupportedFan.respond('get_fan_status', { supported: false, mode: 'auto', percent: null, rpm: null, reason: 'ayaneo_ec hwmon unavailable' });
-  await settle();
-  assert.equal(find(unsupportedFan.render(), 'title', 'Fan Control'), undefined, 'unsupported fan control stays hidden');
-  unsupportedFan.unmount();
+  // Fan Control (fan.tsx, its own tests in frontend_fan.cjs): the overview row reads its state every second.
+  const fanState = { supported: true, error: '', active_curve: 'global',
+    settings: { enabled: false, revision: 0, assign_tdp_presets: false, global_curve: [], presets: {} },
+    telemetry: { active: false, automatic: true },
+    readings: { valid: true, rpm: 2100, apu_temperature: 45, age_seconds: 0, automatic: true, error: '' } };
+  const fanRow = await ready(); await settle();
+  assert.equal(count(fanRow, 'fan_get_state'), 1, 'the overview reads Fan Control once it is shown');
+  fanRow.respond('fan_get_state', fanState); await settle();
+  assert.equal(find(fanRow.render(), 'title', 'Fan Control').props.description, 'APU 45.0°C · 2100 RPM · Automatic');
+  fanRow.fire('interval', 1000); await settle();
+  assert.equal(count(fanRow, 'fan_get_state'), 2, 'measured numbers are read again every second');
+  fanRow.respond('fan_get_state', { ...fanState, supported: false, error: 'Fan Control supports only the AYANEO 3.' }); await settle();
+  assert.equal(find(fanRow.render(), 'title', 'Fan Control').props.description, 'APU 45.0°C · 2100 RPM · Not available on this console',
+    'an unsupported fan keeps its row and says why');
+  fanRow.visible(false); fanRow.fire('interval', 1000); await settle();
+  assert.equal(count(fanRow, 'fan_get_state'), 2, 'a hidden overview reads nothing');
+  fanRow.unmount();
 
-  const fan = await ready();
-  fan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 77, rpm: 2100 });
-  await settle();
-  const fanLink = find(fan.render(), 'title', 'Fan Control');
-  assert.ok(fanLink, 'supported fan control appears in the hardware menu');
-  assert.ok(!String(fanLink.props.description).includes('77%'), 'Auto mode does not present last PWM as current speed');
-  fanLink.props.onClick();
-  let fanPage = findComponent(fan.render(), 'FanPage');
-  assert.ok(fanPage, 'fan page opens without changing the other sections');
-  fanPage.props.onApply('manual', 75); fanPage.props.onApply('manual', 80);
-  assert.equal(count(fan, 'set_fan'), 1, 'same-frame fan edits are single flight');
-  assert.equal(fan.calls.find(call => call.name === 'set_fan').args[1], 75);
-  fan.respond('set_fan', { supported: true, mode: 'manual', percent: 75, rpm: 3000 }); await settle();
-  fanPage = findComponent(fan.render(), 'FanPage');
-  assert.equal(fanPage.props.status.percent, 75, 'fan page shows verified backend result');
-  fanPage.props.onApply('auto');
-  const autoCall = fan.calls.filter(call => call.name === 'set_fan')[1];
-  assert.equal(autoCall.args.length, 1, 'Auto request omits a stale PWM value');
-  fan.respond('set_fan', { supported: true, mode: 'auto', percent: 75, rpm: 2200 }); await settle();
-  fan.unmount();
-
-  const slowFan = await ready();
-  slowFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: null, rpm: 2200 }); await settle();
-  slowFan.fire('interval', 30000); open(slowFan, 'Fan Control');
-  assert.equal(count(slowFan, 'get_fan_status'), 2, 'opening the page shares its pending overview read');
-  slowFan.respond('get_fan_status', { supported: true, mode: 'manual', percent: 80, rpm: 3400 }); await settle();
-  assert.equal(findComponent(slowFan.render(), 'FanPage').props.status.rpm, 3400,
-    'opening the fan page cannot discard the latest read and wait another five seconds');
-  slowFan.fire('interval', 5000); slowFan.visible(false); slowFan.visible(true);
-  slowFan.respond('get_fan_status', { supported: true, mode: 'manual', percent: 90, rpm: 3900 }); await settle();
-  assert.equal(count(slowFan, 'get_fan_status'), 4, 'a stale hidden response immediately schedules the reopened view read');
-  slowFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: null, rpm: 2400 }); await settle();
-  findComponent(slowFan.render(), 'SectionHeader').props.onBack();
-  assert.equal(find(slowFan.render(), 'title', 'Fan Control').props.description, 'Auto · 2400 RPM');
-  slowFan.unmount();
-
-  const lostFan = await ready();
-  lostFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
-  open(lostFan, 'Fan Control');
-  lostFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
-  findComponent(lostFan.render(), 'FanPage').props.onApply('manual', 75);
-  lostFan.respond('set_fan', { supported: false, mode: 'auto', percent: null, rpm: null, reason: 'Temporary EC read failure' }); await settle();
-  let lostPage = findComponent(lostFan.render(), 'FanPage');
-  assert.equal(lostPage.props.available, true, 'a temporary read failure does not erase confirmed fan capability');
-  assert.ok(lostPage.props.error.includes('Temporary EC read failure'), 'unconfirmed manual result remains visible');
-  const fanView = harness('FanPage');
-  let lostTree = fanView.render(lostPage.props);
-  assert.equal(find(lostTree, 'title', 'Restore Automatic Control').props.disabled, false, 'Auto recovery is enabled even when the unknown status defaults to auto');
-  assert.equal(find(lostTree, 'title', 'Enable Manual Control').props.disabled, true, 'manual writes stay disabled until live status recovers');
-  lostPage.props.onApply('manual', 80);
-  assert.equal(count(lostFan, 'set_fan'), 1, 'the hook also refuses manual writes while the controller is unreadable');
-  lostFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
-  lostPage = findComponent(lostFan.render(), 'FanPage');
-  assert.ok(lostPage.props.error.includes('Temporary EC read failure'), 'successful polling does not hide a failed manual action');
-  findComponent(lostFan.render(), 'SectionHeader').props.onBack();
-  assert.equal(find(lostFan.render(), 'title', 'Fan Control').props.description, 'Status unavailable', 'overview does not claim an unconfirmed automatic mode');
-  open(lostFan, 'Fan Control');
-  lostPage = findComponent(lostFan.render(), 'FanPage');
-  lostPage.props.onApply('auto');
-  assert.equal(count(lostFan, 'set_fan'), 2, 'Auto remains callable after an unconfirmed manual operation');
-  lostFan.respond('set_fan', { supported: true, mode: 'auto', percent: 70, rpm: 2400 }); await settle();
-  lostPage = findComponent(lostFan.render(), 'FanPage');
-  assert.equal(lostPage.props.error, '', 'verified Auto clears the failed-action message');
-  lostFan.unmount(); fanView.unmount();
-
-  const disappearingFan = await ready();
-  disappearingFan.respond('get_fan_status', { supported: true, mode: 'manual', percent: 75, rpm: 3000 }); await settle();
-  disappearingFan.fire('interval', 30000);
-  disappearingFan.respond('get_fan_status', { supported: false, mode: 'auto', percent: null, rpm: null, reason: 'Temporarily unavailable' }); await settle();
-  assert.ok(find(disappearingFan.render(), 'title', 'Fan Control'), 'previously supported fan remains reachable after a failed poll');
-  disappearingFan.unmount();
-  assert.ok(find(disappearingFan.remount(), 'title', 'Fan Control'), 'capability survives a view remount in the same plugin lifecycle');
-  disappearingFan.unmount();
-  const retiringPlugin = disappearingFan.initialize(); retiringPlugin.onDismount();
-  disappearingFan.remount();
-  assert.equal(find(disappearingFan.render(), 'title', 'Fan Control'), undefined, 'plugin unload resets the capability proof for a new lifecycle');
-  disappearingFan.unmount();
-
-  console.log('Frontend lifecycle regressions: PASS (polling, mutations, RGB queue, dropdown, updates, fan safety and error UI)');
+  console.log('Frontend lifecycle regressions: PASS (polling, mutations, RGB queue, dropdown, updates, fan overview and error UI)');
 })().catch(error => { console.error(error); process.exitCode = 1; });

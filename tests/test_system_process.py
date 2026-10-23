@@ -31,7 +31,7 @@ class SystemProcessTests(unittest.TestCase):
             tdp_backend._powerstation_active()
             main._systemctl("restart", "inputplumber")
             audio_backend._set_audio_control(0, "L0 DSP1 Firmware Load", "on")
-            fan_backend.FanController()._run(["/usr/bin/systemctl", "status"])
+            fan_backend.retire_legacy_guard()
             for call in run.call_args_list:
                 self.assertEqual(call.kwargs["env"], CLEAN)
                 self.assertIs(call.kwargs["stdin"], subprocess.DEVNULL)

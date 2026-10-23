@@ -63,7 +63,6 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(mock.patch.object(input_backend, "button_fix_installed",
                                                   side_effect=lambda: self.mapping.exists() and
                                                   self.mapping.read_bytes() == self.map_bytes))
-        self.stack.enter_context(mock.patch.object(main.fan_controller, "recover_abandoned"))
         self.stack.enter_context(mock.patch.object(companion_common.updater, "ssl_context"))
         self.systemctl = self.stack.enter_context(mock.patch.object(main, "_systemctl"))
         self.stack.enter_context(mock.patch.object(controller_backend, "program_rear_buttons"))
@@ -281,15 +280,6 @@ class NativeControllerAbiTests(unittest.TestCase):
                                side_effect=AssertionError("must not fall back across active drivers")):
             self.assertFalse(ec_backend.ensure_controller_control())
 
-
-class FanRpcGuardTests(unittest.IsolatedAsyncioTestCase):
-    async def test_fan_write_rejects_other_devices_even_before_state_is_ready(self):
-        with mock.patch.object(main.Plugin, "_state", {}), \
-             mock.patch.object(companion_common, "supported_device", return_value=False), \
-             mock.patch.object(main.fan_controller, "set") as write:
-            with self.assertRaisesRegex(RuntimeError, "restricted to AYANEO 3"):
-                await main.Plugin().set_fan("manual", 60)
-        write.assert_not_called()
 
 
 if __name__ == "__main__":

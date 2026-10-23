@@ -19,7 +19,7 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
     def prepare_startup(self):
         for name in ("_restore_task", "_edid_task", "_charge_task",
                      "_module_task", "_tm_guard_task", "_vibration_gain_task",
-                     "_audio_task", "_fan_task"):
+                     "_audio_task"):
             self.stack.enter_context(patch.object(main.Plugin, name, None))
         for name in ("_restore_hardware", "_edid_loop", "_charge_loop",
                      "_module_loop", "_tm_guard_loop", "_vibration_gain_loop", "_restore_audio"):
@@ -29,8 +29,6 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
                             ("ensure_charge_bypass_control", None), ("audio_fix_installed", True),
                             ("audio_fix_ready", True), ("audio_fix_supported", True)):
             self.stack.enter_context(patch.object(owner(name), name, return_value=value))
-        self.stack.enter_context(patch.object(main.fan_controller, "recover_abandoned"))
-        self.stack.enter_context(patch.object(main.fan_controller, "close"))
         self.stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(
             reset=Mock(), close=Mock(), ssl_context=Mock(), plugin_version=Mock(return_value="1.2.0"))))
 
@@ -146,11 +144,10 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         async def quick_retry(delay):
             await sleep(0.001)
         for name in ("_restore_task", "_edid_task", "_charge_task", "_module_task",
-                     "_tm_guard_task", "_vibration_gain_task", "_audio_task", "_fan_task"):
+                     "_tm_guard_task", "_vibration_gain_task", "_audio_task"):
             self.stack.enter_context(patch.object(main.Plugin, name, None))
         with patch.object(main.asyncio, "sleep", side_effect=quick_retry), \
              patch.object(self.plugin, "_restore_audio_once", side_effect=failing_worker) as restore, \
-             patch.object(main.fan_controller, "close"), \
              patch.object(companion_common, "supported_device", return_value=False), \
              patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())):
             monitor = asyncio.create_task(self.plugin._restore_audio())

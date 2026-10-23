@@ -60,18 +60,14 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(finished, "this independent operation must finish before settings disk I/O")
         return results[1]
 
-    async def test_fan_auto_remains_responsive_during_settings_disk_io(self):
-        with patch.object(main.fan_controller, "set", return_value={
-                "supported": True, "mode": "auto", "percent": None, "rpm": 3000}):
-            result = await self.assert_loop_responsive(lambda: self.plugin.set_fan("auto"), True)
-        self.assertEqual(result["mode"], "auto")
+    async def test_fan_off_remains_responsive_during_settings_disk_io(self):
+        # Fan Control keeps its own store and lock: turning it off never waits for main's settings write.
+        off = dict(success=True, settings=dict(enabled=False))
+        with patch.object(self.plugin._fan, "set_enabled", return_value=off) as set_enabled:
+            result = await self.assert_loop_responsive(lambda: self.plugin.fan_set_enabled(False), True)
+        self.assertFalse(result["settings"]["enabled"])
+        set_enabled.assert_awaited_once_with(False)
 
-    async def test_recovery_rejection_still_prevents_fan_write(self):
-        self.store._recovery_error = "No usable settings copy remains"
-        with patch.object(main.fan_controller, "set") as fan:
-            with self.assertRaisesRegex(RuntimeError, "Settings need recovery"):
-                await self.plugin.set_fan("auto")
-        fan.assert_not_called()
 
 class RawEcPowerTests(unittest.TestCase):
     def setUp(self):
