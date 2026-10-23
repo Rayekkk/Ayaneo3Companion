@@ -73,15 +73,6 @@ def require_supported_device(action: str = "hardware control") -> None:
         raise RuntimeError(f"{action} is restricted to AYANEO 3")
 
 
-def clean_subprocess_env() -> dict:
-    environment = os.environ.copy()
-    # Decky's PyInstaller runtime ships private libraries that are incompatible
-    # with SteamOS systemctl and some host multimedia utilities.
-    environment.pop("LD_LIBRARY_PATH", None)
-    environment.pop("LD_PRELOAD", None)
-    return environment
-
-
 def atomic_write_bytes(target: Path, data: bytes, mode: int = 0o644) -> None:
     """Replace a regular configuration file without following a shared temp name."""
     descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp",

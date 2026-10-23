@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Disk I/O must not stop the Decky event loop; all device access is mocked."""
+import subprocess
 import asyncio
 import threading
 import time
@@ -84,7 +85,7 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         fan.assert_not_called()
 
     async def assert_ownership_failure(self, results, expected_calls):
-        with patch.object(main.subprocess, "run", side_effect=results) as command, \
+        with patch.object(subprocess, "run", side_effect=results) as command, \
              patch.object(power_backend, "_ensure_ryzenadj") as ensure, \
              patch.object(power_backend, "write_cpu_boost") as boost:
             with self.assertRaises(power_backend.TdpUnavailableError):
@@ -99,13 +100,13 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bus_probe_timeout_does_not_repeat_in_hardware_rollback(self):
         await self.assert_ownership_failure(
-            main.subprocess.TimeoutExpired(["busctl"], 5), 1)
+            subprocess.TimeoutExpired(["busctl"], 5), 1)
 
     async def test_service_probe_timeout_does_not_repeat_in_hardware_rollback(self):
         def command(arguments, **kwargs):
             if arguments[0] == "busctl":
                 return types.SimpleNamespace(returncode=1)
-            raise main.subprocess.TimeoutExpired(arguments, 5)
+            raise subprocess.TimeoutExpired(arguments, 5)
         await self.assert_ownership_failure(command, 2)
 
     async def test_missing_ownership_probe_tool_immediately_invalidates_tdp(self):
@@ -118,11 +119,11 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             if arguments[0] == "busctl":
                 probes += 1
                 if probes == 2:
-                    raise main.subprocess.TimeoutExpired(arguments, 5)
+                    raise subprocess.TimeoutExpired(arguments, 5)
                 return types.SimpleNamespace(returncode=1)
             self.assertEqual(arguments[0], "systemctl")
             return types.SimpleNamespace(returncode=0, stdout="inactive\n")
-        with patch.object(main.subprocess, "run", side_effect=command) as run, \
+        with patch.object(subprocess, "run", side_effect=command) as run, \
              patch.object(power_backend, "_ensure_ryzenadj") as ensure, \
              patch.object(power_backend, "write_cpu_boost") as boost:
             with self.assertRaises(power_backend.TdpUnavailableError):
@@ -142,9 +143,9 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(arguments[0], str(power_backend.RYZENADJ))
             writes.append(arguments)
             if len(writes) == 1:
-                raise main.subprocess.TimeoutExpired(arguments, 10)
+                raise subprocess.TimeoutExpired(arguments, 10)
             return types.SimpleNamespace(returncode=0)
-        with patch.object(main.subprocess, "run", side_effect=command), \
+        with patch.object(subprocess, "run", side_effect=command), \
              patch.object(power_backend, "_ensure_ryzenadj"), \
              patch.object(power_backend, "write_cpu_boost"):
             with self.assertRaisesRegex(RuntimeError, "previous hardware settings restored"):

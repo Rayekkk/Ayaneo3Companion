@@ -23,6 +23,8 @@ jobs:
         include:
           - os: ubuntu-24.04
             python: '3.10'
+          - os: ubuntu-24.04
+            python: '3.14'
           - os: windows-2022
             python: '3.13'
     env:
@@ -36,7 +38,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Run isolated backend tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+        run: python -W error -m unittest discover -s tests -p "test_*.py" -v
 
   frontend-package:
     name: Frontend and package (Node.js 24)
@@ -46,6 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0  # release tags: the legacy updater check reads 1.1.0 and 1.2.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -90,7 +93,7 @@ jobs:
           required = {
               'plugin.json', 'package.json', 'package-lock.json', manifest['main'],
               manifest['bin'], 'LICENSE', 'NOTICE', 'safe_settings.py', 'quality_runtime.py',
-              'lego_updater.py', 'fan_backend.py', 'input_backend.py', 'display_backend.py', 'audio_backend.py', 'power_backend.py', 'controller_backend.py', 'ec_backend.py', 'companion_common.py', 'README.md', 'CHANGELOG.md', 'bootstrap.sh',
+              'lego_updater.py', 'fan_backend.py', 'module_runtime.py', 'diagnostics.py', 'system_process.py', 'input_backend.py', 'display_backend.py', 'audio_backend.py', 'power_backend.py', 'controller_backend.py', 'ec_backend.py', 'companion_common.py', 'README.md', 'CHANGELOG.md', 'bootstrap.sh',
               'bootstrap_installer.py',
               'Install AYANEO 3 Companion.desktop', 'assets/ayaneo.ayaneo3.oled.lua',
               'assets/ayaneo3-companion.yaml', 'THIRD_PARTY_LICENSES/decky-api-LGPL-2.1.txt',
@@ -126,9 +129,13 @@ jobs:
                   assert source.is_file(), f'Unexpected archive file: {path}'
                   assert payload.read(member) == source.read_bytes(), f'Stale package file: {path}'
           print(f'Archive verified: {archive.name}')
+      - name: Updaters shipped in 1.1.0 and 1.2.0 accept the ZIP
+        run: python scripts/check-legacy-updaters.py Ayaneo3Companion-*.zip
       - name: Upload verified plugin ZIP
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Ayaneo3Companion
-          path: Ayaneo3Companion-*.zip
+          path: |
+            Ayaneo3Companion-*.zip
+            Ayaneo3Companion-*.zip.sha256
           if-no-files-found: error

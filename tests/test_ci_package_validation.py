@@ -12,8 +12,7 @@ class PackageWorkflowTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/checks.yml").read_text(encoding="utf-8")
         step = workflow.split("      - name: Verify archive integrity and contents\n", 1)[1]
-        code = textwrap.dedent(step.split("        run: |\n", 1)[1].split(
-            "      - name: Upload verified plugin ZIP\n", 1)[0])
+        code = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name: ", 1)[0])
         setup = code.split("manifest = ", 1)[0]
         with tempfile.TemporaryDirectory(prefix="aya3-actions-python-") as directory:
             script = Path(directory) / "step.py"

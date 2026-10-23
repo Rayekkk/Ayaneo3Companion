@@ -21,6 +21,8 @@ import threading
 import time
 from pathlib import Path
 
+import system_process
+
 
 HWMON_ROOT = Path("/sys/class/hwmon")
 LEASE_DIR = Path("/run/ayaneo3-companion")
@@ -195,12 +197,8 @@ class FanController:
                     "rpm": None, "reason": str(error)}
 
     def _run(self, args):
-        # Decky's PyInstaller libraries break host systemd tools, as in main.py.
-        env = {key: value for key, value in os.environ.items()
-               if key not in ("LD_LIBRARY_PATH", "LD_PRELOAD")}
         try:
-            result = subprocess.run(args, check=False, capture_output=True,
-                                    text=True, timeout=5, env=env)
+            result = system_process.run(args, 5, capture_output=True, text=True)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeError(f"fan guard command failed: {error}") from error
         if result.returncode:

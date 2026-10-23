@@ -87,7 +87,11 @@ const state = { supported: true, device: 'AYANEO 3', version: '1.0.2', tdp_backe
   module_left: { label: 'Gamepad' }, module_right: { label: 'Gamepad' }, modules_connected: true,
 };
 const count = (h, name) => h.calls.filter(c => c.name === name).length;
-const open = (h, title) => { const field = find(h.render(), 'title', title); assert.ok(field, title); field.props.onClick(); return h.render(); };
+// A page stays open across QAM visibility changes; return to the overview explicitly, like the user.
+const open = (h, title) => {
+  findComponent(h.render(), 'SectionHeader')?.props.onBack();
+  const field = find(h.render(), 'title', title); assert.ok(field?.props.onClick, title); field.props.onClick(); return h.render();
+};
 const ready = async () => { const h = harness(); h.render(); h.respond('get_state', state); await settle(); h.render(); return h; };
 (async () => {
   for (const operation of ['save', 'delete']) for (const failed of [false, true]) {
@@ -192,8 +196,9 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   const failedStatus = await ready();
   failedStatus.fire('interval', 1500);
   failedStatus.reject('get_state'); await settle();
-  assert.ok(find(failedStatus.render(), 'label', 'Status refresh failed'), 'a failed poll must identify cached values as unverified');
-  assert.ok(find(failedStatus.render(), 'title', 'TDP'), 'cached controls remain reachable during a transient status failure');
+  assert.match(find(failedStatus.render(), 'title', 'TDP').props.statusNote, /^Older data · Last read \d+s ago · Retrying…$/,
+    'a failed poll must identify cached values as unverified on every overview row');
+  assert.ok(find(failedStatus.render(), 'title', 'TDP').props.onClick, 'cached controls remain reachable during a transient status failure');
   open(failedStatus, 'Vibration');
   assert.ok(find(failedStatus.render(), 'label', 'Status refresh failed'), 'status failure remains visible on control pages');
   failedStatus.fire('interval', 1500);
@@ -452,7 +457,7 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   assert.equal(closingTest.writes, beforeClosingAck);
 
   const rgb = await ready(); const plugin = rgb.initialize(); assert.equal(plugin.alwaysRender, true, 'Decky preserves content behind native dropdown');
-  open(rgb, 'RGB'); const hue = find(rgb.render(), 'label', 'Hue'), brightness = find(rgb.render(), 'label', 'Brightness');
+  open(rgb, 'Lighting'); const hue = find(rgb.render(), 'label', 'Hue'), brightness = find(rgb.render(), 'label', 'Brightness');
   hue.props.onChange(120); hue.props.onChangeEnd(120); brightness.props.onChange(42); brightness.props.onChangeEnd(42);
   assert.equal(count(rgb, 'set_controller'), 0, 'slider movement is debounced');
   rgb.visible(false); assert.equal(count(rgb, 'set_controller'), 1, 'closing QAM flushes the latest RGB edit');
@@ -461,20 +466,20 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   rgb.unmount(); writes = rgb.writes; rgb.respond('set_controller', { ...state, controller: { ...state.controller, ...rgbCall.args[0] } }); await settle();
   assert.equal(rgb.writes, writes, 'pending controller save completes without touching an unmounted view'); plugin.onDismount();
 
-  const queue = await ready(); open(queue, 'RGB'); find(queue.render(), 'label', 'LED Mode').props.onChange({ data: 'pulse' }); queue.fire('timeout');
+  const queue = await ready(); open(queue, 'Lighting'); find(queue.render(), 'label', 'LED Mode').props.onChange({ data: 'pulse' }); queue.fire('timeout');
   find(queue.render(), 'label', 'LED Mode').props.onChange({ data: 'rainbow' }); queue.unmount();
   assert.equal(count(queue, 'set_controller'), 1, 'controller writes do not overlap');
   writes = queue.writes; queue.respond('set_controller', { ...state, controller: { ...state.controller, rgb_mode: 'pulse' } }); await settle();
   assert.equal(count(queue, 'set_controller'), 2, 'queued latest edit survives unmount during an earlier write');
   queue.respond('set_controller', { ...state, controller: { ...state.controller, rgb_mode: 'rainbow' } }); await settle(); assert.equal(queue.writes, writes);
 
-  const remounted = await ready(); open(remounted, 'RGB');
+  const remounted = await ready(); open(remounted, 'Lighting');
   find(remounted.render(), 'label', 'Hue').props.onChange(120);
   find(remounted.render(), 'label', 'Hue').props.onChangeEnd(120);
   remounted.unmount(); await settle();
   const oldEdit = remounted.calls.find(call => call.name === 'set_controller');
   assert.deepEqual({ ...oldEdit.args[0] }, { color: '00ff00' }, 'color edit omits unrelated fields');
-  remounted.remount(); remounted.respond('get_state', state); await settle(); open(remounted, 'RGB');
+  remounted.remount(); remounted.respond('get_state', state); await settle(); open(remounted, 'Lighting');
   find(remounted.render(), 'label', 'Brightness').props.onChange(40);
   find(remounted.render(), 'label', 'Brightness').props.onChangeEnd(40);
   remounted.fire('timeout'); await settle();
@@ -486,7 +491,7 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   remounted.respond('set_controller', { ...state, controller: { ...state.controller, color: '00ff00', brightness: 40 } }); await settle();
   assert.ok(find(remounted.render(), 'label', '#00FF00'), 'merged backend acknowledgement retains both edits'); remounted.unmount();
 
-  const saturation = await ready(); open(saturation, 'RGB');
+  const saturation = await ready(); open(saturation, 'Lighting');
   find(saturation.render(), 'label', 'Saturation').props.onChange(50);
   find(saturation.render(), 'label', 'Saturation').props.onChangeEnd(50);
   saturation.fire('timeout'); await settle();
@@ -494,8 +499,9 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   assert.deepEqual(Object.keys(saturationEdit.args[0]), ['color'], 'saturation cannot replace a newer brightness or gain');
   saturation.respond('set_controller', { ...state, controller: { ...state.controller, ...saturationEdit.args[0] } }); await settle(); saturation.unmount();
 
-  const dropdown = await ready(); open(dropdown, 'RGB'); const menu = find(dropdown.render(), 'label', 'LED Mode');
-  menu.props.onMenuWillOpen(() => dropdown.visible(false)); menu.props.onChange({ data: 'pulse' }); dropdown.fire('timeout');
+  const dropdown = await ready(); open(dropdown, 'Lighting'); const menu = find(dropdown.render(), 'label', 'LED Mode');
+  // The native menu hides Quick Access while it is open.
+  dropdown.visible(false); menu.props.onChange({ data: 'pulse' }); dropdown.fire('timeout');
   dropdown.visible(true); assert.ok(find(dropdown.render(), 'label', 'LED Mode'), 'native dropdown returns to the same section'); dropdown.unmount();
 
   const watcher = harness(); watcher.Router.MainRunningApp = { appid: 111, display_name: 'A' }; watcher.watcher.start();
@@ -555,7 +561,8 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   const profileError = harness(); profileError.Router.MainRunningApp = { appid: 111, display_name: 'A' };
   profileError.watcher.start(); profileError.respond('set_active_app'); await settle(); profileError.render();
   profileError.respond('get_state', state); profileError.reject('get_game_profile'); await settle();
-  assert.ok(find(profileError.render(), 'label', 'Game profile lookup failed'), 'lookup failure also appears in the overview');
+  assert.match(find(profileError.render(), 'title', 'TDP').props.statusNote, /^Game profile lookup failed · Retrying…/,
+    'lookup failure also appears in the overview, on the TDP row');
   open(profileError, 'TDP');
   assert.ok(find(profileError.render(), 'label', 'Game profile lookup failed'), 'navigation cannot dismiss an unresolved read failure');
   find(profileError.render(), 'label', 'CPU Boost').props.onChange(true); await settle();
@@ -606,7 +613,7 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   failedContext.respond('set_cpu_boost', { ...state, active_app_id: '', cpu_boost: true }); await settle();
   assert.equal(find(failedContext.render(), 'label', 'CPU Boost').props.checked, true, 'independent RPC results remain visible across a TDP context mismatch');
   failedContext.respond('get_state', { ...state, active_app_id: '', cpu_boost: true }); await settle();
-  findComponent(failedContext.render(), 'SectionHeader').props.onBack(); open(failedContext, 'RGB');
+  findComponent(failedContext.render(), 'SectionHeader').props.onBack(); open(failedContext, 'Lighting');
   assert.equal(find(failedContext.render(), 'label', 'LED Mode').props.disabled, false, 'RGB remains available when only game TDP synchronization failed');
   find(failedContext.render(), 'label', 'LED Mode').props.onChange({ data: 'pulse' }); failedContext.fire('timeout');
   assert.equal(count(failedContext, 'set_controller'), 1);
@@ -678,7 +685,7 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   newProfileDraft.respond('set_game_profile', { ...state, tdp: { spl: 21, sppt: 23, fppt: 26 }, tdp_preset: 'Custom' }); await settle();
   newProfileDraft.unmount(); newProfileDraft.watcher.stop();
 
-  const combined = await ready(); open(combined, 'RGB');
+  const combined = await ready(); open(combined, 'Lighting');
   find(combined.render(), 'label', 'Hue').props.onChange(120);
   find(combined.render(), 'label', 'Hue').props.onChangeEnd(120);
   findComponent(combined.render(), 'SectionHeader').props.onBack(); open(combined, 'Vibration');
@@ -699,7 +706,7 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   assert.ok(find(capabilities.render(), 'label', 'TDP control unavailable'));
   assert.equal(find(capabilities.render(), 'children', 'Max').props.disabled, true);
   assert.equal(find(capabilities.render(), 'label', 'CPU Boost').props.disabled, false, 'independent CPU control remains available');
-  findComponent(capabilities.render(), 'SectionHeader').props.onBack(); open(capabilities, 'RGB');
+  findComponent(capabilities.render(), 'SectionHeader').props.onBack(); open(capabilities, 'Lighting');
   assert.equal(find(capabilities.render(), 'label', 'Enable LED Control').props.disabled, true);
   assert.equal(find(capabilities.render(), 'label', 'Hue').props.disabled, true);
   assert.ok(find(capabilities.render(), 'label', 'Controller control unavailable'));
@@ -791,6 +798,7 @@ const ready = async () => { const h = harness(); h.render(); h.respond('get_stat
   slowFan.respond('get_fan_status', { supported: true, mode: 'manual', percent: 90, rpm: 3900 }); await settle();
   assert.equal(count(slowFan, 'get_fan_status'), 4, 'a stale hidden response immediately schedules the reopened view read');
   slowFan.respond('get_fan_status', { supported: true, mode: 'auto', percent: null, rpm: 2400 }); await settle();
+  findComponent(slowFan.render(), 'SectionHeader').props.onBack();
   assert.equal(find(slowFan.render(), 'title', 'Fan Control').props.description, 'Auto · 2400 RPM');
   slowFan.unmount();
 

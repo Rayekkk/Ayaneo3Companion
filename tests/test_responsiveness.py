@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """RPC responsiveness checks; hardware and services are isolated doubles."""
+import subprocess
 import asyncio
 from contextlib import ExitStack
 import tempfile
@@ -135,7 +136,7 @@ class ResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.state["tdp_supported"])
         with patch.object(power_backend, "_powerstation_active", return_value=True), \
              patch.object(power_backend, "_ensure_ryzenadj") as ensure, \
-             patch.object(main.subprocess, "run") as command:
+             patch.object(subprocess, "run") as command:
             with self.assertRaises(power_backend.TdpUnavailableError):
                 await self.plugin.set_tdp(power_backend.PRESETS["Max"], "Max", "111")
         ensure.assert_not_called()

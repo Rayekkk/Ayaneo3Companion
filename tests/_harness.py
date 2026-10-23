@@ -1,4 +1,25 @@
+import faulthandler
 import os, sys, tempfile, types
+
+# A hung run ends with every thread's stack instead of stalling (the suite takes ~40 s, CI allows 10 min).
+faulthandler.dump_traceback_later(480, exit=True)
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import diagnostics  # noqa: E402  (no I/O at import)
+# No file sink unless a test injects its own directory: never the real /var/log.
+DEFAULT_LOG_DIR, diagnostics.LOG_DIR = diagnostics.LOG_DIR, None
+
+
+class _Socket:  # Shape of Decky's UnixSocket, so main's unload workaround finds its listener.
+    async def _read_single_line(self, _reader):
+        return ""
+
+
+def _emitter(sandboxed):
+    async def emit(_event, *_args):
+        sandboxed._socket
+    return emit
+
 
 def install():
     temp = tempfile.mkdtemp(prefix="aya3-tests-")
@@ -7,6 +28,7 @@ def install():
     decky.DECKY_PLUGIN_SETTINGS_DIR = temp
     decky.logger = types.SimpleNamespace(info=lambda *_: None, warning=lambda *_: None,
                                         error=lambda *_: None, debug=lambda *_: None)
+    decky.emit = _emitter(types.SimpleNamespace(_socket=_Socket()))
     sys.modules["decky"] = decky
     settings = types.ModuleType("settings")
     class SettingsManager:

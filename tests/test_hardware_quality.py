@@ -1,4 +1,5 @@
 """Failure-path tests; every device, sysfs path and command is isolated."""
+import subprocess
 import select
 import urllib.request
 import hashlib
@@ -40,7 +41,7 @@ class HardwareQualityTests(unittest.TestCase):
         self.patches = context = mock.patch.object(companion_common, "supported_device", return_value=True)
         context.start()
         self.addCleanup(context.stop)
-        command = mock.patch.object(main.subprocess, "run", side_effect=AssertionError("unexpected host command"))
+        command = mock.patch.object(subprocess, "run", side_effect=AssertionError("unexpected host command"))
         command.start()
         self.addCleanup(command.stop)
 
@@ -160,7 +161,7 @@ class HardwareQualityTests(unittest.TestCase):
              mock.patch.object(os, "close"), \
              mock.patch.object(os, "write", side_effect=lambda _fd, data: writes.append(data) or len(data)), \
              mock.patch.object(Path, "read_bytes", side_effect=[OSError("read failed"), OSError("read failed"), original]), \
-             mock.patch.object(main.subprocess, "run", return_value=types.SimpleNamespace(returncode=0, stderr="")) as command:
+             mock.patch.object(subprocess, "run", return_value=types.SimpleNamespace(returncode=0, stderr="")) as command:
             with self.assertRaisesRegex(RuntimeError, "could not save audio calibration") as error:
                 audio_backend._write_audio_efi(path, candidate, original)
         self.assertNotIn("recovery failed", str(error.exception))
@@ -173,7 +174,7 @@ class HardwareQualityTests(unittest.TestCase):
              mock.patch.object(os, "close"), \
              mock.patch.object(os, "write", side_effect=lambda _fd, data: len(data)), \
              mock.patch.object(Path, "read_bytes", return_value=b"corrupted"), \
-             mock.patch.object(main.subprocess, "run", side_effect=[
+             mock.patch.object(subprocess, "run", side_effect=[
                  types.SimpleNamespace(returncode=0, stderr=""),
                  types.SimpleNamespace(returncode=1, stderr="relock failed")]):
             with self.assertRaises(RuntimeError) as error:
@@ -187,7 +188,7 @@ class HardwareQualityTests(unittest.TestCase):
         playback.poll.side_effect = [None, 0]
         with mock.patch.object(audio_backend, "_write_audio_dsp_register"), \
              mock.patch.object(audio_backend, "_read_audio_dsp_register", side_effect=RuntimeError("read failed")), \
-             mock.patch.object(main.subprocess, "Popen", return_value=playback):
+             mock.patch.object(subprocess, "Popen", return_value=playback):
             with self.assertRaisesRegex(RuntimeError, "read failed"):
                 audio_backend._measure_audio_calibration(1)
         playback.terminate.assert_called_once()
@@ -198,7 +199,7 @@ class HardwareQualityTests(unittest.TestCase):
         values = [*power_backend.PRESETS.values(), {"spl": 35, "sppt": 37, "fppt": 37}]
         with mock.patch.object(power_backend, "_powerstation_active", return_value=True), \
              mock.patch.object(power_backend, "_ensure_ryzenadj") as download, \
-             mock.patch.object(main.subprocess, "run") as command:
+             mock.patch.object(subprocess, "run") as command:
             for value in values:
                 with self.subTest(value=value), self.assertRaisesRegex(power_backend.TdpUnavailableError, "37 W"):
                     power_backend.apply_tdp(value)
@@ -208,13 +209,13 @@ class HardwareQualityTests(unittest.TestCase):
     def test_ryzenadj_receives_all_three_normalized_limits(self):
         with mock.patch.object(power_backend, "_powerstation_active", return_value=False), \
              mock.patch.object(power_backend, "_ensure_ryzenadj"), \
-             mock.patch.object(main.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
+             mock.patch.object(subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
             power_backend.apply_tdp({"spl": 35, "sppt": 999, "fppt": 999})
         self.assertEqual(command.call_args.args[0][1:],
                          ["--stapm-limit=35000", "--slow-limit=37000", "--fast-limit=37000"])
 
     def test_powerstation_bus_owner_blocks_tdp_without_a_gpu_property_probe(self):
-        with mock.patch.object(main.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
+        with mock.patch.object(subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
             self.assertTrue(power_backend._powerstation_active())
         command.assert_called_once()
         self.assertEqual(command.call_args.args[0][2], "status")
@@ -222,12 +223,12 @@ class HardwareQualityTests(unittest.TestCase):
     def test_powerstation_service_startup_and_reload_are_treated_as_active(self):
         for state, active in (("active", True), ("activating", True), ("reloading", True),
                               ("deactivating", True), ("inactive", False)):
-            with self.subTest(state=state), mock.patch.object(main.subprocess, "run", side_effect=[
+            with self.subTest(state=state), mock.patch.object(subprocess, "run", side_effect=[
                     types.SimpleNamespace(returncode=1), types.SimpleNamespace(returncode=0, stdout=state)]):
                 self.assertEqual(power_backend._powerstation_active(), active)
 
     def test_uncertain_powerstation_state_cannot_trigger_a_ryzenadj_write(self):
-        with mock.patch.object(main.subprocess, "run", side_effect=[
+        with mock.patch.object(subprocess, "run", side_effect=[
                 types.SimpleNamespace(returncode=1), types.SimpleNamespace(returncode=1)]), \
              mock.patch.object(power_backend, "_ensure_ryzenadj") as download:
             with self.assertRaisesRegex(RuntimeError, "Could not verify"):
@@ -237,7 +238,7 @@ class HardwareQualityTests(unittest.TestCase):
     def test_powerstation_starting_during_binary_download_blocks_the_final_write(self):
         with mock.patch.object(power_backend, "_powerstation_active", side_effect=[False, True]), \
              mock.patch.object(power_backend, "_ensure_ryzenadj") as download, \
-             mock.patch.object(main.subprocess, "run") as command:
+             mock.patch.object(subprocess, "run") as command:
             with self.assertRaises(power_backend.TdpUnavailableError):
                 power_backend.apply_tdp(power_backend.DEFAULT_TDP)
         download.assert_called_once()
@@ -441,7 +442,7 @@ class HardwareQualityTests(unittest.TestCase):
                  mock.patch.object(companion_common, "decky_account", return_value={"user_uid": uid}), \
                  mock.patch.dict(sys.modules, {"pwd": types.SimpleNamespace(
                      getpwuid=lambda _uid: types.SimpleNamespace(pw_name=name))}), \
-                 mock.patch.object(main.subprocess, "run") as run:
+                 mock.patch.object(subprocess, "run") as run:
                 audio_backend._deck_audio_command(["/usr/bin/pactl", "list", "short", "sinks"])
             command = run.call_args.args[0]
             self.assertEqual(command[:5], ["/usr/bin/runuser", "-u", name, "--", "/usr/bin/env"])
@@ -452,7 +453,7 @@ class HardwareQualityTests(unittest.TestCase):
         for account in ({}, {"user_uid": 0}, {"user_uid": -1}):
             with self.subTest(account=account), \
                  mock.patch.object(companion_common, "decky_account", return_value=account), \
-                 mock.patch.object(main.subprocess, "run") as run:
+                 mock.patch.object(subprocess, "run") as run:
                 with self.assertRaisesRegex(RuntimeError, "Decky user account"):
                     audio_backend._deck_audio_command(["/usr/bin/pactl", "list", "short", "sinks"])
             run.assert_not_called()

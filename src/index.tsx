@@ -3,16 +3,24 @@
 // https://github.com/Rayekkk/Ayaneo3Companion
 
 import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
-import { ButtonItem, ConfirmModal, DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, Router, showModal, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
-import { FC, ReactElement, useCallback, useEffect, useRef, useState } from "react";
-import { PageShell, SectionHeader, SectionLink, StackedAction } from "./ui";
+import { ButtonItem, DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, Router, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
+import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { PageShell, SectionHeader, SectionLink, StackedAction, type SectionKey } from "./ui";
+import { confirmAction, infoRow } from "./shared";
 import { resetUpdates } from "./updates";
 import { AboutPage } from "./about";
 import { AudioPage, BatteryPage, ButtonsPage, DisplayPage, MagicModulesPage, VibrationPage } from "./device_pages";
 import { FanPage, resetFanStatus, useFanControl } from "./fan";
 import type { BatteryStatus, Controller, GameProfile, Hsv, Preset, RgbMode, RunningGame, State, Tdp, Vibration } from "./model";
 
-type SectionKey = "tdp" | "vibration" | "rgb" | "fan" | "battery" | "modules" | "audio" | "buttons" | "screen" | "about";
+const SECTION_TITLES: Record<SectionKey, string> = {
+  tdp: "TDP", fan: "Fan Control", vibration: "Vibration", rgb: "Lighting", buttons: "Key Binding",
+  modules: "Magic Modules", battery: "Battery", audio: "Audio", screen: "OLED Display", about: "About",
+};
+const readAge = (milliseconds: number) => {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+};
 type ActionKey = "tdp" | "profile" | "cpu_boost" | "vibration" | "battery" | "modules" | "audio" | "buttons" | "screen";
 // A write acknowledges its own settings; other fields in its fast response
 // may predate the latest hardware observation. Full polls replace diagnostics.
@@ -239,8 +247,12 @@ const Content: FC = () => {
     mounted.current = true;
     return () => { mounted.current = false; ++revision.current; flushPendingController.current(); };
   }, []);
-  const wasVisible = useRef(false);
-  const transientOverlay = useRef(false);
+  // QAM open and the Companion tab actually shown: Steam can hide the tab with display:none.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [onScreen, setOnScreen] = useState(true);
+  const panelOnScreen = () => !panelRef.current || panelRef.current.getClientRects().length > 0;
+  const lastOpenedSection = useRef<SectionKey | null>(null);
+  const lastReadAt = useRef<number | null>(null);
   const presetInitialized = useRef(false);
   const tdpDirty = useRef(false);
   const desiredTdp = useRef<Tdp | null>(confirmedState?.tdp ?? null);
@@ -339,6 +351,7 @@ const Content: FC = () => {
       const next = await getState();
       if (!mounted.current || !visibleRef.current || request !== revision.current) return;
       acceptState(next);
+      lastReadAt.current = Date.now();
       setStateReadError(null);
       contextStateReady.current = next.active_app_id === currentGameId.current && !next.tdp_profile_pending;
       setProfileLoading(!contextStateReady.current || !profileReady.current);
@@ -410,21 +423,27 @@ const Content: FC = () => {
   }, [game?.appId, visible]);
 
   useEffect(() => {
-    if (visible && !wasVisible.current) {
-      if (transientOverlay.current) {
-        transientOverlay.current = false;
-      } else {
-        setActiveSection(null);
-        setStatus(null);
-      }
-    }
-    wasVisible.current = visible;
+    const element = panelRef.current;
+    if (!element) return;
+    setOnScreen(panelOnScreen());
+    const Observer = (element.ownerDocument.defaultView as (Window & typeof globalThis) | null)?.IntersectionObserver;
+    if (!Observer) return;
+    // Steam can hide the Decky tab with display:none while QAM remains open.
+    const observer = new Observer(entries => setOnScreen(entries.some(entry => entry.isIntersecting)));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    // Overlays such as a native dropdown or a confirmation hide Quick Access briefly.
+    // Visibility controls polling only; the open page belongs to the links and back button.
     ++revision.current;
     if (!visible) { flushPendingController.current(); return; }
+    if (!onScreen) return;
     void refresh();
     const timer = setInterval(refresh, 1500);
     return () => clearInterval(timer);
-  }, [refresh, visible]);
+  }, [refresh, visible, onScreen]);
 
   useEffect(() => {
     if (!visible || activeSection !== "battery") return;
@@ -486,18 +505,9 @@ const Content: FC = () => {
     }
   };
 
-  const openDropdown = (showMenu: () => void) => {
-    transientOverlay.current = true;
-    showMenu();
-  };
-  const openModal = (modal: ReactElement) => {
-    transientOverlay.current = true;
-    showModal(modal);
-  };
-
-  if (!state) return <PanelSection><PanelSectionRow>{status ? <Field label="Backend unavailable" description={status.replace(/^Error:\s*/, "")} /> : <Spinner />}</PanelSectionRow></PanelSection>;
-  if (state.settings_error || state.startup_error || state.initializing) return <PanelSection title="Plugin unavailable"><PanelSectionRow><Field label={state.initializing ? "Starting hardware controls" : "Settings require attention"} description={state.settings_error || state.startup_error || "Waiting for the backend to finish initialising."} /></PanelSectionRow></PanelSection>;
-  if (!state.supported) return <PanelSection title="Unsupported device"><PanelSectionRow><Field label={state.device} description="AYANEO 3 is required." /></PanelSectionRow></PanelSection>;
+  if (!state) return <PageShell rootRef={panelRef}><PanelSection><PanelSectionRow>{status ? <Field label="Backend unavailable" description={status.replace(/^Error:\s*/, "")} /> : <Spinner />}</PanelSectionRow></PanelSection></PageShell>;
+  if (state.settings_error || state.startup_error || state.initializing) return <PageShell rootRef={panelRef}><PanelSection title="Plugin unavailable">{infoRow(state.initializing ? "Starting hardware controls" : "Settings require attention", state.settings_error || state.startup_error || "Waiting for the backend to finish initialising.")}</PanelSection></PageShell>;
+  if (!state.supported) return <PageShell rootRef={panelRef}><PanelSection title="Unsupported device">{infoRow(state.device, "AYANEO 3 is required.")}</PanelSection></PageShell>;
 
   const changeScreenFix = (enabled: boolean) => {
     const apply = (replaceExisting = false) => void run(
@@ -507,16 +517,9 @@ const Content: FC = () => {
       enabled ? "Display definition installed. Restart Game Mode." : "Display definition removed. Restart Game Mode.",
     );
     if (enabled && state.screen_conflict) {
-      openModal(
-        <ConfirmModal
-          strTitle="Replace Display Definition?"
-          strDescription="Another AYANEO 3 gamescope display definition is already installed. OLED Fix must replace it to manage the display. The existing file will be backed up before any change."
-          strOKButtonText="Replace"
-          strCancelButtonText="Keep Existing"
-          bDestructiveWarning
-          onOK={() => apply(true)}
-        />,
-      );
+      confirmAction("Replace Display Definition?",
+        "Another AYANEO 3 gamescope display definition is already installed. OLED Fix must replace it to manage the display. The existing file will be backed up before any change.",
+        "Replace", () => apply(true));
       return;
     }
     apply();
@@ -768,8 +771,18 @@ const Content: FC = () => {
     }
   };
 
-  const openSection = (section: SectionKey) => { setStatus(null); setActiveSection(section); };
+  const openSection = (section: SectionKey) => {
+    lastOpenedSection.current = section;
+    setStatus(null); setActiveSection(section);
+  };
   const backToControls = () => { setStatus(null); setActiveSection(null); };
+  const focusSection = lastOpenedSection.current;
+  // One status read serves every row: an older confirmed state says how old it is.
+  const staleNote = stateReadError && lastReadAt.current !== null
+    ? `Older data · Last read ${readAge(Date.now() - lastReadAt.current)} ago · Retrying…` : undefined;
+  const link = (section: SectionKey, description: string, note = staleNote) =>
+    <SectionLink section={section} title={SECTION_TITLES[section]} description={description} statusNote={note}
+      restoreFocus={focusSection === section} onClick={() => openSection(section)} />;
   const moduleSummary = state.modules_reconnecting
     ? "Waiting for both modules"
     : state.modules_connected
@@ -785,31 +798,31 @@ const Content: FC = () => {
       description={`TDP profile changes are waiting for a confirmed profile. Retrying automatically. ${profileReadError}`} /></PanelSectionRow>}
   </PanelSection>;
 
-  if (!activeSection) return <PageShell>
-    {readFailure}
+  if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
-      <SectionLink title="TDP" description={tdpProblem || `${preset} · ${tdp.spl} / ${tdp.sppt} / ${tdp.fppt} W`} onClick={() => openSection("tdp")} />
-      <SectionLink title="Vibration" description={`${titleCase(state.controller.vibration)} · FF Gain ${state.controller.ff_gain}%`} onClick={() => openSection("vibration")} />
-      <SectionLink title="RGB" description={state.controller.rgb_mode === "off" ? "Off" : `${titleCase(state.controller.rgb_mode)} · #${state.controller.color.toUpperCase()}`} onClick={() => openSection("rgb")} />
-      {fan.available && <SectionLink title="Fan Control"
-        description={fan.error || !fan.status?.supported ? "Status unavailable" : `${fan.status.mode === "manual" && fan.status.percent != null ? `Manual · ${fan.status.percent}%` : "Auto"}${fan.status.rpm == null ? "" : ` · ${fan.status.rpm} RPM`}`}
-        statusNote={fan.error || undefined} onClick={() => openSection("fan")} />}
-      <SectionLink title="Battery" description={state.charge_bypass ? "Bypass charging active" : "Automatic charging"} onClick={() => openSection("battery")} />
-      <SectionLink title="Magic Modules" description={moduleSummary} onClick={() => openSection("modules")} />
-      <SectionLink title="Audio" description={audioSummary} onClick={() => openSection("audio")} />
-      <SectionLink title="Key Binding" description={`${state.button_fix_installed ? "L5/R5 enabled" : "Native mapping"} · TM Guard ${state.tm_guard_enabled ? "on" : "off"}`} onClick={() => openSection("buttons")} />
-      <SectionLink title="OLED Display" description={state.screen_installed ? `Definition installed${state.edid_game_nits ? ` · ${state.edid_game_nits} nits` : ""}` : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed"} onClick={() => openSection("screen")} />
+      {link("tdp", tdpProblem || `${preset} · ${tdp.spl} / ${tdp.sppt} / ${tdp.fppt} W`,
+        [profileReadError && `Game profile lookup failed · Retrying… ${profileReadError}`, staleNote].filter(Boolean).join(" · ") || undefined)}
+      {fan.available && link("fan",
+        fan.error || !fan.status?.supported ? "Status unavailable" : `${fan.status.mode === "manual" && fan.status.percent != null ? `Manual · ${fan.status.percent}%` : "Auto"}${fan.status.rpm == null ? "" : ` · ${fan.status.rpm} RPM`}`,
+        fan.error || undefined)}
+      {link("vibration", `${titleCase(state.controller.vibration)} · FF Gain ${state.controller.ff_gain}%`)}
+      {link("rgb", state.controller.rgb_mode === "off" ? "Off" : `${titleCase(state.controller.rgb_mode)} · #${state.controller.color.toUpperCase()}`)}
+      {link("buttons", `${state.button_fix_installed ? "L5/R5 enabled" : "Native mapping"} · TM Guard ${state.tm_guard_enabled ? "on" : "off"}`)}
+      {link("modules", moduleSummary)}
+      {link("battery", state.charge_bypass ? "Bypass charging active" : "Automatic charging")}
+      {link("audio", audioSummary)}
+      {link("screen", state.screen_installed ? `Definition installed${state.edid_game_nits ? ` · ${state.edid_game_nits} nits` : ""}` : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed")}
     </PanelSection>
     <PanelSection title="Device">
-      <PanelSectionRow><Field focusable label={state.device} description={`SteamOS · TDP backend: ${state.tdp_backend}`} /></PanelSectionRow>
+      {infoRow(state.device, `SteamOS · TDP backend: ${state.tdp_backend}`)}
     </PanelSection>
     <PanelSection title="Plugin">
-      <SectionLink title="About" description={`AYANEO 3 Companion · v${state.version}`} onClick={() => openSection("about")} />
+      {link("about", `AYANEO 3 Companion · v${state.version}`, undefined)}
     </PanelSection>
   </PageShell>;
 
-  return <PageShell>
-    <SectionHeader title={activeSection === "modules" ? "Magic Modules" : activeSection === "buttons" ? "Key Binding" : activeSection === "screen" ? "OLED Display" : activeSection === "fan" ? "Fan Control" : titleCase(activeSection)} onBack={backToControls} />
+  return <PageShell rootRef={panelRef}>
+    <SectionHeader title={SECTION_TITLES[activeSection]} onBack={backToControls} />
     {readFailure}
 
     {activeSection === "tdp" && <>
@@ -891,7 +904,7 @@ const Content: FC = () => {
       {state.controller_error && <PanelSectionRow><Field label="Controller control unavailable" description={state.controller_error} /></PanelSectionRow>}
       <PanelSectionRow><ToggleField label="Enable LED Control" disabled={controllerBusy} checked={state.controller.rgb_mode !== "off"} onChange={enabled => applyController({ rgb_mode: enabled ? lastRgbMode.current : "off" })} /></PanelSectionRow>
       {state.controller.rgb_mode !== "off" && <>
-        <PanelSectionRow><DropdownItem label="LED Mode" disabled={controllerBusy} selectedOption={state.controller.rgb_mode} rgOptions={rgbOptions.filter(option => option.data !== "off")} onMenuWillOpen={openDropdown} onChange={option => applyController({ rgb_mode: option.data as RgbMode })} /></PanelSectionRow>
+        <PanelSectionRow><DropdownItem label="LED Mode" disabled={controllerBusy} selectedOption={state.controller.rgb_mode} rgOptions={rgbOptions.filter(option => option.data !== "off")} onChange={option => applyController({ rgb_mode: option.data as RgbMode })} /></PanelSectionRow>
         <PanelSectionRow><Field label={`#${state.controller.color.toUpperCase()}`} description={`${titleCase(state.controller.rgb_mode)} · ${rgbEdit.brightness}% brightness`}><span style={{ display: "block", width: "28px", height: "28px", borderRadius: "50%", background: `#${state.controller.color}`, border: "2px solid rgba(255,255,255,.55)" }} /></Field></PanelSectionRow>
         <PanelSectionRow><SlowSliderField label="Hue" disabled={controllerBusy} value={rgbEdit.hue} min={0} max={359} valueSuffix="°" className="AyaneoRgbHue" onChange={hue => previewRgb({ ...desiredRgb.current, hue })} onChangeEnd={hue => commitRgb({ ...desiredRgb.current, hue }, "color")} /></PanelSectionRow>
         <PanelSectionRow><SlowSliderField label="Saturation" disabled={controllerBusy} value={rgbEdit.saturation} min={0} max={100} valueSuffix="%" className="AyaneoRgbSaturation" onChange={saturation => previewRgb({ ...desiredRgb.current, saturation })} onChangeEnd={saturation => commitRgb({ ...desiredRgb.current, saturation }, "color")} /></PanelSectionRow>
@@ -911,30 +924,22 @@ const Content: FC = () => {
 
     {activeSection === "modules" && <MagicModulesPage
       state={state} busy={busy} pending={pendingAction === "modules"}
-      onEject={side => openModal(<ConfirmModal
-        strTitle={`Eject ${titleCase(side)}`}
-        strDescription={`Release ${side === "both" ? "both controller modules" : `the ${side} controller module`}?`}
-        strOKButtonText="Eject" bDestructiveWarning
-        onOK={() => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`)}
-      />)}
-      onReset={() => openModal(<ConfirmModal
-        strTitle="Reset Magic Modules"
-        strDescription="The controller will briefly disconnect while both modules are reinitialised."
-        strOKButtonText="Reset"
-        onOK={() => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected.")}
-      />)}
+      onEject={side => confirmAction(`Eject ${titleCase(side)}`,
+        `Release ${side === "both" ? "both controller modules" : `the ${side} controller module`}?`, "Eject",
+        () => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`))}
+      onReset={() => confirmAction("Reset Magic Modules",
+        "The controller will briefly disconnect while both modules are reinitialised.", "Reset",
+        () => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected."))}
     />}
 
     {activeSection === "audio" && <AudioPage
       state={state} busy={busy} pending={pendingAction === "audio"}
       onEnabled={enabled => void run("audio", () => setAudioFix(enabled), "Audio fix failed", enabled ? "AYANEO speaker tuning enabled." : "Generic audio profile restored.")}
       onReapply={() => void run("audio", () => reapplyAudioFix(), "Audio fix failed", "AYANEO speaker tuning reapplied.")}
-      onRecalibrate={() => openModal(<ConfirmModal
-        strTitle="Recalibrate Speakers"
-        strDescription="Place the console on a clear surface in a quiet room. A calibration signal will play and the result will be written to EFI."
-        strOKButtonText="Recalibrate" bDestructiveWarning
-        onOK={() => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it.")}
-      />)}
+      onRecalibrate={() => confirmAction("Recalibrate Speakers",
+        "Place the console on a clear surface in a quiet room. A calibration signal will play and the result will be written to EFI.",
+        "Recalibrate",
+        () => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it."))}
     />}
 
     {activeSection === "buttons" && <ButtonsPage

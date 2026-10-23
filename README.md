@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/github/license/Rayekkk/Ayaneo3Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
 **The missing AYANEO 3 hardware controls in one Steam overlay panel.**
-TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibration, RGB lighting, rear buttons and OLED display support.
+TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibration, lighting, rear buttons and OLED display support.
 
 [Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Development](#development)
 
@@ -31,7 +31,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 | **Charging estimate** | Shows live battery percentage, net charging power and estimated time to full only while Battery is open |
 | **Magic Modules** | Identifies every known module and upper/lower layout, ejects either side and provides Quick Reset |
 | **Vibration** | Firmware Off/Low/Medium/High strength, 0-100% Linux FF gain and a vibration test |
-| **RGB lighting** | Solid, Pulse and Rainbow modes with Hue, Saturation and Brightness |
+| **Lighting** | Solid, Pulse and Rainbow modes with Hue, Saturation and Brightness |
 | **Key bindings** | Programs LC1/RC1 as L5/R5, preserves LC/RC as L4/R4 and supports both QAM firmware variants |
 | **TM Guard** | Returns from accidental TM mode changes and restores the saved controller configuration |
 | **Smart amp tuning** | Loads the official AYANEO 3 CS35L41 profile for both speakers instead of the generic fallback |
@@ -157,17 +157,18 @@ Game Mode when the panel asks for it.
 
 The plugin opens on a compact hardware overview. Each row shows the current
 state and opens a dedicated control page; **All Controls** returns to the
-overview. Closing and reopening QAM returns to this overview; choosing an option
-in a native dropdown keeps the current page open. The last confirmed overview
+overview and selects the row you came from. A page stays open when Quick Access
+closes, a dropdown or confirmation opens, or another Quick Access tab is shown,
+and polling pauses while the page cannot be seen. The last confirmed overview
 state is shown immediately while a fresh read completes.
-If a refresh fails, the panel identifies the displayed values as the last
-confirmed state and retries automatically. The message clears after a fresh read.
+If a refresh fails, each row says how old its values are and that Companion is
+retrying; the note clears after a fresh read.
 
 - Open **TDP** to select a preset or create a Custom configuration. Enable
   **Per Game Profile** while a game is running to bind the chosen values to it.
 - Open **Vibration** to select firmware strength, scale Linux force feedback in
   10% steps or play a short test.
-- Open **RGB** to select an animation and tune Hue, Saturation and Brightness.
+- Open **Lighting** to select an animation and tune Hue, Saturation and Brightness.
 - Open **Battery** to enable or disable charge bypass. The displayed state is
   read back from the kernel charge-control interface when available, or directly
   from the embedded controller on older kernels; it is never inferred from ACPI.

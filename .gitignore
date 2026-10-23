@@ -4,6 +4,7 @@
 /build/
 /bin/
 *.zip
+*.zip.sha256
 *.pending
 
 # Python and test caches

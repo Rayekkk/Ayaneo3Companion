@@ -6,8 +6,10 @@
 
 import asyncio
 import copy
+import os
+import platform
 import re
-import subprocess
+import stat
 import sys
 import threading
 import time
@@ -26,10 +28,13 @@ from fan_backend import FanController, FAN_RENEW_SECONDS  # noqa: E402
 import audio_backend  # noqa: E402
 import companion_common  # noqa: E402
 import controller_backend  # noqa: E402
+import diagnostics  # noqa: E402
 import display_backend  # noqa: E402
 import ec_backend  # noqa: E402
 import input_backend  # noqa: E402
+import module_runtime  # noqa: E402
 import power_backend  # noqa: E402
+import system_process  # noqa: E402
 from companion_common import LOG  # noqa: E402
 
 TM_GUARD_INTERVAL = 0.5
@@ -55,9 +60,8 @@ _charge_mutation_lock = threading.RLock()
 
 
 def _systemctl(*arguments, check: bool = False):
-    return subprocess.run(["/usr/bin/systemctl", *arguments], check=check,
-                          capture_output=True, text=True, timeout=20,
-                          env=companion_common.clean_subprocess_env())
+    return system_process.run(["/usr/bin/systemctl", *arguments], 20, check=check,
+                              capture_output=True, text=True)
 
 
 def _suspend_clock_offset() -> float | None:
@@ -69,6 +73,91 @@ def _suspend_clock_offset() -> float | None:
         return time.clock_gettime(clock) - time.monotonic()
     except (OSError, ValueError):
         return None
+
+
+def _runtime_identity(dmi='/sys/class/dmi/id', os_release='/etc/os-release') -> dict:
+    """What a bug report needs first; firmware strings come from DMI, never from the EC."""
+    def read(path, limit=128):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as handle:
+                return handle.read(limit).strip()
+        except OSError:
+            return ''
+    release = dict(line.partition('=')[::2] for line in read(os_release, 8192).splitlines())
+    value = lambda text: text.strip().strip('"') or None
+    return {'model': value(read(os.path.join(dmi, 'product_name'))),
+            'bios': value(read(os.path.join(dmi, 'bios_version'))),
+            'ec': value(read(os.path.join(dmi, 'ec_firmware_release'))),
+            'steamos': value(release.get('VERSION_ID', '')),
+            'steamos_build': value(release.get('BUILD_ID', '')),
+            'decky': getattr(decky, 'DECKY_VERSION', None) or None}
+
+
+def _rotate_logs(keep: int = 10) -> None:
+    """Decky creates a timestamped log per plugin load and never prunes them.
+    Keep the newest `keep`; diagnostics have their own size-based rotation."""
+    try:
+        log_dir = getattr(decky, "DECKY_PLUGIN_LOG_DIR", None)
+        if not log_dir or os.name != "posix":
+            return
+        # Decky chowns this directory to deck: never follow a symlink swapped in for it.
+        try:
+            fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        try:
+            files = []
+            for name in os.listdir(fd):
+                if name.endswith(".log"):
+                    try:
+                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except FileNotFoundError:  # Decky may prune or create logs meanwhile.
+                        continue
+                    if stat.S_ISREG(info.st_mode):
+                        files.append((info.st_mtime, name))
+            if len(files) <= keep:
+                return
+            files.sort(reverse=True)
+            current_log = os.path.basename(getattr(decky, "DECKY_PLUGIN_LOG", None) or "")
+            removed = 0
+            for _mtime, name in files[keep:]:
+                if name == current_log:  # Never delete the file we're currently writing to.
+                    continue
+                try:
+                    os.unlink(name, dir_fd=fd)
+                    removed += 1
+                except OSError:
+                    pass
+        finally:
+            os.close(fd)
+        if removed:
+            decky.logger.info(f"{LOG} rotated logs: removed {removed} old file(s), kept {keep} newest")
+    except Exception as error:
+        diagnostics.event('plugin', 'rotate_logs_failed', level='error', error=error, repeat=60)
+
+
+def _end_decky_listener_at_eof():
+    """Decky 3.2.x re-reads its RPC socket after the loader closes it on stop, and
+    at EOF that loop never yields: the event loop starves, _unload stalls at its
+    first await and Decky SIGKILLs the plugin. End that listener at EOF instead."""
+    for cell in getattr(getattr(decky, 'emit', None), '__closure__', None) or ():
+        try:
+            socket = getattr(cell.cell_contents, '_socket', None)  # SandboxedPlugin._socket
+        except ValueError:
+            continue
+        read = getattr(socket, '_read_single_line', None)
+        if read is None:
+            continue
+
+        async def read_line(reader, read=read):
+            line = await read(reader)
+            if not line:  # The loader closed the connection; nothing more can arrive.
+                raise asyncio.CancelledError
+            return line
+        socket._read_single_line = read_line
+        return
+    # A Decky update changed these internals: a stop may be SIGKILLed before hardware is restored.
+    diagnostics.event('plugin', 'decky_listener_unpatched', level='warning')
 
 
 @guard_public_calls
@@ -88,7 +177,9 @@ class Plugin:
     _active_app = ""
 
     def __init__(self):
+        _end_decky_listener_at_eof()
         self._closing = False
+        self._uninstalling = False  # Diagnostic sink lifetime only, never admission.
         self._initializing = False
         self._rpc_lock = asyncio.Lock()
         # Fan transactions do not mutate persisted settings or SMU/controller
@@ -439,7 +530,7 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                decky.logger.warning(f"{LOG} TDP diagnostic failed: {error}")
+                diagnostics.event('tdp', 'ownership_probe_failed', level='warning', error=error, repeat=60)
             finally:
                 self._tdp_diagnostic_after = time.monotonic() + TDP_DIAGNOSTIC_INTERVAL
 
@@ -731,7 +822,7 @@ class Plugin:
         if mode == "manual" and not self._closing:
             self._fan_generation += 1
             if Plugin._fan_task is None or Plugin._fan_task.done():
-                Plugin._fan_task = asyncio.create_task(self._fan_loop())
+                Plugin._fan_task = module_runtime.background_task(self._fan_loop())
         return result
 
     async def set_audio_fix(self, enabled):
@@ -936,7 +1027,7 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                decky.logger.warning(f"{LOG} EDID verification failed: {error}")
+                diagnostics.event('display', 'edid_check_failed', level='warning', error=error, repeat=60)
             await asyncio.sleep(1)
 
     async def set_button_fix(self, enabled):
@@ -1158,7 +1249,7 @@ class Plugin:
                         decky.logger.debug(f"{LOG} TDP restoration deferred: {error}")
                     except Exception as error:
                         settle_at = now + 5.0
-                        decky.logger.warning(f"{LOG} TDP restoration retrying: {error}")
+                        diagnostics.event('tdp', 'charger_reapply_retrying', level='warning', error=error, repeat=60)
                     else:
                         settle_at = now + pending_delays.pop(0) if pending_delays else 0.0
                     next_profile_retry = now + 5.0
@@ -1171,7 +1262,7 @@ class Plugin:
                     except power_backend.TdpUnavailableError as error:
                         decky.logger.debug(f"{LOG} game profile waiting for TDP control: {error}")
                     except Exception as error:
-                        decky.logger.warning(f"{LOG} game profile restoration retrying: {error}")
+                        diagnostics.event('tdp', 'profile_reapply_retrying', level='warning', error=error, repeat=60)
                 if now >= next_control_check:
                     next_control_check = now + 15.0
                     try:
@@ -1181,7 +1272,7 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                decky.logger.warning(f"{LOG} power monitor retrying: {error}")
+                diagnostics.event('tdp', 'power_monitor_retrying', level='warning', error=error, repeat=60)
 
     async def _charge_loop(self):
         """Verify charging independently of slow TDP retries and downloads."""
@@ -1339,7 +1430,7 @@ class Plugin:
                         except Exception as error:
                             last_error = error
                 if restore_pending and last_error:
-                    decky.logger.warning(f"{LOG} controller setting restore failed: {last_error}")
+                    diagnostics.event('controller', 'reconnect_restore_failed', level='warning', error=last_error, repeat=60)
                 if identify_pending and not restore_pending and time.monotonic() >= identify_at:
                     try:
                         left, right = await self._offload(controller_backend.read_module_layout)
@@ -1516,6 +1607,13 @@ class Plugin:
                 Plugin._state["initializing"] = False
 
     async def _start(self):
+        await asyncio.to_thread(diagnostics.configure, diagnostics.LOG_DIR, decky.logger)
+        await asyncio.to_thread(_rotate_logs)
+        diagnostics.event('plugin', 'startup', version=companion_common.updater.plugin_version(),
+                          source='backend')
+        diagnostics.event('plugin', 'runtime', source='backend', kernel=platform.release(),
+                          python=platform.python_version(), architecture=platform.machine(),
+                          **await asyncio.to_thread(_runtime_identity))
         await self._offload(settings.read)
         is_supported = await self._offload(companion_common.supported_device)
         storage_error = getattr(settings, "recovery_error", "")
@@ -1660,15 +1758,15 @@ class Plugin:
             Plugin._active_app = ""
         self._schedule_tdp_diagnostic()
         if hardware_allowed and not self._closing:
-            Plugin._restore_task = asyncio.create_task(
+            Plugin._restore_task = module_runtime.background_task(
                 self._restore_hardware(reprogram_rear_buttons))
-            Plugin._edid_task = asyncio.create_task(self._edid_loop())
-            Plugin._ac_task = asyncio.create_task(self._ac_loop())
-            Plugin._charge_task = asyncio.create_task(self._charge_loop())
-            Plugin._module_task = asyncio.create_task(self._module_loop())
-            Plugin._tm_guard_task = asyncio.create_task(self._tm_guard_loop())
-            Plugin._vibration_gain_task = asyncio.create_task(self._vibration_gain_loop())
-            Plugin._audio_task = asyncio.create_task(self._restore_audio())
+            Plugin._edid_task = module_runtime.background_task(self._edid_loop())
+            Plugin._ac_task = module_runtime.background_task(self._ac_loop())
+            Plugin._charge_task = module_runtime.background_task(self._charge_loop())
+            Plugin._module_task = module_runtime.background_task(self._module_loop())
+            Plugin._tm_guard_task = module_runtime.background_task(self._tm_guard_loop())
+            Plugin._vibration_gain_task = module_runtime.background_task(self._vibration_gain_loop())
+            Plugin._audio_task = module_runtime.background_task(self._restore_audio())
         decky.logger.info(f"{LOG} started on {Plugin._state['device']}")
 
     async def _unload(self):
@@ -1677,6 +1775,7 @@ class Plugin:
         self._closing = True
         companion_common.updater.close()
         async def cleanup():
+            diagnostics.event('plugin', 'shutdown_started', source='backend')
             if self._startup_task is not None and not self._startup_task.done():
                 self._startup_task.cancel()
                 await asyncio.gather(self._startup_task, return_exceptions=True)
@@ -1715,10 +1814,31 @@ class Plugin:
                     decky.logger.warning(f"{LOG} could not restore controller power on unload: {error}")
             decky.logger.info(f"{LOG} unloaded")
         self._cleanup_task = asyncio.create_task(cleanup())
-        await complete(self._cleanup_task)
+        try:
+            await complete(self._cleanup_task)
+        except BaseException as error:
+            diagnostics.event('plugin', 'shutdown_waiter_cancelled' if isinstance(error, asyncio.CancelledError)
+                              else 'shutdown_failed', level='warning', error=error, source='backend')
+            raise
+        diagnostics.event('plugin', 'shutdown_completed', source='backend')
+        if not self._uninstalling:
+            await asyncio.to_thread(diagnostics.close)
 
     async def _uninstall(self):
-        await complete(self._remove_owned())
+        self._uninstalling = True
+        diagnostics.ensure_fallback()
+        with diagnostics.source_context('backend'):
+            diagnostics.event('plugin', 'uninstall_started')
+            try:
+                await complete(self._remove_owned())
+            except BaseException as error:
+                diagnostics.event('plugin', 'uninstall_not_confirmed', level='warning', error=error)
+                raise
+            else:
+                diagnostics.event('plugin', 'uninstall_completed')
+            finally:
+                self._uninstalling = False
+                await asyncio.to_thread(diagnostics.close)
 
     async def _remove_owned(self):
         await self._unload()

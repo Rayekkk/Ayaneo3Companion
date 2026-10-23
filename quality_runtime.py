@@ -2,6 +2,10 @@
 """Keep Decky calls and their workers alive until hardware transactions finish."""
 import asyncio
 import functools
+import inspect
+import time
+
+import diagnostics
 
 
 async def complete(operation):
@@ -33,11 +37,56 @@ async def complete(operation):
 READ_CALLS = frozenset({'get_state', 'get_battery_status', 'get_fan_status',
                         'get_version', 'get_game_profile'})
 NETWORK_CALLS = frozenset({'check_for_updates', 'perform_update'})
+# Polled every few seconds: log health transitions only, never each call.
+QUIET_CALLS = READ_CALLS | {'set_active_app'}
+
+
+def _logged_rpc(function, name):
+    """Observe the existing boundary; never retry, cancel or change its result."""
+    quiet = name in QUIET_CALLS
+
+    @functools.wraps(function)
+    async def logged(self, *args, **kwargs):
+        with diagnostics.operation(name=name):
+            started = time.monotonic()
+
+            def duration():
+                return round((time.monotonic() - started) * 1000, 1)
+
+            def failed(**fields):
+                if quiet:
+                    diagnostics.transition('plugin', 'rpc_health', 'failed', level='warning',
+                                           operation=name, duration_ms=duration(), **fields)
+                else:
+                    diagnostics.event('plugin', 'rpc_failed', level='warning', operation=name,
+                                      outcome='not_confirmed', duration_ms=duration(), **fields)
+            if not quiet:
+                diagnostics.event('plugin', 'rpc_started', operation=name)
+            try:
+                result = await function(self, *args, **kwargs)
+            except asyncio.CancelledError:
+                # The underlying admitted transaction may still be draining.
+                diagnostics.event('plugin', 'rpc_waiter_cancelled', operation=name,
+                                  outcome='refresh_required', repeat=60)
+                raise
+            except Exception as error:
+                failed(error=error)
+                raise
+            if isinstance(result, dict) and result.get('success') is False:
+                failed(reason='backend_reported_failure')
+            elif quiet:
+                diagnostics.transition('plugin', 'rpc_health', 'ok', operation=name, initial=False)
+            else:
+                diagnostics.event('plugin', 'rpc_completed', operation=name, duration_ms=duration(),
+                                  outcome='succeeded' if isinstance(result, dict)
+                                  and result.get('success') is True else 'returned')
+            return result
+    return logged
 
 
 def guard_public_calls(cls):
     for name, function in list(vars(cls).items()):
-        if name.startswith('_') or not asyncio.iscoroutinefunction(function):
+        if name.startswith('_') or not inspect.iscoroutinefunction(function):
             continue
 
         def wrap(fn, method):
@@ -76,6 +125,6 @@ def guard_public_calls(cls):
                 self._rpc_jobs.add(task)
                 task.add_done_callback(self._rpc_jobs.discard)
                 return await complete(task)
-            return guarded
+            return _logged_rpc(guarded, name)
         setattr(cls, name, wrap(function, name))
     return cls

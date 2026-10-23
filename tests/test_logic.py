@@ -1,3 +1,4 @@
+import subprocess
 import glob
 import select
 import asyncio, hashlib, io, json, os, struct, sys, tempfile, threading, unittest
@@ -25,13 +26,6 @@ def controller_report(config):
     return bytes(response)
 
 class LogicTests(unittest.TestCase):
-    def test_upower_query_runs_without_decky_library_overrides(self):
-        done = main.subprocess.CompletedProcess([], 0, "x 5869\n", "")
-        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/decky"}), \
-             mock.patch.object(main.subprocess, "run", return_value=done) as run:
-            self.assertEqual(ec_backend._upower_time_to_full("BAT0"), 5869)
-        self.assertNotIn("LD_LIBRARY_PATH", run.call_args.kwargs["env"])
-
     def test_battery_status_uses_upower_time_to_full(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -902,8 +896,8 @@ class LogicTests(unittest.TestCase):
         path = mock.MagicMock()
         path.__str__.return_value = "/fake/efivar"
         path.read_bytes.return_value = candidate
-        completed = main.subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch.object(main.subprocess, "run", return_value=completed), \
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(subprocess, "run", return_value=completed), \
              mock.patch.object(os, "open", return_value=7), \
              mock.patch.object(os, "write", return_value=len(candidate)) as write, \
              mock.patch.object(os, "close"), \
@@ -998,7 +992,7 @@ class LogicTests(unittest.TestCase):
             (audio_backend.perform_audio_recalibration, ()),
         )
         with mock.patch.object(companion_common, "supported_device", return_value=False), \
-             mock.patch.object(main.subprocess, "run") as run:
+             mock.patch.object(subprocess, "run") as run:
             for operation, arguments in operations:
                 with self.subTest(operation=operation.__name__):
                     with self.assertRaises(RuntimeError):

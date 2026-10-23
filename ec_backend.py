@@ -11,6 +11,7 @@ from pathlib import Path
 import decky
 
 import companion_common
+import system_process
 from companion_common import LOG
 
 
@@ -62,11 +63,11 @@ def _upower_time_to_full(battery_name: str) -> int | None:
     """Read UPower's filtered charging estimate without keeping a D-Bus client."""
     if not battery_name.replace("_", "").isalnum():
         return None
-    result = subprocess.run([
+    result = system_process.run([
         "busctl", "--system", "get-property", "org.freedesktop.UPower",
         f"/org/freedesktop/UPower/devices/battery_{battery_name}",
         "org.freedesktop.UPower.Device", "TimeToFull",
-    ], capture_output=True, text=True, timeout=3, env=companion_common.clean_subprocess_env())
+    ], 3, capture_output=True, text=True)
     if result.returncode:
         return None
     try:
@@ -185,9 +186,8 @@ def ensure_charge_control() -> Path | None:
     except OSError:
         writable = False
     if path is None or not writable:
-        result = subprocess.run(["modprobe", "ec_sys", "write_support=1"],
-                                capture_output=True, text=True, timeout=10,
-                                env=companion_common.clean_subprocess_env())
+        result = system_process.run(["modprobe", "ec_sys", "write_support=1"], 10,
+                                    capture_output=True, text=True)
         if result.returncode:
             decky.logger.warning(f"{LOG} cannot load ec_sys: {result.stderr.strip()}")
             return None

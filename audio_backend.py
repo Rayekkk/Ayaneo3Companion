@@ -17,6 +17,7 @@ from pathlib import Path
 import decky
 
 import companion_common
+import system_process
 from companion_common import LOG
 
 
@@ -123,9 +124,8 @@ def _prepare_audio_aliases() -> tuple[Path, Path]:
 def _audio_card_index() -> int | None:
     for card in range(8):
         try:
-            result = subprocess.run(["amixer", "-c", str(card), "controls"],
-                                    capture_output=True, text=True, timeout=5,
-                                    env=companion_common.clean_subprocess_env())
+            result = system_process.run(["amixer", "-c", str(card), "controls"], 5,
+                                        capture_output=True, text=True)
         except (OSError, subprocess.TimeoutExpired):
             return None
         if result.returncode == 0 and all(name in result.stdout for name in AUDIO_FIRMWARE_CONTROLS):
@@ -134,10 +134,10 @@ def _audio_card_index() -> int | None:
 
 
 def _set_audio_control(card: int, control: str, value, action: str = "set") -> None:
-    result = subprocess.run([
+    result = system_process.run([
         "amixer", "-q", "-c", str(card), "cset",
         f"iface=CARD,name={control}", str(value),
-    ], capture_output=True, text=True, timeout=15, env=companion_common.clean_subprocess_env())
+    ], 15, capture_output=True, text=True)
     if result.returncode:
         message = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
         if "resource busy" in message.lower():
@@ -146,9 +146,9 @@ def _set_audio_control(card: int, control: str, value, action: str = "set") -> N
 
 
 def _audio_control_value(card: int, control: str) -> str | None:
-    result = subprocess.run([
+    result = system_process.run([
         "amixer", "-c", str(card), "cget", f"iface=CARD,name={control}",
-    ], capture_output=True, text=True, timeout=10, env=companion_common.clean_subprocess_env())
+    ], 10, capture_output=True, text=True)
     if result.returncode:
         return None
     for line in reversed(result.stdout.splitlines()):
@@ -191,12 +191,12 @@ def _deck_audio_command(arguments: list[str], timeout: float = 8.0):
     except (ImportError, KeyError) as error:
         raise RuntimeError("the Decky user account is unavailable for audio control") from error
     runtime = f"/run/user/{uid}"
-    return subprocess.run([
+    return system_process.run([
         "/usr/bin/runuser", "-u", name, "--", "/usr/bin/env",
         f"XDG_RUNTIME_DIR={runtime}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus",
         *arguments,
-    ], capture_output=True, text=True, timeout=timeout, env=companion_common.clean_subprocess_env())
+    ], timeout, capture_output=True, text=True)
 
 
 def _suspend_audio_outputs() -> list[str]:
@@ -490,10 +490,10 @@ def _i2c_register_arguments(address: str, register: int) -> list[str]:
 
 
 def _read_audio_dsp_register(address: str, register: int) -> int:
-    result = subprocess.run([
+    result = system_process.run([
         "/usr/bin/i2ctransfer", "-f", "-y", "1", f"w4@{address}",
         *_i2c_register_arguments(address, register), "r4",
-    ], capture_output=True, text=True, timeout=5, env=companion_common.clean_subprocess_env())
+    ], 5, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f"could not read amplifier {address}")
     values = []
@@ -508,10 +508,10 @@ def _read_audio_dsp_register(address: str, register: int) -> int:
 
 def _write_audio_dsp_register(address: str, register: int, value: int) -> None:
     data = [f"0x{byte:02x}" for byte in int(value).to_bytes(4, "big")]
-    result = subprocess.run([
+    result = system_process.run([
         "/usr/bin/i2ctransfer", "-f", "-y", "1", f"w8@{address}",
         *_i2c_register_arguments(address, register), *data,
-    ], capture_output=True, text=True, timeout=5, env=companion_common.clean_subprocess_env())
+    ], 5, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f"could not write amplifier {address}")
 
@@ -583,9 +583,7 @@ def _write_audio_efi(path: Path, candidate: bytes, original: bytes) -> None:
         finally:
             os.close(descriptor)
 
-    unlocked = subprocess.run(["/usr/bin/chattr", "-i", str(path)],
-                              capture_output=True, text=True, timeout=10,
-                              env=companion_common.clean_subprocess_env())
+    unlocked = system_process.run(["/usr/bin/chattr", "-i", str(path)], 10, capture_output=True, text=True)
     if unlocked.returncode:
         raise RuntimeError(unlocked.stderr.strip() or "could not unlock audio calibration EFI")
     write_error = None
@@ -611,9 +609,8 @@ def _write_audio_efi(path: Path, candidate: bytes, original: bytes) -> None:
                 rollback_error = recovery
     finally:
         try:
-            locked = subprocess.run(["/usr/bin/chattr", "+i", str(path)],
-                                    capture_output=True, text=True, timeout=10,
-                                    env=companion_common.clean_subprocess_env())
+            locked = system_process.run(["/usr/bin/chattr", "+i", str(path)], 10,
+                                        capture_output=True, text=True)
             if locked.returncode:
                 lock_error = RuntimeError(locked.stderr.strip() or "chattr failed")
         except Exception as error:
@@ -642,7 +639,7 @@ def _measure_audio_calibration(card: int) -> tuple[int, int]:
         "/usr/bin/aplay", "-q", "-D", f"hw:{card},0", "-f", "S16_LE",
         "-c", "2", "-r", "48000", "/dev/zero",
     ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-       env=companion_common.clean_subprocess_env())
+       env=system_process.system_env())
     values = None
     try:
         deadline = started + 4.0

@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 import companion_common
+import system_process
 
 
 BIN_DIR = companion_common.PLUGIN_DIR / "bin"
@@ -68,15 +69,14 @@ def _powerstation_active():
 
 
 def _probe_powerstation_active():
-    if subprocess.run(["busctl", "--system", "status", "org.shadowblip.PowerStation"],
-                      capture_output=True, timeout=5,
-                      env=companion_common.clean_subprocess_env()).returncode == 0:
+    if system_process.run(["busctl", "--system", "status", "org.shadowblip.PowerStation"], 5,
+                          capture_output=True).returncode == 0:
         return True
     # Also detect startup/reload periods before D-Bus owns its name. A missing
     # GPU TDP property must never cause a fallback to a competing RyzenAdj write.
-    result = subprocess.run(["systemctl", "show", "powerstation.service", "--property=ActiveState", "--value"],
-                            capture_output=True, text=True, timeout=5,
-                            env=companion_common.clean_subprocess_env())
+    result = system_process.run(["systemctl", "show", "powerstation.service",
+                                 "--property=ActiveState", "--value"], 5,
+                                capture_output=True, text=True)
     if result.returncode not in (0, 4):
         raise TdpUnavailableError("Could not verify whether PowerStation owns TDP control")
     if result.returncode == 4:
@@ -215,12 +215,11 @@ def _apply_tdp_unlocked(config: dict) -> None:
     # ownership check if the system started another writer in the meantime.
     if _powerstation_active():
         raise TdpUnavailableError(POWERSTATION_TDP_ERROR)
-    env = companion_common.clean_subprocess_env()
-    env["LD_LIBRARY_PATH"] = str(BIN_DIR)
-    result = subprocess.run([str(RYZENADJ), f"--stapm-limit={values['spl'] * 1000}",
-                             f"--slow-limit={values['sppt'] * 1000}",
-                             f"--fast-limit={values['fppt'] * 1000}"],
-                            capture_output=True, text=True, timeout=10, env=env)
+    env = system_process.system_env(LC_ALL="C", LD_LIBRARY_PATH=str(BIN_DIR))
+    result = system_process.run([str(RYZENADJ), f"--stapm-limit={values['spl'] * 1000}",
+                                 f"--slow-limit={values['sppt'] * 1000}",
+                                 f"--fast-limit={values['fppt'] * 1000}"],
+                                10, env=env, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "RyzenAdj failed")
 

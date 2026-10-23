@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Boot recovery and ayaneo-ec ABI regressions, with no device access."""
+import subprocess
 import asyncio
 from contextlib import ExitStack
 import os
@@ -237,7 +238,7 @@ class NativeControllerAbiTests(unittest.TestCase):
                                side_effect=AssertionError("ec_sys should stay unloaded")) as raw, \
              mock.patch.object(ec_backend, "_ec_io_path",
                                side_effect=AssertionError("raw EC should stay unused")), \
-             mock.patch.object(main.subprocess, "run",
+             mock.patch.object(subprocess, "run",
                                side_effect=AssertionError("modprobe should stay unused")):
             self.assertTrue(ec_backend.ensure_controller_control())
             self.assertTrue(ec_backend.controller_powered())
