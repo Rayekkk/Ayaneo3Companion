@@ -805,7 +805,7 @@ class Plugin:
             restart = display_backend.restart_needed(installed)
             with _lock:
                 Plugin._state.update(screen_installed=installed, screen_conflict=conflict,
-                                     screen_restart_needed=restart,
+                                     screen_restart_needed=restart, screen_fix_enabled=enabled,
                                      screen_native=display_backend.native_profile_present())
             return backup
         try:
@@ -1389,6 +1389,13 @@ class Plugin:
             except Exception as error:
                 decky.logger.warning(f"{LOG} key-binding disable recovery failed: {error}")
         key_binding_installed = await self._offload(input_backend.button_fix_installed)
+        if hardware_allowed:
+            try:  # Factory speaker calibration and replaced display definitions
+                copied = await self._offload(companion_common.migrate_backups)
+                if copied:
+                    decky.logger.info(f"{LOG} copied {copied} backups to {companion_common.BACKUP_ROOT}")
+            except Exception as error:
+                decky.logger.warning(f"{LOG} backup migration to {companion_common.BACKUP_ROOT} failed: {error}")
         # Note what this gamescope session loaded before a copy migrates out of /etc.
         await self._offload(display_backend.remember_loaded)
         existing_screen = (display_backend.display_script_owned(display_backend.LUA_TARGET)
@@ -1448,6 +1455,8 @@ class Plugin:
             "screen_conflict": display_backend.display_script_conflict(display_backend.LUA_TARGET),
             "screen_restart_needed": False,
             "screen_native": display_backend.native_profile_present(),
+            # With a SteamOS profile the switch shows this choice: the EDID loop follows it.
+            "screen_fix_enabled": bool(desired_screen_fix),
             "edid_patched": False,
             "edid_game_nits": 0,
             "button_fix_installed": key_binding_installed,

@@ -22,6 +22,7 @@ export interface State {
   screen_conflict: boolean;
   screen_restart_needed?: boolean;
   screen_native?: boolean;
+  screen_fix_enabled?: boolean;
   edid_patched: boolean;
   edid_game_nits: number;
   button_fix_installed: boolean;

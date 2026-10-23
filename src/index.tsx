@@ -33,7 +33,7 @@ const ACTION_FIELDS: Record<ActionKey, ReadonlyArray<keyof State>> = {
   audio: ["audio_fix_enabled", "audio_fix_installed", "audio_calibration_available",
     "audio_calibration_last", "audio_profile", "audio_fix_error"],
   buttons: ["button_fix_installed", "tm_guard_enabled", "tm_guard_status", "tm_guard_recoveries"],
-  screen: ["screen_installed", "screen_conflict", "screen_restart_needed", "screen_native"],
+  screen: ["screen_installed", "screen_conflict", "screen_restart_needed", "screen_native", "screen_fix_enabled"],
 };
 
 const getState = callable<[], State>("get_state");

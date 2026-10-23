@@ -183,11 +183,14 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         reopened.read()
         self.assertTrue(reopened.getSetting("screen_fix_enabled"))
         self.assertTrue(reopened.getSetting("button_fix_enabled"))
+        # With a SteamOS profile the switch shows this choice, not an installed file.
+        self.assertTrue(main.Plugin._state["screen_fix_enabled"])
 
         with mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})):
             await self.plugin.set_screen_fix(False)
             await self.plugin.set_button_fix(False)
         reopened.read()
+        self.assertFalse(main.Plugin._state["screen_fix_enabled"])
         self.assertFalse(reopened.getSetting("screen_fix_enabled"))
         self.assertFalse(reopened.getSetting("button_fix_enabled"))
 

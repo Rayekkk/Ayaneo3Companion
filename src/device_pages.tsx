@@ -127,7 +127,7 @@ export const DisplayPage: FC<{
   {state.screen_native
     ? infoRow("SteamOS display profile in use", "SteamOS now ships its own AYANEO 3 definition, so Companion's is not installed. The HDR peak fix stays on while this switch is on.")
     : null}
-  <PanelSectionRow><ToggleField label="Install Display Definition" description={state.screen_conflict ? "An existing display definition must be replaced before OLED Fix can be enabled." : "Install the AYANEO 3 OLED HDR, colour and 60/90/120/144 Hz gamescope definition with Gamma 2.2 output. It is kept across SteamOS updates."} checked={state.screen_installed || Boolean(state.screen_native)} disabled={busy} onChange={onChange} /></PanelSectionRow>
+  <PanelSectionRow><ToggleField label="Install Display Definition" description={state.screen_conflict ? "An existing display definition must be replaced before OLED Fix can be enabled." : "Install the AYANEO 3 OLED HDR, colour and 60/90/120/144 Hz gamescope definition with Gamma 2.2 output. It is kept across SteamOS updates."} checked={state.screen_native ? Boolean(state.screen_fix_enabled) : state.screen_installed} disabled={busy} onChange={onChange} /></PanelSectionRow>
   {infoRow(state.edid_patched ? "EDID metadata normalized" : "EDID update waiting", state.edid_game_nits ? `Games see AYANEO's advertised ${state.edid_game_nits}-nit maximum.` : "Waiting for gamescope to publish the display EDID.")}
   {state.screen_restart_needed && <StackedAction title="Restart Gaming Mode" description="gamescope loads display definitions only when it starts. Steam and any running game close and reopen." disabled={busy} onClick={onRestart}>Restart</StackedAction>}
 </PanelSection>;

@@ -43,7 +43,7 @@ LEGACY_LUA_TARGET = Path("/etc/gamescope/scripts/00-gamescope/displays") / SCRIP
 NATIVE_LUA = Path("/usr/share/gamescope/scripts/00-gamescope/displays") / SCRIPT_NAME
 MAX_SCRIPT_BYTES = 32 * 1024
 DISPLAY_SCRIPT_MARKER = b"-- Managed by AYANEO 3 Companion\n"
-DISPLAY_SCRIPT_BACKUP_ROOT = Path("/var/lib/ayaneo3-companion/display-definition")
+DISPLAY_SCRIPT_BACKUP_ROOT = companion_common.BACKUP_ROOT / "display-definition"
 LEGACY_DISPLAY_SCRIPT_SHA256 = frozenset({
     # Initial public Gamma 2.2 definition (Display-P3 primaries).
     "98de33235379f187b9d0eeb1460016b71fbc808c7cecff574774bbae64a130d4",
@@ -142,7 +142,7 @@ def _remove_legacy_script() -> None:
 
 
 def _backup_display_script(data: bytes) -> Path:
-    DISPLAY_SCRIPT_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    companion_common.private_dir(DISPLAY_SCRIPT_BACKUP_ROOT)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     digest = hashlib.sha256(data).hexdigest()[:12]
     target = DISPLAY_SCRIPT_BACKUP_ROOT / f"{LUA_TARGET.name}-{stamp}-{digest}.bak"
@@ -181,7 +181,11 @@ def install_display_script(replace_existing: bool = False) -> Path | None:
 
 
 def remove_display_script() -> None:
-    """Remove only the display definition owned by this plugin."""
+    """Remove only the display definition owned by this plugin.
+
+    A definition Companion replaced (after the user confirmed) comes back from its
+    backup, unless SteamOS now ships its own profile, which a user copy would override.
+    """
     companion_common.require_supported_device("display definition")
     if LUA_TARGET.is_symlink():
         raise RuntimeError("refusing to remove a symlinked gamescope definition")
@@ -189,7 +193,29 @@ def remove_display_script() -> None:
         if not display_script_owned(LUA_TARGET):
             raise RuntimeError("another AYANEO 3 gamescope definition is installed")
         unlink_script()
+        replaced = _replaced_definition()
+        if replaced is not None and not native_profile_present():
+            write_script(replaced)
     _remove_legacy_script()
+
+
+def _replaced_definition() -> bytes | None:
+    """The newest backed-up definition that is not one of Companion's own."""
+    try:
+        backups = sorted(DISPLAY_SCRIPT_BACKUP_ROOT.glob(f"{LUA_TARGET.name}-*.bak"))  # names sort by time
+    except OSError:
+        return None
+    for path in reversed(backups):
+        try:
+            if path.is_symlink() or path.stat().st_size > MAX_SCRIPT_BYTES:
+                continue
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        data = raw.replace(b"\r\n", b"\n")
+        if not data.startswith(DISPLAY_SCRIPT_MARKER) and hashlib.sha256(data).hexdigest() not in LEGACY_DISPLAY_SCRIPT_SHA256:
+            return raw
+    return None
 
 
 _CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
@@ -247,7 +273,9 @@ def restart_needed(enabled: bool) -> bool:
     started = remember_loaded()
     if started is None:
         return False  # Cannot tell, so do not ask.
-    loaded = _loaded_session == started
+    # The start time is recomputed each call and jitters by milliseconds (/proc/uptime
+    # has 10 ms resolution); another session starts seconds apart.
+    loaded = _loaded_session is not None and abs(_loaded_session - started) < 1.0
     return (not loaded and is_our_display_script(LUA_TARGET)) if enabled else loaded
 
 

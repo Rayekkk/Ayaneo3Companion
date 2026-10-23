@@ -46,7 +46,7 @@ AUDIO_CALIBRATION_SHA256 = "966262929355aeaf01e0a4c193d3be1e23443a59438b71e3d8da
 AUDIO_CALIBRATION_BIN = "cs35l41-dsp1-spk-cali-1f660105-spkid1.bin"
 AUDIO_CALIBRATION_WMFW = "cs35l41-dsp1-spk-cali-1f660105-spkid1"
 AUDIO_CALIBRATION_AMBIENT = 23
-AUDIO_CALIBRATION_BACKUP_ROOT = Path("/var/lib/ayaneo3-companion/audio-calibration")
+AUDIO_CALIBRATION_BACKUP_ROOT = companion_common.BACKUP_ROOT / "audio-calibration"
 AUDIO_CALIBRATION_EFI_GLOB = (
     "/sys/firmware/efi/efivars/"
     "CirrusSmartAmpCalibrationData-02f9af02-7734-4233-b43d-93fe5aa35db3"
@@ -555,7 +555,7 @@ def _build_audio_efi(original: bytes, values: tuple[int, int], ambient: int) -> 
 
 
 def _backup_audio_efi(original: bytes) -> Path:
-    AUDIO_CALIBRATION_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    companion_common.private_dir(AUDIO_CALIBRATION_BACKUP_ROOT)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     digest = hashlib.sha256(original).hexdigest()[:12]
     target = AUDIO_CALIBRATION_BACKUP_ROOT / f"CirrusSmartAmpCalibrationData-{stamp}-{digest}.bin"

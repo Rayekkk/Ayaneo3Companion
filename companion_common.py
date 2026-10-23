@@ -54,6 +54,47 @@ ALLOWED_DOWNLOAD_HOSTS = frozenset({
 })
 HARDWARE_DOWNLOAD_SECONDS = 60.0
 HARDWARE_NETWORK_TIMEOUT = 10.0
+# SteamOS keeps /var per OS slot (var-A/var-B partitions), so an update that switches
+# slots leaves it behind; /home is shared. Measured on the console.
+BACKUP_ROOT = Path("/home/.ayaneo3companion-backups")
+LEGACY_BACKUP_ROOT = Path("/var/lib/ayaneo3-companion")
+LEGACY_BACKUP_DIRS = ("audio-calibration", "display-definition", "backups")
+
+
+def private_dir(path: Path) -> Path:
+    """A root-only folder (0700), never through a link."""
+    for folder in (path.parent, path):
+        if folder.is_symlink():
+            raise RuntimeError(f"refusing a symlinked backup folder: {folder}")
+        folder.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(folder, 0o700)
+    return path
+
+
+def migrate_backups(source_root: Path = LEGACY_BACKUP_ROOT, target_root: Path = BACKUP_ROOT) -> int:
+    """Copy backups older releases kept in /var/lib (one OS slot) to target_root; originals stay."""
+    copied = 0
+    for name in LEGACY_BACKUP_DIRS:
+        source = source_root / name
+        if source.is_symlink() or not source.is_dir():
+            continue
+        for item in sorted(source.iterdir()):
+            target = target_root / name / item.name
+            if item.is_symlink() or not item.is_file() or target.exists():
+                continue
+            data = item.read_bytes()
+            private_dir(target.parent)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+            fd = os.open(target, flags, 0o600)
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if target.read_bytes() != data:
+                raise RuntimeError(f"backup copy verification failed: {target}")
+            copied += 1
+    return copied
 
 
 _dmi_cache: dict[str, str] = {}

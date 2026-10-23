@@ -116,6 +116,18 @@ class ScriptPlacementTests(unittest.TestCase):
         with patch.object(display, "gamescope_started", return_value=started + 100):
             self.assertFalse(display.restart_needed(False), "a new session never loaded it")
 
+    def test_restart_detection_tolerates_the_jitter_of_the_computed_start_time(self):
+        # Measured on the console: six reads of the same session spread over 7.6 ms
+        # (time.time() minus /proc/uptime, which has 10 ms resolution).
+        started = 2_000_000.0
+        jitter = iter([0.0, 0.004, -0.003, 0.007, 0.001, -0.006, 0.002, 0.005] * 4)
+        with patch.object(display, "gamescope_started", side_effect=lambda: started + next(jitter)):
+            display.install_display_script()
+            os.utime(self.target, (started - 5, started - 5))
+            self.assertFalse(display.restart_needed(True))
+            display.remove_display_script()
+            self.assertTrue(display.restart_needed(False), "the running session still shows the removed definition")
+
     def test_migration_remembers_the_etc_copy_the_session_loaded(self):
         started = 2_000_000.0
         self.legacy.write_bytes(self.ours)
@@ -283,6 +295,34 @@ class DisplayDefinitionTests(unittest.TestCase):
                 self.assertEqual(backup.read_bytes(), foreign)
                 self.assertEqual(target.read_bytes(), current)
                 self.assertFalse(display_backend.display_script_conflict(target))
+                # Turning ours off brings back what it replaced; a SteamOS profile wins over it.
+                with mock.patch.object(display_backend, "native_profile_present", return_value=True):
+                    display_backend.remove_display_script()
+                self.assertFalse(target.exists())
+                display_backend.install_display_script()
+                with mock.patch.object(display_backend, "native_profile_present", return_value=False):
+                    display_backend.remove_display_script()
+                self.assertEqual(target.read_bytes(), foreign)
+
+    def test_backups_are_copied_out_of_the_slot_local_var(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old, new = root / "var", root / "home" / "backups"
+            (root / "home").mkdir()
+            (old / "audio-calibration").mkdir(parents=True)
+            (old / "audio-calibration" / "Cirrus-1.bin").write_bytes(b"factory")
+            (old / "display-definition").mkdir()
+            (old / "display-definition" / "a.lua-1.bak").write_bytes(b"-- theirs\n")
+            (old / "ignored").mkdir()
+            (old / "ignored" / "x").write_bytes(b"x")
+            self.assertEqual(companion_common.migrate_backups(old, new), 2)
+            self.assertEqual((new / "audio-calibration" / "Cirrus-1.bin").read_bytes(), b"factory")
+            self.assertTrue((old / "audio-calibration" / "Cirrus-1.bin").exists(), "the originals stay")
+            self.assertFalse((new / "ignored").exists())
+            if os.name == "posix":
+                self.assertEqual((new / "audio-calibration").stat().st_mode & 0o777, 0o700)
+                self.assertEqual((new / "audio-calibration" / "Cirrus-1.bin").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(companion_common.migrate_backups(old, new), 0, "an existing copy is never overwritten")
 
     def test_display_definition_removal_is_owned_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
