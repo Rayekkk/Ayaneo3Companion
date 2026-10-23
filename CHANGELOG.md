@@ -2,6 +2,39 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## [1.3.0] - in development
+
+This release brings LegionGo2Companion's design and safety work to AYANEO 3
+Companion. TDP Control and Fan Control from Legion are still being ported.
+
+### Fixes
+
+- **Colours after a SteamOS update.** The OLED display definition now lives in
+  your `~/.config/gamescope/scripts`, which updates keep. Before, an update
+  removed it from `/etc` and Companion put it back a moment after Gaming Mode had
+  already started, so the screen stayed washed out until a restart.
+- **Your lighting and vibration are kept on first install.** Companion shows
+  what the controller already uses and changes nothing until you do. Uninstall
+  puts back what it found.
+- **L5/R5 after reinstalling.** Uninstall and Install Plugin from ZIP no longer
+  leaves LC1/RC1 silent while the switch shows them enabled.
+- The overview no longer shows 800 nits before the display has been read.
+
+### Improvements
+
+- **Restart Gaming Mode** from the OLED Display page when gamescope has not
+  loaded the current definition yet.
+- **Navigation like LegionGo2Companion:** icons on every row, the row you came
+  from is selected again, and a page stays open when Quick Access closes or a
+  menu opens. Status reads pause while the Companion tab is hidden.
+- **Clearer stale data:** each row says how old its values are while a refresh
+  is retried. RGB is now called Lighting.
+- **Private diagnostic log** in `/var/log/ayaneo3companion`, with repeated
+  messages limited to one a minute; Decky's own plugin logs are pruned to the
+  newest ten.
+- Helper programs no longer inherit Decky's bundled libraries, and Decky 3.2's
+  stop hang no longer delays restoring the hardware.
+
 ## [1.2.0] - 2026-10-10
 
 This update adds fan control and improves how Companion handles everyday
