@@ -260,7 +260,17 @@ class Plugin:
                     raise RuntimeError("Controller module operation is in progress")
                 controller = dict(cls._state["controller"])
                 recover_custom = cls._state.get("tm_guard_enabled", recover_custom)
-            status, path = controller_backend.reconcile_controller(controller, recover_custom, force)
+                owned = cls._state.get("controller_owned", True)
+                seed = not owned and not cls._state.get("controller_seeded")
+            if seed:
+                # Until the user changes a setting, show the controller's own
+                # lighting and vibration instead of writing Companion defaults.
+                controller = {**controller_backend.read_controller(),
+                              "ff_gain": controller["ff_gain"]}
+                with _lock:
+                    cls._state.update(controller=dict(controller), controller_seeded=True)
+            status, path = controller_backend.reconcile_controller(
+                controller, recover_custom, force, repair=owned)
             return status, path
 
     @classmethod
@@ -271,6 +281,8 @@ class Plugin:
                 if (cls._state.get("modules_reconnecting")
                         and not cls._state.get("modules_detached")):
                     raise RuntimeError("Waiting for the requested module operation")
+                if not cls._state.get("controller_owned", True):
+                    return None
                 controller = dict(cls._state["controller"])
             controller_backend.apply_controller(controller, persist_firmware=persist_firmware)
             controller_backend.set_vibration_gain(controller["ff_gain"])
@@ -295,6 +307,8 @@ class Plugin:
                 if (cls._state.get("modules_reconnecting", False)
                         or not cls._state.get("modules_connected", False)):
                     raise RuntimeError("Waiting for controller modules")
+                if not cls._state.get("controller_owned", True):
+                    return None
                 gain = cls._state["controller"]["ff_gain"]
             controller_backend.set_vibration_gain(gain)
             return gain
@@ -609,6 +623,18 @@ class Plugin:
             decky.logger.info(
                 f"{LOG} applied {'game ' + app_id if used_profile else 'global'} TDP")
 
+    @classmethod
+    def _controller_save_values(cls, previous, value):
+        """Save a controller change; the first one also records the state found on the device."""
+        values = {"controller": value}
+        with _lock:
+            first = not cls._state.get("controller_owned", True)
+            seeded = cls._state.get("controller_seeded", False)
+        if first and seeded:
+            # Uninstall restores this, not Companion's defaults.
+            values["controller_baseline"] = previous
+        return values
+
     def _set_controller_transaction(self, patch, feedback=False):
         with controller_backend.controller_apply_lock:
             with _lock:
@@ -641,9 +667,9 @@ class Plugin:
                 if failures:
                     raise RuntimeError("; ".join(failures))
 
-            self._apply_and_save(apply, restore, {"controller": value})
+            self._apply_and_save(apply, restore, Plugin._controller_save_values(previous, value))
             with _lock:
-                Plugin._state["controller"] = value
+                Plugin._state.update(controller=value, controller_owned=True)
 
     async def set_controller(self, raw):
         if not isinstance(raw, dict):
@@ -663,13 +689,13 @@ class Plugin:
         def mutate():
             with controller_backend.controller_apply_lock:
                 with _lock:
-                    controller = dict(Plugin._state["controller"])
-                    previous_gain = controller["ff_gain"]
-                    controller["ff_gain"] = value
+                    previous = dict(Plugin._state["controller"])
+                    controller = {**previous, "ff_gain": value}
                 self._apply_and_save(lambda: controller_backend.set_vibration_gain(value),
-                    lambda: controller_backend.set_vibration_gain(previous_gain), {"controller": controller})
+                    lambda: controller_backend.set_vibration_gain(previous["ff_gain"]),
+                    Plugin._controller_save_values(previous, controller))
                 with _lock:
-                    Plugin._state["controller"] = controller
+                    Plugin._state.update(controller=controller, controller_owned=True)
 
         await self._offload(mutate)
         return self._copy_state()
@@ -878,8 +904,10 @@ class Plugin:
                 else:
                     companion_common.atomic_write_bytes(display_backend.LUA_TARGET, previous)
             self._apply_and_save(apply, restore, {"screen_fix_enabled": enabled})
+            conflict = display_backend.display_script_conflict(display_backend.LUA_TARGET)
             with _lock:
                 Plugin._state["screen_installed"] = enabled
+                Plugin._state["screen_conflict"] = conflict
             return backup
         try:
             backup = await self._offload(mutate)
@@ -975,8 +1003,10 @@ class Plugin:
             with _lock:
                 controller = dict(Plugin._state["controller"])
                 restore_buttons = Plugin._state.get("button_fix_installed", False)
+                owned = Plugin._state.get("controller_owned", True)
             try:
-                changed = await self._offload(controller_backend.recover_tm_mode, controller, restore_buttons)
+                changed = await self._offload(controller_backend.recover_tm_mode, controller,
+                                              restore_buttons, owned)
             except Exception as error:
                 with _lock:
                     Plugin._state["tm_guard_status"] = "Waiting for controller"
@@ -1290,7 +1320,7 @@ class Plugin:
                             # Rear-button mappings are persisted with AYA_SAVE.
                             # Reprogramming them here would also issue the 0x88
                             # physical module reset on every reconnection.
-                            await self._offload(Plugin._restore_current_controller)
+                            restored = await self._offload(Plugin._restore_current_controller)
                             with _lock:
                                 if (Plugin._state.get("modules_reconnecting")
                                         and not Plugin._state.get("modules_detached")):
@@ -1300,8 +1330,9 @@ class Plugin:
                             with _lock:
                                 Plugin._state["modules_reconnecting"] = False
                                 Plugin._state["modules_detached"] = False
-                            decky.logger.info(
-                                f"{LOG} modules connected; restored RGB, vibration and FF_GAIN")
+                            if restored is not None:
+                                decky.logger.info(
+                                    f"{LOG} modules connected; restored RGB, vibration and FF_GAIN")
                             break
                         except asyncio.CancelledError:
                             raise
@@ -1375,10 +1406,11 @@ class Plugin:
                 if token != last_token or restore_pending:
                     # Recheck module intent and read the latest gain under the
                     # controller lock, after any earlier slider/reset operation.
-                    await self._offload(Plugin._restore_current_vibration_gain)
+                    restored = await self._offload(Plugin._restore_current_vibration_gain)
                     last_token = token
                     restore_pending = False
-                    decky.logger.info(f"{LOG} restored FF_GAIN on the physical input device")
+                    if restored is not None:
+                        decky.logger.info(f"{LOG} restored FF_GAIN on the physical input device")
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -1591,6 +1623,10 @@ class Plugin:
             "cpu_boost_supported": cpu_boost_supported,
             "cpu_boost": cpu_boost,
             "controller": saved_controller,
+            # Without a saved choice the controller keeps its own lighting and
+            # vibration; the monitors read them instead of applying defaults.
+            "controller_owned": type(settings.getSetting("controller", None)) is dict,
+            "controller_seeded": False,
             "screen_installed": screen_installed,
             "screen_conflict": display_backend.display_script_conflict(display_backend.LUA_TARGET),
             "edid_patched": False,
@@ -1709,6 +1745,15 @@ class Plugin:
                 await self._offload(display_backend.remove_display_script)
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not remove display definition: {error}")
+        baseline = settings.getSetting("controller_baseline", None)
+        if is_supported and isinstance(baseline, dict):
+            baseline = controller_backend.normalize_controller(baseline)
+            try:
+                await self._offload(controller_backend.apply_controller, baseline)
+                await self._offload(controller_backend.set_vibration_gain, baseline["ff_gain"])
+                decky.logger.info(f"{LOG} restored the controller's own lighting and vibration")
+            except Exception as error:
+                decky.logger.warning(f"{LOG} could not restore lighting and vibration: {error}")
         if is_supported:
             try:
                 await self._offload(controller_backend.program_rear_buttons, False)

@@ -26,7 +26,7 @@ const ACTION_FIELDS: Record<ActionKey, ReadonlyArray<keyof State>> = {
   audio: ["audio_fix_enabled", "audio_fix_installed", "audio_calibration_available",
     "audio_calibration_last", "audio_profile", "audio_fix_error"],
   buttons: ["button_fix_installed", "tm_guard_enabled", "tm_guard_status", "tm_guard_recoveries"],
-  screen: ["screen_installed"],
+  screen: ["screen_installed", "screen_conflict"],
 };
 interface Tuning { spl: number; spptOff: number; fpptOff: number }
 
@@ -798,7 +798,7 @@ const Content: FC = () => {
       <SectionLink title="Magic Modules" description={moduleSummary} onClick={() => openSection("modules")} />
       <SectionLink title="Audio" description={audioSummary} onClick={() => openSection("audio")} />
       <SectionLink title="Key Binding" description={`${state.button_fix_installed ? "L5/R5 enabled" : "Native mapping"} · TM Guard ${state.tm_guard_enabled ? "on" : "off"}`} onClick={() => openSection("buttons")} />
-      <SectionLink title="OLED Display" description={state.screen_installed ? `Definition installed · ${state.edid_game_nits || 800} nits` : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed"} onClick={() => openSection("screen")} />
+      <SectionLink title="OLED Display" description={state.screen_installed ? `Definition installed${state.edid_game_nits ? ` · ${state.edid_game_nits} nits` : ""}` : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed"} onClick={() => openSection("screen")} />
     </PanelSection>
     <PanelSection title="Device">
       <PanelSectionRow><Field focusable label={state.device} description={`SteamOS · TDP backend: ${state.tdp_backend}`} /></PanelSectionRow>

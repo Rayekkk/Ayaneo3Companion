@@ -529,7 +529,7 @@ class LogicTests(unittest.TestCase):
                                    return_value=("configuration_restored", "/dev/hidraw7")) as reconcile:
                 with self.assertRaises(asyncio.CancelledError):
                     asyncio.run(main.Plugin()._tm_guard_loop())
-            reconcile.assert_called_once_with(controller_backend.DEFAULT_CONTROLLER, False, False)
+            reconcile.assert_called_once_with(controller_backend.DEFAULT_CONTROLLER, False, False, repair=True)
             self.assertEqual(main.Plugin._state["tm_guard_status"], "Disabled")
         finally:
             main.Plugin._state = previous_state
@@ -609,9 +609,9 @@ class LogicTests(unittest.TestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     asyncio.run(main.Plugin()._tm_guard_loop())
             self.assertEqual(reconcile.call_args_list, [
-                mock.call(controller_backend.DEFAULT_CONTROLLER, False, False),
-                mock.call(controller_backend.DEFAULT_CONTROLLER, False, False),
-                mock.call(controller_backend.DEFAULT_CONTROLLER, False, True),
+                mock.call(controller_backend.DEFAULT_CONTROLLER, False, False, repair=True),
+                mock.call(controller_backend.DEFAULT_CONTROLLER, False, False, repair=True),
+                mock.call(controller_backend.DEFAULT_CONTROLLER, False, True, repair=True),
             ])
         finally:
             main.Plugin._state = previous_state
@@ -657,8 +657,8 @@ class LogicTests(unittest.TestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     asyncio.run(main.Plugin()._tm_guard_loop())
             self.assertEqual(reconcile.call_args_list, [
-                mock.call(controller_backend.DEFAULT_CONTROLLER, False, False),
-                mock.call(controller_backend.DEFAULT_CONTROLLER, False, True),
+                mock.call(controller_backend.DEFAULT_CONTROLLER, False, False, repair=True),
+                mock.call(controller_backend.DEFAULT_CONTROLLER, False, True, repair=True),
             ])
         finally:
             main.Plugin._state = previous_state
@@ -1280,7 +1280,7 @@ class LogicTests(unittest.TestCase):
             if not release.wait(2):
                 raise RuntimeError("test synchronization timed out")
 
-        def reconcile(value, _recover, _force):
+        def reconcile(value, _recover, _force, repair=True):
             reconciled.append(dict(value))
             return "healthy", "/dev/hidraw7"
 

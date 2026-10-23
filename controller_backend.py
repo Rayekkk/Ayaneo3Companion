@@ -465,8 +465,12 @@ def controller_response_matches(response: bytes, config: dict) -> bool:
 
 
 def reconcile_controller(config: dict, recover_custom: bool,
-                         force: bool = False) -> tuple[str, str]:
-    """Verify volatile controller state and repair it without writing NVRAM."""
+                         force: bool = False, repair: bool = True) -> tuple[str, str]:
+    """Verify volatile controller state and repair it without writing NVRAM.
+
+    With repair=False only an accidental TM mode change is undone; the
+    controller's own lighting and vibration are left as they are.
+    """
     companion_common.require_supported_device("controller monitoring")
     config = normalize_controller(config)
     path = vendor_hidraw()
@@ -480,8 +484,10 @@ def reconcile_controller(config: dict, recover_custom: bool,
                 if not recover_custom:
                     return "tm_mode", path
                 _switch_to_custom_mode_fd(fd, response)
+                if not repair:
+                    return "mode_restored", path
                 status = "mode_restored"
-            elif force or not controller_response_matches(response, config):
+            elif repair and (force or not controller_response_matches(response, config)):
                 status = "configuration_restored"
             else:
                 return "healthy", path
@@ -557,12 +563,12 @@ def reset_controller_modules(config: dict, restore_buttons: bool) -> None:
     set_vibration_gain(config["ff_gain"])
 
 
-def recover_tm_mode(config: dict, _restore_buttons: bool) -> bool:
+def recover_tm_mode(config: dict, _restore_buttons: bool, repair: bool = True) -> bool:
     """Undo a hardware TM mode change and restore the Companion configuration."""
     companion_common.require_supported_device("TM Guard")
     if not ec_backend.both_modules_connected() or not ec_backend.controller_powered():
         return False
-    status, _ = reconcile_controller(config, True)
+    status, _ = reconcile_controller(config, True, repair=repair)
     return status == "mode_restored"
 
 
