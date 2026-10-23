@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import test_logic
 import main
-import power_backend
+import tdp_backend
 import controller_backend
 import ec_backend
 import companion_common
@@ -24,11 +24,11 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
         self.store = SettingsManager("settings", directory)
         self.store.replace({"charge_bypass": False, "controller": controller_backend.DEFAULT_CONTROLLER})
         self.state = {"supported": True, "controller": dict(controller_backend.DEFAULT_CONTROLLER),
-                      "tdp": dict(power_backend.DEFAULT_TDP), "charge_bypass": False,
+                      "charge_bypass": False,
                       "charge_bypass_supported": True}
         self.stack.enter_context(patch.object(main, "settings", self.store))
         self.stack.enter_context(patch.object(main.Plugin, "_state", self.state))
-        self.stack.enter_context(patch.object(main.Plugin, "_active_app", "222"))
+        self.stack.enter_context(patch.object(tdp_backend.Plugin, "_ready", False))
         self.stack.enter_context(patch.object(companion_common, "supported_device", return_value=True))
         self.hardware_charge = False
         self.charge_writes = []
@@ -44,7 +44,7 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
 
     async def held_tdp(self, entered, release):
         def hold():
-            with main._tdp_mutation_lock:
+            with tdp_backend._mutation_lock:
                 entered.set()
                 if not release.wait(3):
                     raise TimeoutError("test failed to release TDP transaction")
@@ -85,22 +85,26 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.hardware_charge)
         self.assertEqual(self.charge_writes, [True])
 
-    async def test_noop_game_heartbeat_and_next_rgb_write_do_not_wait_for_tdp_monitor(self):
+    async def test_game_heartbeat_does_not_wait_behind_a_controller_write(self):
         entered, release = threading.Event(), threading.Event()
-        tasks = [asyncio.create_task(self.held_tdp(entered, release))]
-        try:
-            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-            tasks.append(asyncio.create_task(self.plugin.set_active_app("222")))
-            tasks.append(asyncio.create_task(self.plugin.set_controller(
-                {**controller_backend.DEFAULT_CONTROLLER, "brightness": 40})))
-            done, _ = await asyncio.wait(tasks[1:], timeout=0.25)
-            acknowledged = len(done)
-        finally:
-            release.set()
-            responses = await asyncio.wait_for(asyncio.gather(*tasks), 3)
-        self.assertEqual(acknowledged, 2, "a same-game heartbeat must not reserve the queue behind TDP recovery")
-        self.assertEqual(responses[2]["controller"]["brightness"], 40)
-        self.assertEqual(main.Plugin._active_app, "222")
+        def held_apply(*_args, **_kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("test failed to release the controller write")
+        tasks = []
+        with patch.object(controller_backend, "apply_controller", side_effect=held_apply):
+            try:
+                tasks.append(asyncio.create_task(self.plugin.set_controller(
+                    {**controller_backend.DEFAULT_CONTROLLER, "brightness": 40})))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                tasks.append(asyncio.create_task(self.plugin.set_active_app("222")))
+                done, _ = await asyncio.wait(tasks[1:], timeout=0.25)
+                acknowledged = len(done)
+            finally:
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*tasks), 3)
+        self.assertEqual(acknowledged, 1, "TDP's foreground-game lease never queues behind main's writes")
+        self.assertEqual(tdp_backend._frontend_appid, "222")
 
     async def test_charge_monitor_waits_for_commit_and_uses_new_saved_intent(self):
         entered, release = threading.Event(), threading.Event()

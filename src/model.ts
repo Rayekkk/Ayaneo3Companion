@@ -3,12 +3,8 @@
 
 export type Vibration = "off" | "low" | "medium" | "high";
 export type RgbMode = "off" | "solid" | "pulse" | "rainbow";
-export type Preset = "Minimum" | "Low power" | "Balanced" | "Performance" | "Max" | "Custom";
-export interface Tdp { spl: number; sppt: number; fppt: number }
 export interface Controller { vibration: Vibration; ff_gain: number; rgb_mode: RgbMode; color: string; brightness: number }
 export interface Hsv { hue: number; saturation: number; brightness: number }
-export interface RunningGame { appId: string; name: string }
-export interface GameProfile { exists: boolean; profile: Tdp; preset?: Preset }
 export interface ModuleInfo { code: number | null; label: string; layout: string; status: string; connected: boolean }
 export interface BatteryStatus { available: boolean; percent: number | null; status: string; seconds_to_full: number | null; power_w: number | null; source: "UPower" | "sysfs" | "none" }
 
@@ -19,21 +15,9 @@ export interface State {
   supported: boolean;
   device: string;
   version: string;
-  tdp_backend: string;
-  active_app_id: string;
-  tdp_supported?: boolean;
-  tdp_error?: string;
-  tdp_profile_pending?: boolean;
-  tdp_profile_error?: string;
-  tdp: Tdp;
-  tdp_preset?: Preset;
-  presets: Record<string, Tdp>;
-  cpu_boost_supported: boolean;
-  cpu_boost: boolean;
   controller: Controller;
   controller_supported?: boolean;
   controller_error?: string;
-  gpu_power_w: number | null;
   screen_installed: boolean;
   screen_conflict: boolean;
   screen_restart_needed?: boolean;

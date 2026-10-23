@@ -12,14 +12,13 @@ from unittest.mock import AsyncMock, Mock, patch
 import test_logic  # Install the Decky import harness before loading the backend.
 from _harness import owner
 import main
-import power_backend
 import controller_backend
 import companion_common
 from safe_settings import SettingsManager
 
 
 TOKEN = ("/dev/input/event5", 2, 20)
-TASK_NAMES = ("_restore_task", "_edid_task", "_ac_task", "_charge_task", "_module_task",
+TASK_NAMES = ("_restore_task", "_edid_task", "_charge_task", "_module_task",
               "_tm_guard_task", "_vibration_gain_task", "_audio_task", "_fan_task")
 
 
@@ -217,12 +216,11 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
             for name in ("ensure_controller_control", "ensure_charge_bypass_control"):
                 stack.enter_context(patch.object(owner(name), name, return_value=None))
             stack.enter_context(patch.object(companion_common, "dmi", return_value="AYANEO 3"))
-            stack.enter_context(patch.object(power_backend, "read_cpu_boost", return_value=False))
-            stack.enter_context(patch.object(power_backend, "tdp_capabilities", return_value={"tdp_supported": False}))
+            stack.enter_context(patch.object(self.plugin, "_start_tdp", new=AsyncMock()))
             stack.enter_context(patch.object(main.fan_controller, "recover_abandoned"))
             stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(
                 ssl_context=Mock(), plugin_version=Mock(return_value="1.2.0"))))
-            for name in ("_restore_hardware", "_edid_loop", "_ac_loop", "_charge_loop", "_module_loop", "_tm_guard_loop", "_restore_audio"):
+            for name in ("_restore_hardware", "_edid_loop", "_charge_loop", "_module_loop", "_tm_guard_loop", "_restore_audio"):
                 stack.enter_context(patch.object(self.plugin, name, new=AsyncMock()))
             gain_loop = stack.enter_context(patch.object(self.plugin, "_vibration_gain_loop", new=AsyncMock()))
             await self.plugin._start()

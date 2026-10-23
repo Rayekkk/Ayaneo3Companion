@@ -24,10 +24,8 @@ import companion_common
 import safe_settings
 
 
-TASK_NAMES = ("_restore_task", "_edid_task", "_ac_task", "_charge_task", "_module_task", "_tm_guard_task",
+TASK_NAMES = ("_restore_task", "_edid_task", "_charge_task", "_module_task", "_tm_guard_task",
               "_vibration_gain_task", "_audio_task")
-BASE_TDP = {"spl": 15, "sppt": 20, "fppt": 25}
-NEXT_TDP = {"spl": 20, "sppt": 25, "fppt": 30}
 
 
 class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
@@ -35,17 +33,14 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="ayaneo3-runtime-quality-")
         self.addCleanup(self.temp.cleanup)
         self.previous_state = copy.deepcopy(main.Plugin._state)
-        self.previous_app = main.Plugin._active_app
         self.previous_tasks = {name: getattr(main.Plugin, name) for name in TASK_NAMES}
         for name in TASK_NAMES:
             setattr(main.Plugin, name, None)
         self.store = safe_settings.SettingsManager("settings", self.temp.name)
         self.controller = copy.deepcopy(controller_backend.DEFAULT_CONTROLLER)
-        self.store.replace({"tdp": BASE_TDP, "tdp_preset": "Custom",
-                            "controller": self.controller, "cpu_boost": False,
-                            "charge_bypass": False, "game_profiles": {}})
-        self.hardware = {"tdp": dict(BASE_TDP), "controller": copy.deepcopy(self.controller),
-                         "cpu_boost": False, "charge_bypass": False}
+        self.store.replace({"controller": self.controller, "charge_bypass": False,
+                            "tm_guard_enabled": True})
+        self.hardware = {"controller": copy.deepcopy(self.controller), "charge_bypass": False}
         self.writes = []
         self.releases = []
         self.patchers = []
@@ -62,27 +57,20 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         patch("both_modules_connected", return_value=True)
         patch("controller_powered", return_value=True)
         patch("set_controller_power", side_effect=AssertionError("unexpected controller power write"))
-        patch("read_cpu_boost", side_effect=lambda: self.hardware["cpu_boost"])
         patch("read_charge_bypass", side_effect=lambda: self.hardware["charge_bypass"])
-        patch("write_cpu_boost", side_effect=lambda value: self.write("cpu_boost", value))
         patch("write_charge_bypass", side_effect=lambda value: self.write("charge_bypass", value))
         patch("apply_controller", side_effect=lambda value, *a, **kw: self.write("controller", value))
-        patch("apply_tdp", side_effect=self.apply_tdp)
-        patch("tdp_capabilities", return_value={"tdp_backend": "RyzenAdj", "tdp_supported": True, "tdp_error": ""})
         patch("updater", new=types.SimpleNamespace(
             reset=mock.Mock(), close=mock.Mock(), ssl_context=mock.Mock(return_value=None),
             plugin_version=mock.Mock(return_value="1.0.2"),
             check=mock.Mock(return_value={"current_version": "1.0.2", "update_available": False})))
         main.Plugin._state = {
             "supported": True, "initializing": False, "startup_error": "",
-            "tdp_backend": "RyzenAdj", "tdp_supported": True, "tdp_error": "",
-            "tdp": dict(BASE_TDP), "tdp_preset": "Custom", "controller": copy.deepcopy(self.controller),
-            "cpu_boost": False, "charge_bypass": False,
-            "cpu_boost_supported": True, "charge_bypass_supported": True,
+            "controller": copy.deepcopy(self.controller),
+            "charge_bypass": False, "charge_bypass_supported": True,
             "modules_reconnecting": False, "modules_connected": True,
             "tm_guard_enabled": True, "tm_guard_status": "Monitoring", "tm_guard_recoveries": 0,
         }
-        main.Plugin._active_app = "480"
         self.snapshot_patcher = mock.patch.object(
             main.Plugin, "_snapshot", side_effect=lambda *args: copy.deepcopy(main.Plugin._state))
         self.snapshot_patcher.start()
@@ -98,18 +86,12 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             for patcher in reversed(self.patchers):
                 patcher.stop()
             main.Plugin._state = self.previous_state
-            main.Plugin._active_app = self.previous_app
             for name, task in self.previous_tasks.items():
                 setattr(main.Plugin, name, task)
 
     def write(self, field, value):
         self.writes.append((field, copy.deepcopy(value)))
         self.hardware[field] = copy.deepcopy(value)
-
-    def apply_tdp(self, value):
-        self.write("tdp", value)
-        # The driver/firmware may reset this independently during a power write.
-        self.hardware["cpu_boost"] = True
 
     def checkpoint(self):
         return (copy.deepcopy(main.Plugin._state), copy.deepcopy(self.hardware), self.store.data,
@@ -132,54 +114,19 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             return original(source, destination, *args, **kwargs)
         return mock.patch.object(safe_settings.os, "replace", side_effect=replace)
 
-    def blocking_boost_write(self):
+    def blocking_charge_write(self):
         entered, release = threading.Event(), threading.Event()
         self.releases.append(release)
         def write(value):
             entered.set()
             if not release.wait(5):
                 raise TimeoutError("test never released the isolated worker")
-            self.write("cpu_boost", value)
-        self.patch("write_cpu_boost", side_effect=write)
+            self.write("charge_bypass", value)
+        self.patch("write_charge_bypass", side_effect=write)
         return entered, release
 
     async def wait_entered(self, entered):
         self.assertTrue(await asyncio.to_thread(entered.wait, 2), "worker did not reach checkpoint")
-
-    async def test_global_tdp_failed_commit_restores_disk_state_and_hardware(self):
-        before = self.checkpoint()
-        with self.fail_primary_replace(), self.assertRaisesRegex(RuntimeError, "restored"):
-            await self.plugin.set_tdp(NEXT_TDP, "Custom", "480")
-        self.assert_restored(before)
-        self.assertTrue(any(field == "tdp" for field, _ in self.writes))
-
-    async def test_unmanaged_cpu_boost_is_restored_after_tdp_commit_failure(self):
-        values = self.store.data
-        values.pop("cpu_boost")
-        self.store.replace(values)
-        before = self.checkpoint()
-        with self.fail_primary_replace(), self.assertRaises(RuntimeError):
-            await self.plugin.set_tdp(NEXT_TDP, "Custom", "480")
-        self.assert_restored(before)
-        self.assertFalse(self.hardware["cpu_boost"])
-        self.assertNotIn("cpu_boost", self.store.data)
-
-    async def test_game_profile_failed_commit_does_not_create_rejected_profile(self):
-        before = self.checkpoint()
-        with self.fail_primary_replace(), self.assertRaises(RuntimeError):
-            await self.plugin.set_game_profile("480", NEXT_TDP, "Custom", "480")
-        self.assert_restored(before)
-        self.assertFalse((await self.plugin.get_game_profile("480"))["exists"])
-
-    async def test_active_profile_delete_failed_commit_keeps_active_game_values(self):
-        self.store.setSetting("game_profiles", {"480": {**NEXT_TDP, "preset": "Custom"}})
-        self.store.commit()
-        self.hardware["tdp"] = dict(NEXT_TDP)
-        main.Plugin._state["tdp"] = dict(NEXT_TDP)
-        before = self.checkpoint()
-        with self.fail_primary_replace(), self.assertRaises(RuntimeError):
-            await self.plugin.delete_game_profile("480", "480")
-        self.assert_restored(before)
 
     async def test_controller_failed_commit_restores_previous_configuration(self):
         before = self.checkpoint()
@@ -188,13 +135,6 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin.set_controller(wanted)
         self.assert_restored(before)
         self.assertEqual([field for field, _ in self.writes], ["controller", "controller"])
-
-    async def test_cpu_boost_failed_commit_restores_actual_kernel_value(self):
-        before = self.checkpoint()
-        with self.fail_primary_replace(), self.assertRaises(RuntimeError):
-            await self.plugin.set_cpu_boost(True)
-        self.assert_restored(before)
-        self.assertEqual(self.writes, [("cpu_boost", True), ("cpu_boost", False)])
 
     async def test_charge_bypass_failed_commit_restores_actual_charge_value(self):
         before = self.checkpoint()
@@ -223,49 +163,26 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin.set_controller({**self.controller, "brightness": 25})
         self.assertEqual(self.store.data, disk)
 
-    async def test_stale_game_context_cannot_touch_settings_or_hardware(self):
-        before = self.checkpoint()
-        for operation in (
-            lambda: self.plugin.set_tdp(NEXT_TDP, "Custom", "old-game"),
-            lambda: self.plugin.set_game_profile("480", NEXT_TDP, "Custom", "old-game"),
-            lambda: self.plugin.delete_game_profile("480", "old-game"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "no longer active"):
-                await operation()
-        self.assert_restored(before)
-        self.assertEqual(self.writes, [])
-
-    async def test_successful_game_profile_keeps_global_and_restores_it_on_exit(self):
-        await self.plugin.set_game_profile("480", NEXT_TDP, "Custom", "480")
-        persisted = safe_settings.SettingsManager("settings", self.temp.name).data
-        self.assertEqual(persisted["tdp"], BASE_TDP)
-        self.assertEqual(persisted["game_profiles"]["480"], {**NEXT_TDP, "preset": "Custom"})
-        self.assertEqual(self.hardware["tdp"], NEXT_TDP)
-        await self.plugin.set_active_app("")
-        self.assertEqual(self.hardware["tdp"], BASE_TDP)
-        self.assertFalse(self.hardware["cpu_boost"])
-        self.assertEqual(main.Plugin._active_app, "")
-
     async def test_repeated_caller_cancellation_waits_for_real_worker_to_commit(self):
-        entered, release = self.blocking_boost_write()
-        caller = asyncio.create_task(self.plugin.set_cpu_boost(True))
+        entered, release = self.blocking_charge_write()
+        caller = asyncio.create_task(self.plugin.set_charge_bypass(True))
         await self.wait_entered(entered)
         caller.cancel()
         await asyncio.sleep(0)
         caller.cancel()
         await asyncio.sleep(0.01)
         self.assertFalse(caller.done())
-        self.assertFalse(self.store.getSetting("cpu_boost"))
+        self.assertFalse(self.store.getSetting("charge_bypass"))
         release.set()
         with self.assertRaises(asyncio.CancelledError):
             await caller
-        self.assertTrue(self.hardware["cpu_boost"])
-        self.assertTrue(self.store.getSetting("cpu_boost"))
-        self.assertTrue(main.Plugin._state["cpu_boost"])
+        self.assertTrue(self.hardware["charge_bypass"])
+        self.assertTrue(self.store.getSetting("charge_bypass"))
+        self.assertTrue(main.Plugin._state["charge_bypass"])
 
     async def test_cancelled_unload_and_duplicate_unload_wait_for_the_same_worker(self):
-        entered, release = self.blocking_boost_write()
-        caller = asyncio.create_task(self.plugin.set_cpu_boost(True))
+        entered, release = self.blocking_charge_write()
+        caller = asyncio.create_task(self.plugin.set_charge_bypass(True))
         await self.wait_entered(entered)
         first = asyncio.create_task(self.plugin._unload())
         await asyncio.sleep(0)
@@ -282,17 +199,17 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await first
         await second
-        self.assertTrue(self.hardware["cpu_boost"])
-        self.assertTrue(self.store.getSetting("cpu_boost"))
+        self.assertTrue(self.hardware["charge_bypass"])
+        self.assertTrue(self.store.getSetting("charge_bypass"))
         self.assertFalse(self.plugin._rpc_jobs)
         self.assertFalse(self.plugin._workers)
         self.assertEqual(companion_common.updater.close.call_count, 1)
 
     async def test_shutdown_rejects_queued_write_but_drains_admitted_transaction(self):
-        entered, release = self.blocking_boost_write()
-        admitted = asyncio.create_task(self.plugin.set_cpu_boost(True))
+        entered, release = self.blocking_charge_write()
+        admitted = asyncio.create_task(self.plugin.set_charge_bypass(True))
         await self.wait_entered(entered)
-        queued = asyncio.create_task(self.plugin.set_charge_bypass(True))
+        queued = asyncio.create_task(self.plugin.set_tm_guard(False))
         await asyncio.sleep(0)
         unload = asyncio.create_task(self.plugin._unload())
         await asyncio.sleep(0.01)
@@ -302,15 +219,14 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "shutting down"):
             await queued
         await unload
-        self.assertTrue(self.store.getSetting("cpu_boost"))
-        self.assertFalse(self.store.getSetting("charge_bypass"))
-        self.assertFalse(any(field == "charge_bypass" for field, _ in self.writes))
+        self.assertTrue(self.store.getSetting("charge_bypass"))
+        self.assertTrue(self.store.getSetting("tm_guard_enabled"), "the queued write never ran")
 
     async def test_new_calls_after_close_do_not_start_hardware_or_network_workers(self):
         await self.plugin._unload()
         before = self.checkpoint()
         for operation in (self.plugin.get_state, self.plugin.check_for_updates,
-                          lambda: self.plugin.set_cpu_boost(True)):
+                          lambda: self.plugin.set_charge_bypass(True)):
             with self.assertRaisesRegex(RuntimeError, "shutting down"):
                 await operation()
         self.assert_restored(before)
@@ -353,17 +269,21 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         self.patch("display_script_owned", return_value=False)
         self.patch("display_script_conflict", return_value=False)
         forbidden = ["ensure_charge_control", "ensure_charge_bypass_control", "audio_fix_installed",
-                     "audio_fix_ready", "audio_fix_supported", "tdp_backend", "gpu_power_watts",
+                     "audio_fix_ready", "audio_fix_supported",
                      "install_button_fix", "install_display_script", "apply_audio_fix"]
         spies = [self.patch(name, side_effect=AssertionError("hardware queried on lost settings"))
                  for name in forbidden]
+        tdp_start = mock.patch.object(self.plugin, "_start_tdp",
+                                      side_effect=AssertionError("TDP started on lost settings"))
+        spies.append(tdp_start.start())
+        self.patchers.append(tdp_start)
         await self.plugin._main()
         state = await self.plugin.get_state()
         self.assertTrue(state["settings_error"])
         self.assertFalse(state["startup_error"])
         self.assertFalse(state["initializing"])
         with self.assertRaisesRegex(RuntimeError, "Settings need recovery"):
-            await self.plugin.set_cpu_boost(True)
+            await self.plugin.set_charge_bypass(True)
         self.assertEqual(self.writes, [])
         for spy in spies:
             spy.assert_not_called()

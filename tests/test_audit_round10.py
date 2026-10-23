@@ -17,11 +17,11 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
     setUp = test_responsiveness.ResponseTests.setUp
 
     def prepare_startup(self):
-        for name in ("_restore_task", "_edid_task", "_ac_task", "_charge_task",
+        for name in ("_restore_task", "_edid_task", "_charge_task",
                      "_module_task", "_tm_guard_task", "_vibration_gain_task",
                      "_audio_task", "_fan_task"):
             self.stack.enter_context(patch.object(main.Plugin, name, None))
-        for name in ("_restore_hardware", "_edid_loop", "_ac_loop", "_charge_loop",
+        for name in ("_restore_hardware", "_edid_loop", "_charge_loop",
                      "_module_loop", "_tm_guard_loop", "_vibration_gain_loop", "_restore_audio"):
             self.stack.enter_context(patch.object(self.plugin, name, new=AsyncMock()))
         for name, value in (("dmi", "AYANEO 3 isolated fixture"), ("button_map_owned", False),
@@ -145,7 +145,7 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         sleep = asyncio.sleep
         async def quick_retry(delay):
             await sleep(0.001)
-        for name in ("_restore_task", "_edid_task", "_ac_task", "_charge_task", "_module_task",
+        for name in ("_restore_task", "_edid_task", "_charge_task", "_module_task",
                      "_tm_guard_task", "_vibration_gain_task", "_audio_task", "_fan_task"):
             self.stack.enter_context(patch.object(main.Plugin, name, None))
         with patch.object(main.asyncio, "sleep", side_effect=quick_retry), \

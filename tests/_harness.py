@@ -39,6 +39,17 @@ def install():
     display_backend.LEGACY_LUA_TARGET = isolated / "etc" / display_backend.SCRIPT_NAME
     display_backend.NATIVE_LUA = isolated / "usr" / display_backend.SCRIPT_NAME
     display_backend.SCRIPT_USER = None
+    # Nor its RyzenAdj helper, and never the network: a test that starts TDP Control gets
+    # an empty helper directory and a download that always fails.
+    import tdp_backend
+    tdp_backend.BIN_DIR = str(Path(temp) / "ryzenadj")
+    tdp_backend.BIN_PATH = str(Path(temp) / "ryzenadj" / "ryzenadj")
+
+    def _no_download(*_args, **_kwargs):
+        raise RuntimeError("tests never download RyzenAdj")
+    global REAL_DOWNLOAD_ARCHIVE
+    REAL_DOWNLOAD_ARCHIVE = tdp_backend._download_archive  # for tests of the transfer itself
+    tdp_backend._download_archive = _no_download
     settings = types.ModuleType("settings")
     class SettingsManager:
         def __init__(self, **_): self.data = {}
@@ -50,9 +61,10 @@ def install():
     sys.modules["settings"] = settings
 
 
-# Backend modules in lookup order; main comes last because it imports from them.
-MODULES = ("companion_common", "ec_backend", "controller_backend", "power_backend",
-           "audio_backend", "display_backend", "input_backend", "main")
+# Backend modules in lookup order; main follows the modules it imports from. The ported
+# modules come after it: their names (settings, _ensure_ryzenadj, ...) shadow older ones.
+MODULES = ("companion_common", "ec_backend", "controller_backend",
+           "audio_backend", "display_backend", "input_backend", "main", "active_app", "tdp_backend")
 
 
 def owner(name):

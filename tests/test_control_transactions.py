@@ -14,7 +14,6 @@ from _harness import owner
 import main
 import input_backend
 import audio_backend
-import power_backend
 import controller_backend
 import ec_backend
 from safe_settings import SettingsManager
@@ -30,11 +29,11 @@ class ControlTransactionTests(unittest.TestCase):
         self.legacy = self.root / 'maps/legacy.yaml'
         self.data = b'# Managed by AYANEO 3 Companion\nkind: Test\n'
         self.store = SettingsManager('settings', str(self.root / 'settings'))
-        self.store.replace({'tm_guard_enabled': True, 'cpu_boost': False})
+        self.store.replace({'tm_guard_enabled': True, 'charge_bypass': False})
         state = {'supported': True, 'controller': dict(controller_backend.DEFAULT_CONTROLLER),
                  'button_fix_installed': False, 'tm_guard_enabled': True,
                  'tm_guard_status': 'Monitoring', 'modules_reconnecting': False,
-                 'modules_detached': False, 'tdp': dict(power_backend.DEFAULT_TDP)}
+                 'modules_detached': False}
         for name, value in [('settings', self.store), ('INPUT_MAP_TARGET', self.target),
                             ('LEGACY_INPUT_DEVICE_TARGET', self.legacy), ('LEGACY_INPUT_MAP_TARGETS', ())]:
             self.stack.enter_context(patch.object(owner(name), name, value))
@@ -125,13 +124,10 @@ class ControlTransactionTests(unittest.TestCase):
         self.assertTrue(main.Plugin._state['tm_guard_enabled'])
         self.assertEqual(main.Plugin._state['tm_guard_status'], 'Monitoring')
 
-    def test_boot_restore_uses_latest_cpu_setting_instead_of_old_snapshot(self):
+    def test_boot_restore_uses_latest_charge_setting_instead_of_old_snapshot(self):
         async def sleep(_delay):
-            self.store.replace({'cpu_boost': True})
-        with patch.object(main.asyncio, 'sleep', side_effect=sleep), \
-             patch.object(main.Plugin, '_reapply_current_tdp'), \
-             patch.object(main.Plugin, '_restore_current_controller'), \
-             patch.object(power_backend, 'write_cpu_boost') as write:
+            self.store.replace({'charge_bypass': True})
+        with patch.object(main.asyncio, 'sleep', side_effect=sleep),              patch.object(main.Plugin, '_restore_current_controller'),              patch.object(ec_backend, 'write_charge_bypass') as write:
             asyncio.run(self.plugin._restore_hardware())
         write.assert_called_once_with(True)
 

@@ -12,7 +12,6 @@ import test_logic  # Install the isolated Decky harness before importing main.
 from _harness import owner
 import main
 import display_backend
-import power_backend
 import controller_backend
 import ec_backend
 import companion_common
@@ -27,14 +26,12 @@ class AuditRegressionTests(unittest.TestCase):
         self.store = SettingsManager("settings", str(self.root))
         self.previous = dict(controller_backend.DEFAULT_CONTROLLER)
         self.wanted = {**self.previous, "color": "00ff00", "ff_gain": 60}
-        self.store.replace({"controller": self.previous, "tdp": dict(power_backend.DEFAULT_TDP)})
+        self.store.replace({"controller": self.previous})
         self.hardware = {"firmware": dict(self.previous), "gain": self.previous["ff_gain"]}
-        state = {"supported": True, "controller": dict(self.previous), "tdp": dict(power_backend.DEFAULT_TDP)}
+        state = {"supported": True, "controller": dict(self.previous)}
         self.stack.enter_context(patch.object(main, "settings", self.store))
         self.stack.enter_context(patch.object(main.Plugin, "_state", state))
-        self.stack.enter_context(patch.object(main.Plugin, "_active_app", "111"))
         self.stack.enter_context(patch.object(companion_common, "supported_device", return_value=True))
-        self.stack.enter_context(patch.object(power_backend, "_powerstation_active", return_value=False))
         self.stack.enter_context(patch.object(main.Plugin, "get_state", new=AsyncMock(return_value={})))
         self.firmware = self.stack.enter_context(patch.object(controller_backend, "apply_controller", side_effect=self.apply_firmware))
         self.gain = self.stack.enter_context(patch.object(controller_backend, "set_vibration_gain", side_effect=self.apply_gain))
@@ -103,36 +100,8 @@ class AuditRegressionTests(unittest.TestCase):
         asyncio.run(self.plugin.set_controller({**self.previous, "color": "00ff00"}))
         self.gain.assert_not_called()
 
-    def test_powerstation_rpc_rejects_without_save_or_boost_rollback(self):
-        with patch.object(power_backend, "_powerstation_active", return_value=True), \
-             patch.object(power_backend, "read_cpu_boost", return_value=True), \
-             patch.object(power_backend, "write_cpu_boost") as boost, \
-             patch.object(self.store, "commit") as saved:
-            with self.assertRaises(power_backend.TdpUnavailableError):
-                asyncio.run(self.plugin.set_tdp(power_backend.PRESETS["Max"], expected_app_id="111"))
-        saved.assert_not_called()
-        boost.assert_not_called()
-        self.assertEqual(main.Plugin._state["tdp"], power_backend.DEFAULT_TDP)
-
-    def test_app_tracking_advances_when_powerstation_owns_tdp(self):
-        with patch.object(power_backend, "_powerstation_active", return_value=True), \
-             patch.object(power_backend, "read_cpu_boost", return_value=True), \
-             patch.object(power_backend, "write_cpu_boost") as boost:
-            asyncio.run(self.plugin.set_active_app("222"))
-        self.assertEqual(main.Plugin._active_app, "222")
-        self.assertFalse(main.Plugin._state["tdp_supported"])
-        boost.assert_not_called()
-
-    def test_boot_does_not_retry_an_unsupported_tdp_writer_forever(self):
-        with patch.object(main.asyncio, "sleep", new=AsyncMock()), \
-             patch.object(main.Plugin, "_reapply_current_tdp", side_effect=power_backend.TdpUnavailableError("PowerStation")) as tdp, \
-             patch.object(main.Plugin, "_restore_current_controller"):
-            asyncio.run(self.plugin._restore_hardware())
-        tdp.assert_called_once()
-
     def snapshot_fixture(self):
-        for name, value in (("gpu_power_watts", None), ("tdp_backend", "RyzenAdj"),
-                            ("vendor_hidraw", "/dev/fake"), ("read_cpu_boost", True),
+        for name, value in (("vendor_hidraw", "/dev/fake"),
                             ("is_our_display_script", False), ("display_script_conflict", False),
                             ("button_fix_installed", False), ("read_charge_bypass", False),
                             ("module_presence", {"left": True, "right": True})):
@@ -153,16 +122,6 @@ class AuditRegressionTests(unittest.TestCase):
         self.assertTrue(state["controller_supported"])
         self.assertTrue(state["module_eject_supported"])
         self.assertEqual(state["controller_error"], "")
-
-    def test_snapshot_pairs_app_identity_with_its_tdp_before_slow_reads(self):
-        self.snapshot_fixture()
-        def transition():
-            main.Plugin._active_app = "222"
-            main.Plugin._state["tdp"] = dict(power_backend.PRESETS["Max"])
-        with patch.object(power_backend, "gpu_power_watts", side_effect=transition):
-            state = main.Plugin._snapshot()
-        self.assertEqual(state["active_app_id"], "111")
-        self.assertEqual(state["tdp"], power_backend.DEFAULT_TDP)
 
     def test_module_monitor_reports_blocked_hid_and_recovers_when_it_returns(self):
         observed = []
@@ -192,22 +151,6 @@ class AuditRegressionTests(unittest.TestCase):
         self.assertEqual(main.Plugin._state["controller_error"], "")
         layout.assert_called_once()
         power.assert_not_called()
-
-    def test_snapshot_reports_powerstation_limits_as_unavailable(self):
-        self.snapshot_fixture()
-        with patch.object(power_backend, "tdp_backend", return_value="PowerStation"):
-            state = main.Plugin._snapshot()
-        self.assertFalse(state["tdp_supported"])
-        self.assertIn("37 W", state["tdp_error"])
-
-    def test_unavailable_tdp_probe_does_not_hide_independent_controls(self):
-        self.snapshot_fixture()
-        with patch.object(power_backend, "tdp_backend", side_effect=RuntimeError("ownership probe unavailable")):
-            state = main.Plugin._snapshot()
-        self.assertFalse(state["tdp_supported"])
-        self.assertEqual(state["tdp_error"], "ownership probe unavailable")
-        self.assertTrue(state["cpu_boost_supported"])
-        self.assertTrue(state["controller_supported"])
 
     def test_update_rpc_passes_selected_version_and_rejects_no_selection(self):
         updater = Mock()

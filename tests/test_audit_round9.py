@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import test_logic
 import main
-import power_backend
 import controller_backend
 import ec_backend
 import companion_common
@@ -25,19 +24,16 @@ class AuditRound9Tests(unittest.IsolatedAsyncioTestCase):
         self.store = SettingsManager("settings", directory)
         self.store.replace({"controller": controller_backend.DEFAULT_CONTROLLER})
         self.state = {"supported": True, "controller": dict(controller_backend.DEFAULT_CONTROLLER),
-                      "tdp": dict(power_backend.DEFAULT_TDP), "tdp_supported": True,
-                      "tdp_backend": "RyzenAdj", "tdp_error": ""}
+                      "charge_bypass": False, "charge_bypass_supported": True}
         self.stack.enter_context(patch.object(main, "settings", self.store))
         self.stack.enter_context(patch.object(main.Plugin, "_state", self.state))
-        self.stack.enter_context(patch.object(main.Plugin, "_active_app", "111"))
         self.stack.enter_context(patch.object(companion_common, "supported_device", return_value=True))
-        self.stack.enter_context(patch.object(power_backend, "read_cpu_boost", return_value=True))
         self.stack.enter_context(patch.object(controller_backend, "apply_controller"))
         self.stack.enter_context(patch.object(controller_backend, "set_vibration_gain"))
         self.stack.enter_context(patch.object(ec_backend, "both_modules_connected", return_value=False))
         self.stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())))
         self.stack.enter_context(patch.object(main.fan_controller, "close"))
-        for name in ("_restore_task", "_edid_task", "_ac_task", "_charge_task", "_module_task",
+        for name in ("_restore_task", "_edid_task", "_charge_task", "_module_task",
                      "_tm_guard_task", "_vibration_gain_task", "_audio_task", "_fan_task"):
             self.stack.enter_context(patch.object(main.Plugin, name, None))
         self.plugin = main.Plugin()
@@ -49,17 +45,18 @@ class AuditRound9Tests(unittest.IsolatedAsyncioTestCase):
     def fan_result(mode, percent=None):
         return {"supported": True, "mode": mode, "percent": percent, "rpm": 3000}
 
-    async def test_fan_auto_does_not_wait_for_slow_tdp_but_settings_still_serialize(self):
+    async def test_fan_auto_does_not_wait_for_a_slow_write_but_settings_still_serialize(self):
         entered, release = threading.Event(), threading.Event()
-        def tdp(value):
+        def charge(value):
             entered.set()
             if not release.wait(3):
-                raise TimeoutError("test did not release TDP write")
+                raise TimeoutError("test did not release the charge write")
         tasks = []
-        with patch.object(power_backend, "apply_tdp", side_effect=tdp), \
+        with patch.object(ec_backend, "read_charge_bypass", return_value=False), \
+             patch.object(ec_backend, "write_charge_bypass", side_effect=charge), \
              patch.object(main.fan_controller, "set", side_effect=self.fan_result):
             try:
-                tasks.append(asyncio.create_task(self.plugin.set_tdp(power_backend.PRESETS["Max"], "Max", "111")))
+                tasks.append(asyncio.create_task(self.plugin.set_charge_bypass(True)))
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
                 tasks.append(asyncio.create_task(self.plugin.set_controller({"brightness": 40})))
                 tasks.append(asyncio.create_task(self.plugin.set_fan("auto")))
@@ -69,7 +66,7 @@ class AuditRound9Tests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 results = await asyncio.wait_for(asyncio.gather(*tasks), 3)
-        self.assertTrue(fan_finished, "Auto is independent of SMU/settings and must not wait behind TDP")
+        self.assertTrue(fan_finished, "Auto is independent of settings and must not wait behind them")
         self.assertFalse(controller_finished, "shared settings transactions must remain serialized")
         self.assertEqual(results[2]["mode"], "auto")
         self.assertEqual(self.store.getSetting("controller")["brightness"], 40)
@@ -134,52 +131,6 @@ class AuditRound9Tests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "shutting down"):
                 await self.plugin.set_fan("auto")
         fan.assert_not_called()
-
-    async def test_charge_drift_recovers_while_tdp_restore_is_stalled(self):
-        entered, release, restored = threading.Event(), threading.Event(), threading.Event()
-        hardware = {"charge_bypass": True}
-        clock = 0.0
-        sleep = asyncio.sleep
-        async def tick(delay):
-            nonlocal clock
-            clock += delay
-            await sleep(0.002)
-        def apply(value):
-            entered.set()
-            if not release.wait(3):
-                raise TimeoutError("test did not release TDP restore")
-        def charge(value):
-            hardware["charge_bypass"] = value
-            restored.set()
-        self.store.replace({"charge_bypass": True, "controller": controller_backend.DEFAULT_CONTROLLER})
-        self.state.update(charge_bypass=True, tdp_profile_pending=True)
-        tasks = []
-        with patch.object(main, "time", types.SimpleNamespace(monotonic=lambda: clock)), \
-             patch.object(main.asyncio, "sleep", side_effect=tick), \
-             patch.object(main, "_suspend_clock_offset", return_value=0.0), \
-             patch.object(ec_backend, "ac_online", return_value=True), \
-             patch.object(power_backend, "apply_tdp", side_effect=apply), \
-             patch.object(ec_backend, "read_charge_bypass", side_effect=lambda: hardware["charge_bypass"]), \
-             patch.object(ec_backend, "write_charge_bypass", side_effect=charge):
-            try:
-                tasks.append(asyncio.create_task(self.plugin._ac_loop()))
-                # The old implementation monitored charge in _ac_loop only.
-                # Run the added independent loop when comparing the fixed code.
-                if hasattr(self.plugin, "_charge_loop"):
-                    tasks.append(asyncio.create_task(self.plugin._charge_loop()))
-                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                hardware["charge_bypass"] = False
-                clock = 20.0
-                recovered = await asyncio.to_thread(restored.wait, 0.25)
-                tdp_still_blocked = not release.is_set()
-            finally:
-                for task in tasks:
-                    task.cancel()
-                release.set()
-                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
-        self.assertTrue(recovered, "saved charge bypass must recover during a slow TDP retry")
-        self.assertTrue(tdp_still_blocked)
-        self.assertTrue(hardware["charge_bypass"])
 
     async def test_charge_monitor_checks_on_ac_resume_and_periodic_interval(self):
         clock = 0.0

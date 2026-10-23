@@ -13,7 +13,8 @@ import test_logic
 from _harness import owner
 import main
 import audio_backend
-import power_backend
+import tdp_backend
+import _harness
 import controller_backend
 import ec_backend
 import companion_common
@@ -131,7 +132,7 @@ class SlowResponse:
         self.closed = True
 
     def geturl(self):
-        return power_backend.RYZENADJ_URL
+        return tdp_backend.RYZENADJ_URL
 
     def next(self):
         self.clock[0] += self.seconds
@@ -153,6 +154,13 @@ class HardwareTransferTests(unittest.TestCase):
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.clock = [0.0]
         self.stack.enter_context(patch.object(main.time, "monotonic", side_effect=lambda: self.clock[0]))
+        self.stack.enter_context(patch.object(tdp_backend, "_download_archive", _harness.REAL_DOWNLOAD_ARCHIVE))
+
+    def download(self):
+        target = self.root / "download.tar.gz"
+        with target.open("wb") as out:
+            tdp_backend._download_archive(out)
+        return target
 
     def response(self, **kwargs):
         response = SlowResponse(self.clock, **kwargs)
@@ -162,7 +170,7 @@ class HardwareTransferTests(unittest.TestCase):
     def test_archive_transfer_has_an_overall_deadline_and_closes_stream(self):
         response = self.response(chunks=[b"archive"], seconds_per_chunk=120)
         with self.assertRaises(TimeoutError):
-            power_backend._download_archive(self.root / "download.tar.gz")
+            self.download()
         self.assertTrue(response.closed)
 
     def test_audio_transfer_has_an_overall_deadline_even_with_matching_digest(self):
@@ -175,8 +183,7 @@ class HardwareTransferTests(unittest.TestCase):
 
     def test_archive_uses_incremental_reads_and_preserves_complete_payload(self):
         response = self.response(chunks=[b"first", b"second"], seconds_per_chunk=0.01)
-        target = self.root / "download.tar.gz"
-        power_backend._download_archive(target)
+        target = self.download()
         self.assertEqual(target.read_bytes(), b"firstsecond")
         self.assertEqual(response.bulk_reads, 0)
         self.assertGreater(response.incremental_reads, 0)
@@ -184,75 +191,6 @@ class HardwareTransferTests(unittest.TestCase):
 
     def test_download_size_limits_still_apply_without_content_length(self):
         self.response(chunks=[b"too-large"])
-        with patch.object(power_backend, "MAX_DOWNLOAD_BYTES", 4), self.assertRaises(RuntimeError):
-            power_backend._download_archive(self.root / "download.tar.gz")
+        with patch.object(tdp_backend, "MAX_DOWNLOAD_BYTES", 4), self.assertRaises(RuntimeError):
+            self.download()
 
-    def test_timed_out_binary_install_preserves_existing_components(self):
-        executable, library = self.root / "ryzenadj", self.root / "libryzenadj.so"
-        executable.write_bytes(b"previous executable")
-        library.write_bytes(b"previous library")
-        self.response(chunks=[b"partial archive"], seconds_per_chunk=120)
-        with patch.object(power_backend, "BIN_DIR", self.root), \
-             patch.object(power_backend, "RYZENADJ", executable), \
-             patch.object(power_backend, "RYZENADJ_LIB", library):
-            with self.assertRaises(TimeoutError):
-                power_backend._ensure_ryzenadj()
-        self.assertEqual(executable.read_bytes(), b"previous executable")
-        self.assertEqual(library.read_bytes(), b"previous library")
-        self.assertEqual(set(path.name for path in self.root.iterdir()), {"ryzenadj", "libryzenadj.so"})
-
-
-class DeferredProfileTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.stack = ExitStack()
-        self.addCleanup(self.stack.close)
-        directory = self.stack.enter_context(tempfile.TemporaryDirectory())
-        self.store = SettingsManager("settings", directory)
-        self.wanted = dict(power_backend.PRESETS["Max"])
-        self.store.replace({"tdp": power_backend.DEFAULT_TDP,
-                            "game_profiles": {"222": {**self.wanted, "preset": "Max"}}})
-        self.state = {"supported": True, "controller": dict(controller_backend.DEFAULT_CONTROLLER),
-                      "tdp": dict(self.wanted), "tdp_preset": "Max", "tdp_profile_pending": True,
-                      "_applied_tdp": dict(power_backend.DEFAULT_TDP)}
-        self.stack.enter_context(patch.object(main, "settings", self.store))
-        self.stack.enter_context(patch.object(main.Plugin, "_state", self.state))
-        self.stack.enter_context(patch.object(main.Plugin, "_active_app", "222"))
-        self.stack.enter_context(patch.object(companion_common, "supported_device", return_value=True))
-        self.stack.enter_context(patch.object(power_backend, "read_cpu_boost", return_value=False))
-        self.stack.enter_context(patch.object(power_backend, "write_cpu_boost"))
-        self.plugin = main.Plugin()
-
-    async def test_same_game_heartbeats_do_not_duplicate_the_monitor_retry(self):
-        with patch.object(main.Plugin, "_apply_tracked_tdp", side_effect=power_backend.TdpUnavailableError("PowerStation")) as apply:
-            for _ in range(10):
-                await self.plugin.set_active_app("222")
-        apply.assert_not_called()
-        self.assertTrue(self.state["tdp_profile_pending"])
-        self.assertEqual(self.state["tdp"], self.wanted)
-
-    async def test_dedicated_monitor_applies_pending_profile_after_ownership_release(self):
-        asyncio.get_running_loop().set_debug(False)
-        clock = 0
-        async def sleep(_):
-            nonlocal clock
-            clock += 1
-            if clock > 6:
-                raise asyncio.CancelledError
-        with patch.object(main.asyncio, "sleep", side_effect=sleep), \
-             patch.object(main.time, "monotonic", side_effect=lambda: clock), \
-             patch.object(ec_backend, "ac_online", return_value=False), \
-             patch.object(main, "_suspend_clock_offset", return_value=None), \
-             patch.object(main.Plugin, "_restore_saved_control"), \
-             patch.object(power_backend, "apply_tdp") as apply:
-            with self.assertRaises(asyncio.CancelledError):
-                await self.plugin._ac_loop()
-        apply.assert_called_once_with(self.wanted)
-        self.assertFalse(self.state["tdp_profile_pending"])
-        self.assertEqual(self.state["_applied_tdp"], self.wanted)
-
-    async def test_new_game_still_updates_target_and_attempts_its_profile(self):
-        with patch.object(main.Plugin, "_apply_tracked_tdp", side_effect=power_backend.TdpUnavailableError("PowerStation")) as apply:
-            await self.plugin.set_active_app("333")
-        apply.assert_called_once_with(power_backend.DEFAULT_TDP)
-        self.assertEqual(main.Plugin._active_app, "333")
-        self.assertTrue(self.state["tdp_profile_pending"])

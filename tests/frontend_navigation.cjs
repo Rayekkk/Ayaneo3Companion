@@ -3,9 +3,7 @@
 const { assert, run, mount, find, settle } = require('./frontend_harness.cjs');
 
 const state = {
-  supported: true, device: 'AYANEO 3', version: '1.2.0', tdp_backend: 'RyzenAdj', active_app_id: '',
-  tdp_supported: true, tdp: { spl: 15, sppt: 17, fppt: 20 }, tdp_preset: 'Balanced',
-  presets: { Balanced: { spl: 15, sppt: 17, fppt: 20 } }, cpu_boost_supported: true, cpu_boost: true,
+  supported: true, device: 'AYANEO 3', version: '1.2.0',
   controller: { vibration: 'medium', ff_gain: 60, rgb_mode: 'solid', color: 'ff0000', brightness: 70 },
   module_left: { label: 'Gamepad', layout: '', code: null }, module_right: { label: 'Gamepad', layout: '', code: null },
   modules_connected: true, charge_bypass: false, audio_fix_enabled: false, button_fix_installed: false,
@@ -22,9 +20,11 @@ const element = { ownerDocument: { defaultView: { IntersectionObserver: FakeObse
 const h = mount('index.tsx', {
   component: 'TestedContent', append: 'export { Content as TestedContent };',
   responses: { get_state: () => structuredClone(state), set_active_app: null,
+    get_settings: { enabled: true, running: { spl: 15, sppt: 25, fppt: 30, preset: 'balanced', game: false } },
     get_battery_status: { available: true, percent: 80, status: 'Discharging', seconds_to_full: null, power_w: 8, source: 'none' } },
   modules: name => ({
     './updates': { resetUpdates() {} },
+    './tdp': { TdpPage: component('TdpPage'), startTdpWatcher() {}, stopTdpWatcher() {} },
     './about': { AboutPage: component('AboutPage') },
     './device_pages': new Proxy({}, { get: (_, key) => key }),
     './fan': { FanPage: 'FanPage', resetFanStatus() {},

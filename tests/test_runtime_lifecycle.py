@@ -163,13 +163,11 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('not logged', json.dumps(self.records))
 
     async def test_repeated_read_failure_and_recovery_are_coalesced(self):
-        with patch.object(main.Plugin, '_snapshot', side_effect=ConnectionResetError(errno.ECONNRESET, 'peer reset')), \
-             patch.object(self.plugin, '_schedule_tdp_diagnostic'):
+        with patch.object(main.Plugin, '_snapshot', side_effect=ConnectionResetError(errno.ECONNRESET, 'peer reset')):
             for _ in range(6):
                 with self.assertRaises(ConnectionResetError):
                     await self.plugin.get_state()
-        with patch.object(main.Plugin, '_snapshot', return_value={'supported': True}), \
-             patch.object(self.plugin, '_schedule_tdp_diagnostic'):
+        with patch.object(main.Plugin, '_snapshot', return_value={'supported': True}):
             await self.plugin.get_state()
         health = [r for r in self.records if r['event'] == 'rpc_health']
         self.assertEqual([r['context']['status'] for r in health], ['failed', 'ok'])

@@ -12,7 +12,7 @@ import main
 import input_backend
 import display_backend
 import audio_backend
-import power_backend
+import tdp_backend
 import controller_backend
 import ec_backend
 import companion_common
@@ -123,72 +123,6 @@ class LogicTests(unittest.TestCase):
                 ec_backend.write_charge_bypass(False)
                 self.assertFalse(ec_backend.read_charge_bypass())
             ec_path.assert_not_called()
-
-    def test_tdp_clamps_and_orders(self):
-        self.assertEqual(power_backend.normalize_tdp({"spl": 2, "sppt": 1, "fppt": 99}), {"spl": 5, "sppt": 5, "fppt": 37})
-        self.assertEqual(power_backend.normalize_tdp({"spl": 35, "sppt": 99, "fppt": 99}), {"spl": 35, "sppt": 37, "fppt": 37})
-        self.assertEqual(power_backend.PRESETS["Minimum"], {"spl": 5, "sppt": 8, "fppt": 10})
-        self.assertEqual(power_backend.PRESETS["Max"], {"spl": 32, "sppt": 35, "fppt": 37})
-        self.assertEqual(power_backend.tdp_preset(power_backend.PRESETS["Balanced"]), "Balanced")
-        self.assertEqual(power_backend.tdp_preset(power_backend.PRESETS["Balanced"], "Custom"), "Custom")
-
-    def test_cpu_boost_sysfs_round_trip_and_persistence(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "boost"
-            path.write_text("1\n")
-            previous_settings = dict(main.settings.data)
-            previous_state = main.Plugin._state
-            main.settings.data = {}
-            main.Plugin._state = {"cpu_boost": True, "cpu_boost_supported": True}
-            try:
-                with mock.patch.object(power_backend, "CPU_BOOST_PATH", path), \
-                     mock.patch.object(companion_common, "supported_device", return_value=True), \
-                     mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(
-                         return_value={"cpu_boost": False, "cpu_boost_supported": True})):
-                    self.assertTrue(power_backend.read_cpu_boost())
-                    state = asyncio.run(main.Plugin().set_cpu_boost(False))
-                    self.assertFalse(power_backend.read_cpu_boost())
-                    self.assertEqual(path.read_text(), "0")
-                    self.assertFalse(main.settings.data["cpu_boost"])
-                    self.assertFalse(state["cpu_boost"])
-                    power_backend.write_cpu_boost(True)
-                    self.assertTrue(power_backend.read_cpu_boost())
-            finally:
-                main.settings.data = previous_settings
-                main.Plugin._state = previous_state
-
-    def test_custom_game_profile_persists_exact_limits_and_is_reapplied(self):
-        custom = {"spl": 17, "sppt": 23, "fppt": 31}
-        previous_settings = dict(main.settings.data)
-        previous_active_app = main.Plugin._active_app
-        previous_state = main.Plugin._state
-        main.settings.data = {"tdp": dict(power_backend.DEFAULT_TDP)}
-        main.Plugin._active_app = "480"
-        main.Plugin._state = {"tdp": dict(power_backend.DEFAULT_TDP)}
-        try:
-            with mock.patch.object(power_backend, "apply_tdp") as apply, \
-                 mock.patch.object(power_backend, "read_cpu_boost", return_value=True), \
-                 mock.patch.object(power_backend, "write_cpu_boost"), \
-                 mock.patch.object(companion_common, "supported_device", return_value=True), \
-                 mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={"tdp": custom})):
-                plugin = main.Plugin()
-                asyncio.run(plugin.set_game_profile("480", custom, "Custom"))
-                apply.assert_called_once_with(custom)
-                self.assertEqual(main.settings.data["game_profiles"]["480"], {**custom, "preset": "Custom"})
-                self.assertEqual(asyncio.run(plugin.get_game_profile("480")), {
-                    "exists": True, "profile": custom, "preset": "Custom",
-                })
-
-                apply.reset_mock()
-                main.Plugin._active_app = ""
-                asyncio.run(plugin.set_active_app("480"))
-                apply.assert_called_once_with(custom)
-                self.assertEqual(main.Plugin._state["tdp"], custom)
-                self.assertEqual(main.Plugin._state["tdp_preset"], "Custom")
-        finally:
-            main.settings.data = previous_settings
-            main.Plugin._active_app = previous_active_app
-            main.Plugin._state = previous_state
 
     def test_controller_normalization(self):
         value = controller_backend.normalize_controller({"vibration": "wat", "ff_gain": 999, "rgb_mode": "wat", "color": "oops", "brightness": 999})
@@ -664,14 +598,12 @@ class LogicTests(unittest.TestCase):
     def test_startup_restore_never_activates_magic_module_reset(self):
         previous = main.Plugin._state
         main.Plugin._state = {
-            "tdp": dict(power_backend.DEFAULT_TDP),
             "controller": dict(controller_backend.DEFAULT_CONTROLLER),
             "button_fix_installed": True,
         }
         try:
             with mock.patch.object(main.settings, "getSetting", return_value=None), \
                  mock.patch.object(main.asyncio, "sleep", new=mock.AsyncMock()), \
-                 mock.patch.object(power_backend, "apply_tdp"), \
                  mock.patch.object(controller_backend, "apply_controller"), \
                  mock.patch.object(controller_backend, "set_vibration_gain"), \
                  mock.patch.object(controller_backend, "program_rear_buttons") as program:
@@ -809,7 +741,7 @@ class LogicTests(unittest.TestCase):
             self.assertIsNone(controller_backend._rumble_event_node())
 
     def test_download_url_allowlist(self):
-        self.assertEqual(companion_common.checked_download_url(power_backend.RYZENADJ_URL), power_backend.RYZENADJ_URL)
+        self.assertEqual(companion_common.checked_download_url(tdp_backend.RYZENADJ_URL), tdp_backend.RYZENADJ_URL)
         with self.assertRaises(RuntimeError):
             companion_common.checked_download_url("https://example.com/ryzenadj")
 
@@ -978,8 +910,6 @@ class LogicTests(unittest.TestCase):
         controller = dict(controller_backend.DEFAULT_CONTROLLER)
         operations = (
             (ec_backend._write_ec_register, (0x10, 0x01)),
-            (power_backend.apply_tdp, (power_backend.DEFAULT_TDP,)),
-            (power_backend.write_cpu_boost, (False,)),
             (controller_backend.apply_controller, (controller,)),
             (controller_backend.set_vibration_gain, (50,)),
             (controller_backend.play_vibration_test, ("high", 100)),
@@ -997,12 +927,17 @@ class LogicTests(unittest.TestCase):
                 with self.subTest(operation=operation.__name__):
                     with self.assertRaises(RuntimeError):
                         operation(*arguments)
+            # TDP Control reports a refusal instead of raising; it never writes either.
+            with mock.patch.object(tdp_backend, "settings", tdp_backend.SettingsManager(
+                    name="tdp_settings", settings_directory=tempfile.mkdtemp())):
+                self.assertFalse(tdp_backend._apply_limits(15000, 25000, 30000)["success"])
+                self.assertFalse(tdp_backend._apply_cpu_boost_hardware(False)["success"])
         run.assert_not_called()
 
     def test_unload_does_not_probe_or_write_controller_after_device_mismatch(self):
         previous_state = main.Plugin._state
         task_names = (
-            "_audio_task", "_restore_task", "_edid_task", "_ac_task", "_charge_task",
+            "_audio_task", "_restore_task", "_edid_task", "_charge_task",
             "_module_task", "_tm_guard_task", "_vibration_gain_task",
         )
         previous_tasks = {name: getattr(main.Plugin, name) for name in task_names}
@@ -1024,7 +959,7 @@ class LogicTests(unittest.TestCase):
     def test_unload_does_not_undo_an_in_progress_module_eject(self):
         previous_state = main.Plugin._state
         task_names = (
-            "_audio_task", "_restore_task", "_edid_task", "_ac_task", "_charge_task",
+            "_audio_task", "_restore_task", "_edid_task", "_charge_task",
             "_module_task", "_tm_guard_task", "_vibration_gain_task",
         )
         previous_tasks = {name: getattr(main.Plugin, name) for name in task_names}
@@ -1050,22 +985,20 @@ class LogicTests(unittest.TestCase):
         previous_state = main.Plugin._state
         main.Plugin._state = {
             "supported": False,
-            "tdp": dict(power_backend.DEFAULT_TDP),
             "controller": dict(controller_backend.DEFAULT_CONTROLLER),
             "module_left": controller_backend.module_info("left"),
             "module_right": controller_backend.module_info("right"),
-            "gpu_power_w": None,
             "charge_bypass_supported": False,
             "module_eject_supported": False,
             "module_reset_supported": False,
         }
         try:
-            with mock.patch.object(power_backend, "gpu_power_watts") as gpu, \
+            with mock.patch.object(controller_backend, "vendor_hidraw") as hidraw, \
                  mock.patch.object(ec_backend, "read_charge_bypass") as charge, \
                  mock.patch.object(ec_backend, "module_presence") as modules:
                 snapshot = main.Plugin._snapshot()
             self.assertFalse(snapshot["supported"])
-            gpu.assert_not_called()
+            hidraw.assert_not_called()
             charge.assert_not_called()
             modules.assert_not_called()
         finally:
@@ -1202,57 +1135,6 @@ class LogicTests(unittest.TestCase):
             (audio_backend.AUDIO_FIRMWARE_CONTROLS[0], True),
             (audio_backend.AUDIO_FIRMWARE_CONTROLS[1], True),
         ])
-
-    def test_tdp_game_change_cannot_be_overwritten_by_delayed_profile_write(self):
-        profile_a = {"spl": 17, "sppt": 22, "fppt": 29}
-        profile_b = {"spl": 30, "sppt": 32, "fppt": 35, "preset": "Performance"}
-        started = threading.Event()
-        release = threading.Event()
-        calls = []
-        previous_settings = dict(main.settings.data)
-        previous_active_app = main.Plugin._active_app
-        previous_state = main.Plugin._state
-        main.settings.data = {
-            "tdp": dict(power_backend.DEFAULT_TDP),
-            "tdp_preset": "Balanced",
-            "game_profiles": {"200": profile_b},
-        }
-        main.Plugin._active_app = "100"
-        main.Plugin._state = {"tdp": dict(power_backend.DEFAULT_TDP), "tdp_preset": "Balanced"}
-
-        def apply(value):
-            calls.append(dict(value))
-            if value["spl"] == profile_a["spl"]:
-                started.set()
-                if not release.wait(2):
-                    raise RuntimeError("test synchronization timed out")
-
-        async def scenario():
-            first = asyncio.create_task(
-                main.Plugin().set_game_profile("100", profile_a, "Custom"))
-            self.assertTrue(await asyncio.to_thread(started.wait, 2))
-            second = asyncio.create_task(main.Plugin().set_active_app("200"))
-            await asyncio.sleep(0.05)
-            self.assertFalse(second.done())
-            release.set()
-            await asyncio.gather(first, second)
-
-        try:
-            with mock.patch.object(companion_common, "supported_device", return_value=True), \
-                 mock.patch.object(power_backend, "apply_tdp", side_effect=apply), \
-                 mock.patch.object(power_backend, "read_cpu_boost", return_value=True), \
-                 mock.patch.object(power_backend, "write_cpu_boost"), \
-                 mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})):
-                asyncio.run(scenario())
-            self.assertEqual(calls, [profile_a, {"spl": 30, "sppt": 32, "fppt": 35}])
-            self.assertEqual(main.Plugin._active_app, "200")
-            self.assertEqual(main.Plugin._state["tdp"], {"spl": 30, "sppt": 32, "fppt": 35})
-            self.assertEqual(main.Plugin._state["tdp_preset"], "Performance")
-        finally:
-            release.set()
-            main.settings.data = previous_settings
-            main.Plugin._active_app = previous_active_app
-            main.Plugin._state = previous_state
 
     def test_controller_monitor_reads_state_after_pending_rpc_commits(self):
         target = {

@@ -5,7 +5,25 @@ All notable changes to AYANEO 3 Companion, newest first.
 ## [1.3.0] - in development
 
 This release brings LegionGo2Companion's design and safety work to AYANEO 3
-Companion. TDP Control and Fan Control from Legion are still being ported.
+Companion, including its TDP Control. Fan Control from Legion is still being
+ported.
+
+### TDP Control
+
+- **New presets measured on the console:** Silent 10/15/20, Balanced 15/25/30
+  and Performance 30/43/45 W (SPL/SPPT/FPPT). Performance uses the ceilings the
+  SMU actually keeps; Custom goes from 5 W up to them. Minimum, Low power and Max
+  are gone: Low power becomes Silent, the others keep their limits as Custom.
+- **Game profiles like on the Legion:** per game, optionally with separate
+  battery and charger values, and Global keeps a game's profile unused instead
+  of deleting it.
+- **CPU energy preference (EPP)** next to CPU Boost, globally or per game and
+  charger state. Uninstall restores both.
+- **Limits that stay put:** the firmware lowers SPL to 28 W whenever the charger
+  is plugged in or unplugged; Companion now writes the limits again after every
+  change and after sleep.
+- RyzenAdj is kept outside the plugin folder, so updates no longer download it
+  again. **Show details** shows the package power draw.
 
 ### Fixes
 

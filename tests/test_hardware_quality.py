@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
 import display_backend
 import audio_backend
-import power_backend
+import tdp_backend
 import controller_backend
 import ec_backend
 import companion_common
@@ -195,28 +195,39 @@ class HardwareQualityTests(unittest.TestCase):
         playback.wait.assert_called_once_with(timeout=2)
         self.assertTrue(stderr.closed)
 
+    def tdp_writer(self):
+        """tdp_backend with a verified helper whose runs are recorded instead of spawned."""
+        runs = []
+        for name, value in (("_supported_model", mock.Mock(return_value=True)),
+                            ("_ryzenadj_available", True), ("_capture_baseline", mock.Mock()),
+                            ("_helper_verified", mock.Mock(return_value=True)),
+                            ("_spawn_ryzenadj", mock.Mock(side_effect=lambda args, timeout: (
+                                runs.append(args) or (0, "", ""))))):
+            patcher = mock.patch.object(tdp_backend, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return runs
+
     def test_powerstation_cannot_accept_any_three_limit_preset_or_bypass_its_writer(self):
-        values = [*power_backend.PRESETS.values(), {"spl": 35, "sppt": 37, "fppt": 37}]
-        with mock.patch.object(power_backend, "_powerstation_active", return_value=True), \
-             mock.patch.object(power_backend, "_ensure_ryzenadj") as download, \
-             mock.patch.object(subprocess, "run") as command:
+        runs = self.tdp_writer()
+        values = [*tdp_backend.PRESETS.values(), {"spl": 30, "sppt": 43, "fppt": 45}]
+        with mock.patch.object(tdp_backend, "_powerstation_active", return_value=True):
             for value in values:
-                with self.subTest(value=value), self.assertRaisesRegex(power_backend.TdpUnavailableError, "37 W"):
-                    power_backend.apply_tdp(value)
-        download.assert_not_called()
-        command.assert_not_called()
+                with self.subTest(value=value):
+                    result = tdp_backend._apply_limits(*(value[key] * 1000 for key in tdp_backend.LIMITS))
+                    self.assertFalse(result["success"])
+                    self.assertIn("PowerStation is active", result["stderr"])
+        self.assertEqual(runs, [])
 
     def test_ryzenadj_receives_all_three_normalized_limits(self):
-        with mock.patch.object(power_backend, "_powerstation_active", return_value=False), \
-             mock.patch.object(power_backend, "_ensure_ryzenadj"), \
-             mock.patch.object(subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
-            power_backend.apply_tdp({"spl": 35, "sppt": 999, "fppt": 999})
-        self.assertEqual(command.call_args.args[0][1:],
-                         ["--stapm-limit=35000", "--slow-limit=37000", "--fast-limit=37000"])
+        runs = self.tdp_writer()
+        with mock.patch.object(tdp_backend, "_powerstation_active", return_value=False):
+            self.assertTrue(tdp_backend._apply_limits(35000, 999000, 999000)["success"])
+        self.assertEqual(runs, [["--stapm-limit=30000", "--slow-limit=43000", "--fast-limit=45000"]])
 
     def test_powerstation_bus_owner_blocks_tdp_without_a_gpu_property_probe(self):
         with mock.patch.object(subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as command:
-            self.assertTrue(power_backend._powerstation_active())
+            self.assertTrue(tdp_backend._powerstation_active())
         command.assert_called_once()
         self.assertEqual(command.call_args.args[0][2], "status")
 
@@ -225,43 +236,15 @@ class HardwareQualityTests(unittest.TestCase):
                               ("deactivating", True), ("inactive", False)):
             with self.subTest(state=state), mock.patch.object(subprocess, "run", side_effect=[
                     types.SimpleNamespace(returncode=1), types.SimpleNamespace(returncode=0, stdout=state)]):
-                self.assertEqual(power_backend._powerstation_active(), active)
+                self.assertEqual(tdp_backend._powerstation_active(), active)
 
     def test_uncertain_powerstation_state_cannot_trigger_a_ryzenadj_write(self):
+        runs = self.tdp_writer()
         with mock.patch.object(subprocess, "run", side_effect=[
-                types.SimpleNamespace(returncode=1), types.SimpleNamespace(returncode=1)]), \
-             mock.patch.object(power_backend, "_ensure_ryzenadj") as download:
-            with self.assertRaisesRegex(RuntimeError, "Could not verify"):
-                power_backend.apply_tdp(power_backend.DEFAULT_TDP)
-        download.assert_not_called()
-
-    def test_powerstation_starting_during_binary_download_blocks_the_final_write(self):
-        with mock.patch.object(power_backend, "_powerstation_active", side_effect=[False, True]), \
-             mock.patch.object(power_backend, "_ensure_ryzenadj") as download, \
-             mock.patch.object(subprocess, "run") as command:
-            with self.assertRaises(power_backend.TdpUnavailableError):
-                power_backend.apply_tdp(power_backend.DEFAULT_TDP)
-        download.assert_called_once()
-        command.assert_not_called()
-
-    def test_cpu_boost_write_failure_restores_actual_original_value(self):
-        path = self.root / "boost"
-        path.write_text("1")
-        original_write = Path.write_text
-        calls = []
-
-        def write(target, value, *args, **kwargs):
-            calls.append(value)
-            result = original_write(target, value, *args, **kwargs)
-            if len(calls) == 1:
-                raise OSError("write reported failure after changing state")
-            return result
-
-        with mock.patch.object(power_backend, "CPU_BOOST_PATH", path), mock.patch.object(Path, "write_text", write):
-            with self.assertRaisesRegex(RuntimeError, "could not change CPU Boost"):
-                power_backend.write_cpu_boost(False)
-        self.assertEqual(path.read_text(), "1")
-        self.assertEqual(calls, ["0", "1"])
+                types.SimpleNamespace(returncode=1), types.SimpleNamespace(returncode=1, stdout="")]):
+            result = tdp_backend._apply_limits(15000, 25000, 30000)
+        self.assertIn("Could not verify", result["stderr"])
+        self.assertEqual(runs, [])
 
     def test_kernel_charge_readback_failure_restores_original_value(self):
         path = self.root / "charge_behaviour"
@@ -284,52 +267,9 @@ class HardwareQualityTests(unittest.TestCase):
             ec_backend.write_charge_bypass(True)
         self.assertEqual(path.read_bytes()[ec_backend.EC_CHARGE_REGISTER], ec_backend.EC_CHARGE_INHIBIT)
 
-    def ryzenadj_archive(self, *, invalid_library=False):
-        executable, library = b"verified executable", b"verified library"
-        stream = io.BytesIO()
-        with tarfile.open(fileobj=stream, mode="w:gz") as archive:
-            for name, data in (("ryzenadj", executable), ("libryzenadj.so", b"bad" if invalid_library else library)):
-                info = tarfile.TarInfo("bundle/" + name)
-                info.size = len(data)
-                archive.addfile(info, io.BytesIO(data))
-        blob = stream.getvalue()
-        binary_path, library_path = self.root / "ryzenadj", self.root / "libryzenadj.so"
-        for name, value in (
-                ("BIN_DIR", self.root), ("RYZENADJ", binary_path), ("RYZENADJ_LIB", library_path),
-                ("RYZENADJ_ARCHIVE_SHA256", hashlib.sha256(blob).hexdigest()),
-                ("RYZENADJ_BINARY_SHA256", hashlib.sha256(executable).hexdigest()),
-                ("RYZENADJ_LIBRARY_SHA256", hashlib.sha256(library).hexdigest())):
-            patcher = mock.patch.object(owner(name), name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        patcher = mock.patch.object(power_backend, "_download_archive", side_effect=lambda target: target.write_bytes(blob))
-        download = patcher.start()
-        self.addCleanup(patcher.stop)
-        return executable, library, binary_path, library_path, download
-
-    def test_ryzenadj_valid_executable_does_not_hide_missing_or_modified_library(self):
-        executable, library, binary_path, library_path, download = self.ryzenadj_archive()
-        binary_path.write_bytes(executable)
-        library_path.write_bytes(b"modified library")
-        power_backend._ensure_ryzenadj()
-        self.assertEqual(binary_path.read_bytes(), executable)
-        self.assertEqual(library_path.read_bytes(), library)
-        download.assert_called_once()
-        power_backend._ensure_ryzenadj()
-        download.assert_called_once()
-
-    def test_ryzenadj_invalid_extracted_library_cannot_partially_replace_installation(self):
-        _, _, binary_path, library_path, _ = self.ryzenadj_archive(invalid_library=True)
-        binary_path.write_bytes(b"original executable")
-        library_path.write_bytes(b"original library")
-        with self.assertRaisesRegex(RuntimeError, "libryzenadj.so checksum mismatch"):
-            power_backend._ensure_ryzenadj()
-        self.assertEqual(binary_path.read_bytes(), b"original executable")
-        self.assertEqual(library_path.read_bytes(), b"original library")
-
     def test_download_redirect_is_rejected_before_redirect_request_is_created(self):
         handler = companion_common._HardwareDownloadRedirect()
-        request = urllib.request.Request(power_backend.RYZENADJ_URL)
+        request = urllib.request.Request(tdp_backend.RYZENADJ_URL)
         with mock.patch.object(urllib.request.HTTPRedirectHandler, "redirect_request") as redirect:
             for url in ("http://github.com/file", "https://127.0.0.1/file", "https://github.com:8443/file",
                         "https://user:secret@github.com/file", "https://github.com.attacker.invalid/file"):

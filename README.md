@@ -21,11 +21,11 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 
 | | |
 |---|---|
-| **TDP presets** | Minimum, Low Power, Balanced, Performance and Max profiles tuned for the AYANEO 3 |
-| **Custom TDP** | SPL up to 35 W, with SPPT and FPPT capped at 37 W |
-| **Per-game profiles** | Saves a TDP profile for the running game and applies it automatically |
-| **Live power** | Shows current package power in the TDP panel |
-| **CPU Boost** | Enables or disables kernel-wide CPU frequency boost and restores the choice after startup |
+| **TDP Control** | Silent 10/15/20, Balanced 15/25/30 and Performance 30/43/45 W presets, ported from LegionGo2Companion |
+| **Custom TDP** | SPL 5–30 W, SPPT up to 43 W and FPPT up to 45 W, as one dial or with separate boost limits |
+| **Per-game profiles** | Per game, optionally with separate battery and charger settings; a profile can be kept unused |
+| **CPU Boost and EPP** | CPU Boost and the CPU energy preference, globally or per game and charger state |
+| **Live power** | Shows the processor package's power draw on the TDP page |
 | **Charge bypass** | Powers the console from its charger while inhibiting battery charging |
 | **Fan control** | Auto mode or a guarded 60–100% manual speed when the kernel exposes the native AYANEO EC fan interface |
 | **Charging estimate** | Shows live battery percentage, net charging power and estimated time to full only while Battery is open |
@@ -38,7 +38,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 | **Speaker calibration** | Recalibrates both smart amplifiers with validation, EFI readback and automatic backup |
 | **OLED definition** | Gamma 2.2 gamescope definition with 60/90/120/144 Hz modes |
 | **HDR metadata** | Sets gamescope's EDID copy to AYANEO's advertised 800 nit maximum |
-| **Persistent settings** | Restores settings after startup, follows games with the QAM closed and re-applies TDP after charger changes |
+| **Persistent settings** | Restores settings after startup, follows games with the QAM closed and re-applies TDP after charger changes and sleep |
 | **Updater** | Shows the installed version and downloads the exact matching GitHub release ZIP from the About page |
 
 ---
@@ -55,23 +55,15 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 The controller protocol and display identity were verified on retail hardware.
 Other AYANEO models are deliberately rejected by the device checks.
 The plugin retains its SteamOS 3.8/kernel 6.16 controller and charge-control paths.
-Three-limit TDP control requires RyzenAdj with no active PowerStation writer.
-When PowerStation is active, TDP edits and per-game TDP application are disabled:
-its TDP/Boost API cannot verify independent SPL/SPPT/FPPT limits or the 37 W FPPT
-ceiling. CPU Boost and the other independent controls remain available.
-Ownership status is refreshed by a single background probe, with a five-second
-interval after each attempt. Slow service diagnostics do not hold up startup or
-the panel's other status fields. Every TDP write checks live ownership again;
-cached availability never authorizes a hardware write.
-Fan commands use their own serialized queue so restoring Auto does not wait for
-a slow TDP or audio operation, including a slow settings commit. Profile reads
-wait for consistent settings in a worker without blocking Decky's event loop.
-Saved charge bypass is verified by a separate
-monitor every 15 seconds and after charger changes or resume, even while TDP
-restoration is still running.
-The current game's profile remains pending while TDP is blocked and is retried
-when RyzenAdj becomes available. A profile error leaves device status and the
-independent controls accessible while TDP edits wait for the correct game.
+TDP control writes SPL, SPPT and FPPT with RyzenAdj and needs no active
+PowerStation writer: while PowerStation runs, TDP changes are refused and the
+TDP page says why. CPU Boost, EPP and the other controls remain available.
+Every write checks ownership again; a cached status never authorizes one.
+TDP Control keeps its own settings and serializes its own changes, so its game
+tracking never waits behind a controller or audio operation, and fan commands
+use their own queue so restoring Auto does not wait for a slow settings commit.
+Saved charge bypass is verified by a separate monitor every 15 seconds and after
+charger changes or resume.
 Controller firmware, RGB, bindings and module eject/reset require the vendor HID
 interface. If the kernel's `hid-ayaneo` driver owns it, these controls display an
 unavailable reason instead of issuing competing commands; evdev FF Gain remains
@@ -164,8 +156,12 @@ state is shown immediately while a fresh read completes.
 If a refresh fails, each row says how old its values are and that Companion is
 retrying; the note clears after a fresh read.
 
-- Open **TDP** to select a preset or create a Custom configuration. Enable
-  **Per Game Profile** while a game is running to bind the chosen values to it.
+- Open **TDP** to choose Silent, Balanced, Performance or Custom limits. While a
+  game runs, **Settings for** picks Global, **This game** or **This game +
+  charger** (separate battery and charger values). Global keeps the game's
+  profile unused instead of deleting it. The CPU section sets CPU Boost and the
+  CPU energy preference for the same scope; **Show details** shows the package
+  power draw.
 - Open **Vibration** to select firmware strength, scale Linux force feedback in
   10% steps or play a short test.
 - Open **Lighting** to select an animation and tune Hue, Saturation and Brightness.
@@ -215,7 +211,8 @@ game context cannot be overwritten by an older response. Per-game tracking and
 the existing recovery monitors continue independently of the panel.
 
 Custom TDP and manual fan Apply use the latest slider choice, including changes
-made immediately before pressing Apply. Speaker discovery and verification run
+made immediately before pressing Apply; an unapplied Custom draft asks before a
+scope change discards it. Speaker discovery and verification run
 in the background so other controls can open while ALSA becomes available.
 Audio calibration remains unavailable until both speaker DSPs are verified.
 
@@ -223,19 +220,28 @@ GitHub downloads are limited to this plugin's stable release ZIP. The updater
 checks the release's SHA-256 digest, archive paths, sizes and plugin identity
 before publishing a complete file in Downloads.
 
-The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
-37 W FPPT; Custom tuning is also capped at 37 W.
+TDP Control is LegionGo2Companion's, adapted to the AYANEO 3:
 
-- CPU Boost writes Linux CPUFreq's global `boost` control. Disabling it prevents
-  the CPU from exceeding its base frequency without changing the selected TDP.
-- The plugin downloads the pinned RyzenAdj build and writes SPL/SPPT/FPPT
-  directly when PowerStation is inactive. An active or starting PowerStation
-  writer disables these writes because its TDP/Boost API does not expose a
-  verifiable three-limit contract.
-  The power monitor retries a pending profile after ownership becomes available;
-  same-game heartbeats return before waiting for that monitor's transaction.
-  Charge control has its own transaction lock shared with charge recovery, so
-  a slow TDP monitor does not block independent charge or queued RGB changes.
+- The ceilings are the ones the console's SMU keeps, measured on a Ryzen 7
+  8840U: SPL 30 W and SPPT 43 W; FPPT is limited to 45 W. Performance uses all
+  three. The 5 W floor is Companion's.
+- RyzenAdj is the only writer: the AYANEO 3 has no firmware TDP interface. The
+  pinned, checksum-verified build is kept in `/var/lib/ayaneo3companion-tdp`, so
+  a plugin update does not download it again; it is checked before every run.
+- On every charger change the firmware lowers SPL to 28 W, so Companion writes
+  the limits again after each power-source change and after sleep.
+- Stock SteamOS blocks RyzenAdj from reading the limits back on this console
+  (the BIOS leaves the SMU's table in memory the kernel marks busy). When the
+  kernel is started with `iomem=relaxed`, Companion also shows **Limits now**
+  and rewrites limits it finds changed.
+- CPU Boost writes Linux CPUFreq's global `boost` control and EPP the CPU
+  energy preference of every policy (0–100%, or the kernel's named choices).
+  Uninstall puts both back to what they were before Companion first changed them.
+- Settings from 1.2.x are carried over once: Low power becomes Silent, Balanced
+  and Performance take their new values, and Minimum, Max and Custom stay as
+  Custom limits.
+- Charge control has its own transaction lock shared with charge recovery, so
+  charge changes never wait for other controls.
 - Charge bypass prefers the upstream AYANEO `charge_behaviour` kernel ABI. On
   older SteamOS kernels it falls back to the same AYANEO 3 EC register used by
   Linux 6.19's `ayaneo-ec` driver. The plugin verifies every write and restores
@@ -324,15 +330,16 @@ with Python 3.10 and Windows with Python 3.13, then checks the frontend and the
 contents of the built ZIP with Node.js 24.
 Settings writes return their confirmed state without waiting for unrelated
 diagnostics; the UI merges only the action's own fields into the latest observed
-state, including global settings acknowledged after a running-game change.
-TDP and profile edits still require the captured game context to match.
-Regular status reads refresh capabilities. Responsiveness tests
-block a service probe while subsequent controller transactions complete, and
-exercise game changes during a slow RPC and fan reads across QAM navigation.
-Additional regressions cover HID confirmation, bounded hardware transfers,
-pending TDP retry ownership and fan discovery with unreadable unrelated entries.
-They also block the TDP monitor while independent actions finish, verify charge
-recovery reads committed intent, and exercise vibration tests during queued saves.
+state. TDP edits carry the game they were made for, and the backend refuses
+them once another game runs. Regular status reads refresh capabilities.
+Responsiveness tests block a slow read while subsequent controller transactions
+complete, and exercise fan reads across QAM navigation. TDP Control's own tests,
+ported from LegionGo2Companion, run its page against delayed replies and game
+changes and its backend against a temporary CPUFreq tree, a fake RyzenAdj and the
+SMU's measured clamps. Additional regressions cover HID confirmation, bounded
+hardware transfers and fan discovery with unreadable unrelated entries. They also
+hold a TDP transaction while charge and RGB changes finish, verify charge recovery
+reads committed intent, and exercise vibration tests during queued saves.
 Installer regressions exercise real directory swaps, failed staging, map writes,
 service failures and incomplete rollback using temporary files and fake services.
 The archive check also uses the updater's runtime-file validator. The build uses

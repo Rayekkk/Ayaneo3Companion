@@ -34,11 +34,17 @@ async def complete(operation):
     return result
 
 
-READ_CALLS = frozenset({'get_state', 'get_battery_status', 'get_fan_status',
-                        'get_version', 'get_game_profile'})
+READ_CALLS = frozenset({'get_state', 'get_battery_status', 'get_fan_status', 'get_version'})
 NETWORK_CALLS = frozenset({'check_for_updates', 'perform_update'})
+# TDP Control serialises its own changes (tdp_backend._mutation_lock): never queue its
+# foreground-game heartbeat or panel lease behind a slow controller or audio write.
+TDP_READS = frozenset({'is_ready', 'get_settings', 'get_cpu_power_controls', 'get_power_source',
+                       'get_game_profile', 'list_game_profiles', 'get_caps', 'get_tdp_info'})
+TDP_CALLS = TDP_READS | {'set_cpu_boost', 'set_epp', 'retry_helper', 'set_advanced_tdp_control',
+                         'set_game_ac_profile', 'delete_game_profile', 'set_game_profile_active',
+                         'set_plugin_enabled', 'set_panel_active', 'reapply', 'set_active_app', 'apply_tdp'}
 # Polled every few seconds: log health transitions only, never each call.
-QUIET_CALLS = READ_CALLS | {'set_active_app'}
+QUIET_CALLS = READ_CALLS | TDP_READS | {'set_active_app', 'set_panel_active'}
 
 
 def _logged_rpc(function, name):
@@ -100,7 +106,7 @@ def guard_public_calls(cls):
                     raise RuntimeError('Plugin is shutting down')
 
                 async def execute():
-                    if method in READ_CALLS or method in NETWORK_CALLS:
+                    if method in READ_CALLS or method in NETWORK_CALLS or method in TDP_CALLS:
                         return await fn(self, *args, **kwargs)
                     if method == 'set_fan':
                         # This operation has its own hardware lock and touches

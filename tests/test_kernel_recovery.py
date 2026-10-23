@@ -19,7 +19,6 @@ import main
 import input_backend
 import display_backend
 import audio_backend
-import power_backend
 import controller_backend
 import ec_backend
 import companion_common
@@ -45,11 +44,8 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.stack.enter_context(mock.patch.object(owner(name), name, value))
         self.stack.enter_context(mock.patch.object(main.Plugin, "_state", {}))
-        self.stack.enter_context(mock.patch.object(main.Plugin, "_active_app", ""))
         self.stack.enter_context(mock.patch.object(companion_common, "supported_device", return_value=True))
         self.stack.enter_context(mock.patch.object(companion_common, "dmi", return_value="AYANEO 3"))
-        self.stack.enter_context(mock.patch.object(power_backend, "tdp_backend", return_value="fixture"))
-        self.stack.enter_context(mock.patch.object(power_backend, "read_cpu_boost", return_value=True))
         self.stack.enter_context(mock.patch.object(ec_backend, "ensure_charge_control", return_value=None))
         self.stack.enter_context(mock.patch.object(ec_backend, "ensure_charge_bypass_control", return_value=None))
         self.stack.enter_context(mock.patch.object(ec_backend, "ensure_controller_control", return_value=False,
@@ -111,12 +107,12 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def _start_restore_flag(self):
         """Run _start with its monitors stubbed; return _restore_hardware's argument."""
         self.plugin._closing = False
-        tasks = ("_restore_task", "_edid_task", "_ac_task", "_charge_task", "_module_task",
+        tasks = ("_restore_task", "_edid_task", "_charge_task", "_module_task",
                  "_tm_guard_task", "_vibration_gain_task", "_audio_task")
         for name in tasks:
             self.stack.enter_context(mock.patch.object(main.Plugin, name, None))
         loops = {name: self.stack.enter_context(mock.patch.object(self.plugin, name, new=mock.AsyncMock()))
-                 for name in ("_restore_hardware", "_edid_loop", "_ac_loop", "_charge_loop",
+                 for name in ("_restore_hardware", "_edid_loop", "_charge_loop",
                               "_module_loop", "_tm_guard_loop", "_vibration_gain_loop", "_restore_audio")}
         await self.plugin._start()
         await asyncio.gather(*(getattr(main.Plugin, name) for name in tasks))
@@ -137,10 +133,9 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         controller = dict(controller_backend.DEFAULT_CONTROLLER)
         for installed, calls in ((True, [mock.call(True, controller)]), (False, [])):
             with self.subTest(installed=installed):
-                main.Plugin._state = {"tdp": dict(power_backend.DEFAULT_TDP), "controller": controller,
-                                      "button_fix_installed": installed}
+                main.Plugin._state = {"controller": controller, "button_fix_installed": installed}
                 with mock.patch.object(main.asyncio, "sleep", new=mock.AsyncMock()), \
-                     mock.patch.object(main.Plugin, "_reapply_current_tdp"), \
+\
                      mock.patch.object(main.Plugin, "_restore_current_controller"), \
                      mock.patch.object(controller_backend, "program_rear_buttons") as program:
                     await self.plugin._restore_hardware(True)

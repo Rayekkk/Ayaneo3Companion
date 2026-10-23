@@ -3,7 +3,7 @@
 // https://github.com/Rayekkk/Ayaneo3Companion
 
 import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
-import { ButtonItem, DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, Router, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
+import { DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { PageShell, SectionHeader, SectionLink, StackedAction, type SectionKey } from "./ui";
 import { confirmAction, infoRow } from "./shared";
@@ -11,7 +11,9 @@ import { resetUpdates } from "./updates";
 import { AboutPage } from "./about";
 import { AudioPage, BatteryPage, ButtonsPage, DisplayPage, MagicModulesPage, VibrationPage } from "./device_pages";
 import { FanPage, resetFanStatus, useFanControl } from "./fan";
-import type { BatteryStatus, Controller, GameProfile, Hsv, Preset, RgbMode, RunningGame, State, Tdp, Vibration } from "./model";
+import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
+import { overviewSummary, type SettingsLimits } from "./tdp_model";
+import type { BatteryStatus, Controller, Hsv, RgbMode, State, Vibration } from "./model";
 
 const SECTION_TITLES: Record<SectionKey, string> = {
   tdp: "TDP", fan: "Fan Control", vibration: "Vibration", rgb: "Lighting", buttons: "Key Binding",
@@ -21,13 +23,10 @@ const readAge = (milliseconds: number) => {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
 };
-type ActionKey = "tdp" | "profile" | "cpu_boost" | "vibration" | "battery" | "modules" | "audio" | "buttons" | "screen";
+type ActionKey = "vibration" | "battery" | "modules" | "audio" | "buttons" | "screen";
 // A write acknowledges its own settings; other fields in its fast response
 // may predate the latest hardware observation. Full polls replace diagnostics.
 const ACTION_FIELDS: Record<ActionKey, ReadonlyArray<keyof State>> = {
-  tdp: ["active_app_id", "tdp", "tdp_preset", "tdp_profile_pending", "tdp_profile_error"],
-  profile: ["active_app_id", "tdp", "tdp_preset", "tdp_profile_pending", "tdp_profile_error"],
-  cpu_boost: ["cpu_boost", "cpu_boost_supported"],
   vibration: ["controller"],
   battery: ["charge_bypass", "charge_bypass_supported"],
   modules: ["modules_reconnecting", "modules_connected", "module_left", "module_right"],
@@ -36,16 +35,11 @@ const ACTION_FIELDS: Record<ActionKey, ReadonlyArray<keyof State>> = {
   buttons: ["button_fix_installed", "tm_guard_enabled", "tm_guard_status", "tm_guard_recoveries"],
   screen: ["screen_installed", "screen_conflict", "screen_restart_needed", "screen_native"],
 };
-interface Tuning { spl: number; spptOff: number; fpptOff: number }
 
 const getState = callable<[], State>("get_state");
 const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
-const setTdp = callable<[Tdp, Preset, string], State>("set_tdp");
-const setCpuBoost = callable<[boolean], State>("set_cpu_boost");
-const getGameProfile = callable<[string], GameProfile>("get_game_profile");
-const setGameProfile = callable<[string, Tdp, Preset, string], State>("set_game_profile");
-const deleteGameProfile = callable<[string, string], State>("delete_game_profile");
-const setActiveApp = callable<[string], void>("set_active_app");
+// TDP Control has its own page and RPCs (tdp.tsx); the overview row reads its settings.
+const getTdpSettings = callable<[], SettingsLimits>("get_settings");
 const setController = callable<[Partial<Controller>], State>("set_controller");
 const setControllerWithVibrationFeedback = callable<[Partial<Controller>], State>("set_controller_with_vibration_feedback");
 const setVibrationGain = callable<[number], State>("set_vibration_gain");
@@ -60,106 +54,11 @@ const setTmGuard = callable<[boolean], State>("set_tm_guard");
 const setAudioFix = callable<[boolean], State>("set_audio_fix");
 const reapplyAudioFix = callable<[], State>("reapply_audio_fix");
 const recalibrateAudio = callable<[], State>("recalibrate_audio");
-const PRESET_ORDER: Preset[] = ["Minimum", "Low power", "Balanced", "Performance", "Max", "Custom"];
 const VIBRATION_LEVELS: Vibration[] = ["off", "low", "medium", "high"];
 const VIBRATION_TEST_MS = 500;
 const VIBRATION_APPLY_DELAY_MS = 150;
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const titleCase = (value: string) => value ? value[0].toUpperCase() + value.slice(1) : value;
-const tdpStatusStyle = (message: string) => ({
-  fontSize: "12px",
-  color: message.startsWith("Error") ? "var(--gpColor-Red, #f87171)" : "var(--gpColor-Green, #4ade80)",
-});
-
-type GameListener = (game: RunningGame | null) => void;
-class AppWatcher {
-  private static listeners: GameListener[] = [];
-  private static current: RunningGame | null = null;
-  private static timer: ReturnType<typeof setInterval> | undefined;
-  private static unsubs: Array<() => void> = [];
-  private static started = false;
-  private static busy = false;
-  private static pending = false;
-  private static lastPush = 0;
-  private static generation = 0;
-  private static lifetimeTimer: ReturnType<typeof setTimeout> | undefined;
-
-  static activeGame(): RunningGame | null {
-    try {
-      const app = (Router as any)?.MainRunningApp;
-      return app?.appid ? { appId: String(app.appid), name: app.display_name ?? String(app.appid) } : null;
-    } catch { return null; }
-  }
-  static currentGame() { return this.current; }
-  static listen(fn: GameListener) {
-    this.listeners.push(fn);
-    return () => { this.listeners = this.listeners.filter(item => item !== fn); };
-  }
-  static start() {
-    if (this.started) return;
-    this.started = true;
-    const generation = ++this.generation;
-    this.busy = false;
-    this.pending = false;
-    this.current = this.activeGame();
-
-    try {
-      const registration = (window as any).SteamClient?.GameSessions
-        ?.RegisterForAppLifetimeNotifications?.(() => {
-          // Router.MainRunningApp updates shortly after Steam's notification.
-          if (!this.started || generation !== this.generation) return;
-          if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
-          this.lifetimeTimer = setTimeout(() => {
-            this.lifetimeTimer = undefined;
-            if (this.started && generation === this.generation) void this.check();
-          }, 300);
-        });
-      if (registration?.unregister) this.unsubs.push(() => registration.unregister());
-    } catch (error) {
-      console.warn("[ayaneo3companion] app lifetime notifications unavailable", error);
-    }
-
-    this.timer = setInterval(() => void this.check(), 2000);
-    void this.check(true);
-  }
-  static stop() {
-    ++this.generation;
-    this.busy = false;
-    this.pending = false;
-    if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
-    this.lifetimeTimer = undefined;
-    if (this.timer) clearInterval(this.timer);
-    for (const unsubscribe of this.unsubs) {
-      try { unsubscribe(); } catch { /* subscription may already be gone */ }
-    }
-    this.timer = undefined; this.unsubs = []; this.listeners = []; this.current = null; this.started = false; this.lastPush = 0;
-  }
-  private static async check(force = false) {
-    if (!this.started) return;
-    const generation = this.generation;
-    const game = this.activeGame();
-    const changed = game?.appId !== this.current?.appId;
-    this.current = game;
-    if (changed) this.listeners.forEach(listener => listener(game));
-    // Keep local game context responsive while the backend applies a profile.
-    // Only the latest observed context needs a subsequent serialized write.
-    if (this.busy) { if (force || changed) this.pending = true; return; }
-    const now = Date.now();
-    if (force || changed || this.pending || now - this.lastPush >= 6000) {
-      this.pending = false;
-      this.busy = true;
-      try { await setActiveApp(game?.appId ?? ""); if (generation === this.generation) this.lastPush = Date.now(); }
-      catch (error) { console.error("[ayaneo3companion] active app update failed", error); }
-      finally {
-        if (generation === this.generation) {
-          this.busy = false;
-          if (this.pending || this.activeGame()?.appId !== this.current?.appId) void this.check(true);
-        }
-      }
-    }
-  }
-}
-
 function hsvToHex(hue: number, saturation: number): string {
   const h = ((hue % 360) + 360) % 360;
   const s = clamp(saturation, 0, 100) / 100;
@@ -194,44 +93,7 @@ const SlowSliderField: FC<SlowSliderProps> = slider => <SliderField
   onChange={value => { if (!slider.disabled) { slider.onChange(value); slider.onChangeEnd(value); } }}
 />;
 
-function detectPreset(tdp: Tdp, presets: Record<string, Tdp>): Preset {
-  for (const name of ["Minimum", "Low power", "Balanced", "Performance", "Max"] as Preset[]) {
-    const value = presets[name];
-    if (value && value.spl === tdp.spl && value.sppt === tdp.sppt && value.fppt === tdp.fppt) return name;
-  }
-  return "Custom";
-}
-
-function profileLabel(tdp: Tdp, stored: Preset | undefined, presets: Record<string, Tdp>): string {
-  const selected = stored ?? detectPreset(tdp, presets);
-  return selected === "Custom"
-    ? `Custom (${tdp.spl} +${tdp.sppt - tdp.spl}/+${tdp.fppt - tdp.spl})`
-    : selected;
-}
-
-const finite = (value: number, fallback: number) => Number.isFinite(value) ? value : fallback;
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
-const spptOffsetMax = (spl: number) => Math.max(0, 37 - spl);
-const fpptOffsetMax = (spl: number) => Math.max(0, 37 - spl);
-const fromAbsolute = (tdp: Tdp): Tuning => ({
-  spl: tdp.spl,
-  spptOff: Math.max(0, tdp.sppt - tdp.spl),
-  fpptOff: Math.max(0, tdp.fppt - tdp.spl),
-});
-const absolute = (tuning: Tuning): Tdp => ({
-  spl: tuning.spl,
-  sppt: tuning.spl + tuning.spptOff,
-  fppt: tuning.spl + tuning.fpptOff,
-});
-function normalise(tuning: Tuning): Tuning {
-  const spl = clamp(finite(tuning.spl, 15), 5, 35);
-  const spptMax = spptOffsetMax(spl);
-  const fpptMax = fpptOffsetMax(spl);
-  const spptOff = clamp(finite(tuning.spptOff, 0), 0, spptMax);
-  const fpptOff = Math.max(clamp(finite(tuning.fpptOff, spptOff), 0, fpptMax), spptOff);
-  return { spl, spptOff, fpptOff };
-}
-
 let confirmedState: State | null = null;
 
 const Content: FC = () => {
@@ -254,9 +116,6 @@ const Content: FC = () => {
   const panelOnScreen = () => !panelRef.current || panelRef.current.getClientRects().length > 0;
   const lastOpenedSection = useRef<SectionKey | null>(null);
   const lastReadAt = useRef<number | null>(null);
-  const presetInitialized = useRef(false);
-  const tdpDirty = useRef(false);
-  const desiredTdp = useRef<Tdp | null>(confirmedState?.tdp ?? null);
   const controllerDirty = useRef(false);
   const controllerPending = useRef<Controller | null>(null);
   const controllerPatch = useRef<Partial<Controller>>({});
@@ -267,36 +126,18 @@ const Content: FC = () => {
   const [state, setState] = useState<State | null>(confirmedState);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
   const fan = useFanControl(visible, activeSection === "fan");
-  const [preset, setPreset] = useState<Preset>(() => confirmedState ? confirmedState.tdp_preset ?? detectPreset(confirmedState.tdp, confirmedState.presets) : "Custom");
+  const [tdpSettings, setTdpSettings] = useState<SettingsLimits | null>(null);
   const [pendingAction, setPendingAction] = useState<ActionKey | null>(null);
   const pendingActionRef = useRef<ActionKey | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [stateReadError, setStateReadError] = useState<string | null>(null);
-  const [profileReadError, setProfileReadError] = useState<string | null>(null);
   const [rgbEdit, setRgbEdit] = useState<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
-  const [game, setGame] = useState<RunningGame | null>(AppWatcher.currentGame());
-  const [perGame, setPerGame] = useState(false);
-  const [profileLoading, setProfileLoading] = useState(true);
-  const [savedGamePreset, setSavedGamePreset] = useState<Preset | undefined>(undefined);
   const [battery, setBattery] = useState<BatteryStatus | null>(null);
   const [batteryReadError, setBatteryReadError] = useState("");
   const readingBattery = useRef(false);
   const refreshBattery = useRef<(() => Promise<void>) | null>(null);
-  const gameRequest = useRef(0);
-  const readingGameProfile = useRef(false);
-  const refreshGameProfile = useRef<(() => Promise<void>) | null>(null);
-  const profileReady = useRef(!game);
-  const contextStateReady = useRef(false);
   const busy = pendingAction !== null || Boolean(state?.settings_error || state?.initializing);
   const controllerBusy = busy || state?.controller_supported === false;
-  const currentGameId = useRef(game?.appId ?? "");
-  currentGameId.current = game?.appId ?? "";
-  const tdpContextMismatch = state?.active_app_id !== currentGameId.current;
-  const tdpBusy = busy || profileLoading || tdpContextMismatch || state?.tdp_supported === false || Boolean(state?.tdp_profile_pending);
-  const tdpProblem = tdpContextMismatch
-    ? "Waiting to confirm the current game's profile. TDP changes are blocked until synchronization succeeds. Other hardware controls remain available."
-    : state?.tdp_profile_error || state?.tdp_error || "";
-  const validContext = (context: string) => mounted.current && currentGameId.current === context && (AppWatcher.activeGame()?.appId ?? "") === context;
   const notifyFailure = (title: string, error: unknown) => {
     const body = error instanceof Error ? error.message : String(error);
     try { toaster.toast({ title, body }); } catch { console.error(`[ayaneo3companion] ${title}: ${body}`); }
@@ -306,14 +147,8 @@ const Content: FC = () => {
     const next = fields && confirmedState
       ? { ...confirmedState, ...Object.fromEntries(fields.map(key => [key, response[key]])) }
       : response;
-    const matchingGame = next.active_app_id === currentGameId.current;
     confirmedState = next;
-    if (matchingGame && !tdpDirty.current) desiredTdp.current = next.tdp;
     setState(current => current ? { ...next,
-      // Health and independent hardware controls remain observable when the
-      // game transition fails. Only its TDP state waits for matching context.
-      tdp: tdpDirty.current || !matchingGame ? current.tdp : next.tdp,
-      tdp_preset: matchingGame ? next.tdp_preset : current.tdp_preset,
       controller: controllerDirty.current ? current.controller : next.controller,
     } : next);
   };
@@ -332,18 +167,6 @@ const Content: FC = () => {
     }
   }, [state?.controller]);
 
-  useEffect(() => AppWatcher.listen(next => {
-    ++revision.current;
-    tdpDirty.current = false;
-    desiredTdp.current = null;
-    presetInitialized.current = false;
-    currentGameId.current = next?.appId ?? "";
-    profileReady.current = !next;
-    contextStateReady.current = false;
-    setGame(next);
-    setProfileLoading(true);
-  }), []);
-
   const refresh = useCallback(async () => {
     if (!mounted.current || !visibleRef.current || reading.current || pendingActionRef.current || controllerWriting.current || controllerPending.current) return;
     reading.current = true;
@@ -354,12 +177,6 @@ const Content: FC = () => {
       acceptState(next);
       lastReadAt.current = Date.now();
       setStateReadError(null);
-      contextStateReady.current = next.active_app_id === currentGameId.current && !next.tdp_profile_pending;
-      setProfileLoading(!contextStateReady.current || !profileReady.current);
-      if (contextStateReady.current && !presetInitialized.current && !tdpDirty.current && !pendingActionRef.current) {
-        presetInitialized.current = true;
-        setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
-      }
     } catch (error) {
       if (mounted.current && visibleRef.current && request === revision.current) {
         const message = error instanceof Error ? error.message : String(error);
@@ -371,57 +188,6 @@ const Content: FC = () => {
       if (mounted.current && visibleRef.current && request !== revision.current) void refresh();
     }
   }, []);
-
-  useEffect(() => {
-    const request = ++gameRequest.current;
-    const context = game?.appId ?? "";
-    let retry: ReturnType<typeof setTimeout> | undefined;
-    setProfileReadError(null);
-    if (!tdpDirty.current) setPerGame(false);
-    setSavedGamePreset(undefined);
-    if (!visible || !game) {
-      if (!game) { profileReady.current = true; setProfileLoading(!contextStateReady.current); }
-      return;
-    }
-    profileReady.current = false;
-    setProfileLoading(true);
-    const current = () => request === gameRequest.current && validContext(context) && visibleRef.current;
-    const lookup = async () => {
-      if (!current() || readingGameProfile.current || profileReady.current
-          || pendingActionRef.current === "tdp" || pendingActionRef.current === "profile") return;
-      readingGameProfile.current = true;
-      try {
-        const profile = await getGameProfile(context);
-        if (!current()) return;
-        setProfileReadError(null);
-        profileReady.current = true;
-        setProfileLoading(!contextStateReady.current);
-        if (!tdpDirty.current) setPerGame(profile.exists);
-        if (profile.exists) {
-          const stored = profile.preset ?? detectPreset(profile.profile, confirmedState?.presets ?? {});
-          setSavedGamePreset(stored);
-          if (!tdpDirty.current) setPreset(stored);
-        }
-      } catch (error) {
-        if (current()) {
-          setProfileReadError(error instanceof Error ? error.message : String(error));
-          retry = setTimeout(() => { retry = undefined; void lookup(); }, 3000);
-        }
-      } finally {
-        readingGameProfile.current = false;
-        // Rapid QAM/game changes invalidate results but cannot cancel backend
-        // workers. After the old read drains, query only the latest context.
-        if (request !== gameRequest.current) void refreshGameProfile.current?.();
-      }
-    };
-    refreshGameProfile.current = lookup;
-    void lookup();
-    return () => {
-      gameRequest.current += 1;
-      if (refreshGameProfile.current === lookup) refreshGameProfile.current = null;
-      if (retry) clearTimeout(retry);
-    };
-  }, [game?.appId, visible]);
 
   useEffect(() => {
     const element = panelRef.current;
@@ -445,6 +211,21 @@ const Content: FC = () => {
     const timer = setInterval(refresh, 1500);
     return () => clearInterval(timer);
   }, [refresh, visible, onScreen]);
+
+  // The TDP row on the overview: what runs now, read from TDP Control's own store.
+  useEffect(() => {
+    if (!visible || !onScreen || activeSection) return;
+    let cancelled = false, reading = false;
+    const read = () => {
+      if (reading) return;
+      reading = true;
+      getTdpSettings().then(next => { if (!cancelled) setTdpSettings(next); })
+        .catch(() => undefined).finally(() => { reading = false; });
+    };
+    read();
+    const timer = setInterval(read, 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [visible, onScreen, activeSection]);
 
   useEffect(() => {
     if (!visible || activeSection !== "battery") return;
@@ -480,19 +261,13 @@ const Content: FC = () => {
     if (mounted.current) {
       setPendingAction(null);
       void refresh();
-      // A QAM reopen during a profile transaction defers its lookup. Resume
-      // it only after commit/rollback so a pre-write snapshot cannot win.
-      if (!profileReady.current) void refreshGameProfile.current?.();
     }
   };
 
   const run = async (action: ActionKey, work: () => Promise<State>, title: string, success?: string) => {
     if (pendingActionRef.current || state?.settings_error || state?.initializing) return;
-    const context = currentGameId.current;
-    const contextBound = action === "tdp" || action === "profile";
-    const canAccept = () => mounted.current && (!contextBound || validContext(context));
+    const canAccept = () => mounted.current;
     ++revision.current;
-    if (action === "tdp" || action === "profile") ++gameRequest.current;
     pendingActionRef.current = action;
     setPendingAction(action); setStatus(null);
     try {
@@ -526,119 +301,6 @@ const Content: FC = () => {
     apply();
   };
 
-  const tdp = state.tdp;
-  const tuning = normalise(fromAbsolute(tdp));
-  const spptOff = tuning.spptOff;
-  const fpptOff = tuning.fpptOff;
-  const maxSpptOffset = spptOffsetMax(tuning.spl);
-  const maxFpptOffset = fpptOffsetMax(tuning.spl);
-  const currentTuning = () => normalise(fromAbsolute(desiredTdp.current ?? tdp));
-  const setCustomTdp = (next: Tdp) => {
-    if (tdpBusy || pendingActionRef.current || !validContext(game?.appId ?? "")) return;
-    desiredTdp.current = next;
-    tdpDirty.current = true;
-    setPreset("Custom"); setState(current => current ? { ...current, tdp: next } : current); setStatus(null);
-  };
-  const setSpl = (value: number) => {
-    if (!Number.isFinite(value)) return;
-    setCustomTdp(absolute(normalise({ ...currentTuning(), spl: value })));
-  };
-  const setSpptOff = (value: number) => {
-    if (!Number.isFinite(value)) return;
-    const current = currentTuning();
-    const nextSppt = clamp(value, 0, spptOffsetMax(current.spl));
-    setCustomTdp(absolute(normalise({ ...current, spptOff: nextSppt, fpptOff: Math.max(current.fpptOff, nextSppt) })));
-  };
-  const setFpptOff = (value: number) => {
-    if (!Number.isFinite(value)) return;
-    const current = currentTuning();
-    const nextFppt = clamp(value, 0, fpptOffsetMax(current.spl));
-    setCustomTdp(absolute(normalise({ ...current, fpptOff: nextFppt, spptOff: Math.min(current.spptOff, nextFppt) })));
-  };
-  const toggleCpuBoost = (enabled: boolean) => run("cpu_boost", () => setCpuBoost(enabled), "CPU Boost failed");
-  const choosePreset = async (name: Preset) => {
-    const context = game?.appId ?? "";
-    if (tdpBusy || pendingActionRef.current || !validContext(context)) return;
-    const previousDirty = tdpDirty.current;
-    const previousPreset = previousDirty ? "Custom" : preset;
-    const previousTdp = desiredTdp.current ?? tdp;
-    const previousSavedPreset = savedGamePreset;
-    presetInitialized.current = true;
-    setPreset(name); setStatus(null);
-    if (name === "Custom") return;
-    const value = state.presets[name];
-    if (!value) return;
-    ++revision.current;
-    ++gameRequest.current;
-    tdpDirty.current = false;
-    desiredTdp.current = value;
-    setState(current => current ? { ...current, tdp: value } : current);
-    pendingActionRef.current = "tdp";
-    setPendingAction("tdp");
-    try {
-      const next = await (perGame && game
-        ? setGameProfile(game.appId, value, name, context)
-        : setTdp(value, name, context));
-      if (!validContext(context)) return;
-      acceptState(next, ACTION_FIELDS.tdp);
-      if (perGame && game) setSavedGamePreset(name);
-      setStatus(perGame && game ? `${name} saved for ${game.name}.` : `${name} applied.`);
-    } catch (error) {
-      notifyFailure("TDP preset failed", error);
-      if (validContext(context)) {
-        tdpDirty.current = previousDirty;
-        desiredTdp.current = previousTdp;
-        setPreset(previousPreset);
-        setSavedGamePreset(previousSavedPreset);
-        setState(current => current ? { ...current, tdp: previousTdp } : current);
-        setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    } finally {
-      finishAction();
-    }
-  };
-  const togglePerGame = async (enabled: boolean) => {
-    const context = game?.appId ?? "";
-    if (!game || tdpBusy || pendingActionRef.current || !validContext(context)) return;
-    ++revision.current;
-    ++gameRequest.current;
-    pendingActionRef.current = "profile";
-    setPendingAction("profile");
-    setPerGame(enabled); setStatus(null);
-    try {
-      if (enabled) {
-        const profile = await getGameProfile(context);
-        if (!validContext(context)) return;
-        if (profile.exists) {
-          const stored = profile.preset ?? detectPreset(profile.profile, state.presets);
-          tdpDirty.current = false;
-          desiredTdp.current = profile.profile;
-          setSavedGamePreset(stored);
-          setPreset(stored);
-          setState(current => current ? { ...current, tdp: profile.profile } : current);
-          setStatus(`Profile applied for ${game.name}.`);
-        } else {
-          setSavedGamePreset(undefined);
-          setStatus(`No saved profile for ${game.name}. Use Custom or choose a preset to create one.`);
-        }
-      } else {
-        const next = await deleteGameProfile(context, context);
-        if (!validContext(context)) return;
-        tdpDirty.current = false;
-        setSavedGamePreset(undefined);
-        acceptState(next, ACTION_FIELDS.profile); setPreset(next.tdp_preset ?? detectPreset(next.tdp, next.presets));
-        setStatus("Switched to global settings.");
-      }
-    } catch (error) {
-      notifyFailure(enabled ? "Game profile lookup failed" : "Game profile removal failed", error);
-      if (validContext(context)) {
-        setPerGame(!enabled);
-        setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    } finally {
-      finishAction();
-    }
-  };
   const flushController = (): Promise<boolean> => {
     if (controllerDrain.current) return controllerDrain.current;
     if (!controllerPending.current) return Promise.resolve(true);
@@ -792,17 +454,14 @@ const Content: FC = () => {
   const audioSummary = state.audio_fix_enabled
     ? state.audio_fix_installed ? state.audio_profile : "Tuning pending"
     : "Generic SteamOS profile";
-  const readFailure = (stateReadError || profileReadError) && <PanelSection title="Device Status">
-    {stateReadError && <PanelSectionRow><Field focusable label="Status refresh failed"
-      description={`Showing last confirmed values. Retrying automatically. ${stateReadError}`} /></PanelSectionRow>}
-    {profileReadError && <PanelSectionRow><Field focusable label="Game profile lookup failed"
-      description={`TDP profile changes are waiting for a confirmed profile. Retrying automatically. ${profileReadError}`} /></PanelSectionRow>}
+  const readFailure = stateReadError && <PanelSection title="Device Status">
+    <PanelSectionRow><Field focusable label="Status refresh failed"
+      description={`Showing last confirmed values. Retrying automatically. ${stateReadError}`} /></PanelSectionRow>
   </PanelSection>;
 
   if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
-      {link("tdp", tdpProblem || `${preset} · ${tdp.spl} / ${tdp.sppt} / ${tdp.fppt} W`,
-        [profileReadError && `Game profile lookup failed · Retrying… ${profileReadError}`, staleNote].filter(Boolean).join(" · ") || undefined)}
+      {link("tdp", tdpSettings ? overviewSummary(tdpSettings) : "Power limits and CPU settings", undefined)}
       {fan.available && link("fan",
         fan.error || !fan.status?.supported ? "Status unavailable" : `${fan.status.mode === "manual" && fan.status.percent != null ? `Manual · ${fan.status.percent}%` : "Auto"}${fan.status.rpm == null ? "" : ` · ${fan.status.rpm} RPM`}`,
         fan.error || undefined)}
@@ -818,7 +477,7 @@ const Content: FC = () => {
         : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed")}
     </PanelSection>
     <PanelSection title="Device">
-      {infoRow(state.device, `SteamOS · TDP backend: ${state.tdp_backend}`)}
+      {infoRow(state.device, "SteamOS")}
     </PanelSection>
     <PanelSection title="Plugin">
       {link("about", `AYANEO 3 Companion · v${state.version}`, undefined)}
@@ -829,76 +488,7 @@ const Content: FC = () => {
     <SectionHeader title={SECTION_TITLES[activeSection]} onBack={backToControls} />
     {readFailure}
 
-    {activeSection === "tdp" && <>
-      <PanelSection title="Current TDP">
-        <PanelSectionRow><Field label={tdpContextMismatch ? "Game profile not synchronized" : state.tdp_profile_pending ? "TDP profile pending" : state.tdp_supported === false ? "TDP control unavailable" : `${tdp.spl} / ${tdp.sppt} / ${tdp.fppt} W`} description={tdpProblem || `SPL / SPPT / FPPT · ${state.gpu_power_w == null ? "power unavailable" : `${state.gpu_power_w.toFixed(1)} W currently`} · ${state.tdp_backend}`} /></PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="CPU">
-        <PanelSectionRow><ToggleField
-          label="CPU Boost"
-          description={state.cpu_boost_supported ? "Allow the CPU to boost above its base frequency when performance and power limits permit." : "CPU Boost control is unavailable on this kernel."}
-          checked={state.cpu_boost}
-          disabled={busy || !state.cpu_boost_supported}
-          onChange={enabled => void toggleCpuBoost(enabled)}
-        /></PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Game Profile">
-        <PanelSectionRow><ToggleField
-          label="Per Game Profile"
-          description={game ? (perGame ? (
-            <span style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-              <span>{game.name}</span>
-              <span>
-                <span style={{ fontSize: "11px", color: "var(--gpColor-TextMuted, rgba(255,255,255,0.5))" }}>Profile: </span>
-                <span style={{ fontSize: "11px", fontWeight: "bold", color: "var(--gpColor-White, #fff)", background: "rgba(74,222,128,0.25)", borderRadius: "4px", padding: "1px 6px" }}>
-                  {profileLabel(tdp, savedGamePreset, state.presets)}
-                </span>
-              </span>
-            </span>
-          ) : game.name) : "No game running"}
-          checked={perGame}
-          disabled={!game || tdpBusy}
-          onChange={enabled => void togglePerGame(enabled)}
-        /></PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Preset">
-        {PRESET_ORDER.map(name => <PanelSectionRow key={name}>
-          <ButtonItem
-            layout="below"
-            disabled={preset === name || tdpBusy}
-            onClick={() => void choosePreset(name)}
-          >
-            {preset === name ? `> ${name}` : name}
-          </ButtonItem>
-        </PanelSectionRow>)}
-        {status && preset !== "Custom" && <PanelSectionRow><div style={tdpStatusStyle(status)}>{status}</div></PanelSectionRow>}
-      </PanelSection>
-      {preset === "Custom" && <>
-        <PanelSection title="TDP Limits">
-          <PanelSectionRow><SliderField label={`SPL (TDP) - ${tuning.spl} W`} value={tuning.spl} min={5} max={35} step={1} disabled={tdpBusy} onChange={setSpl} description="Sustained power limit - the main TDP dial" /></PanelSectionRow>
-          <PanelSectionRow><SliderField key={`sppt-${tuning.spl}-${maxSpptOffset}`} label={`SPPT +${spptOff} W  =  ${tuning.spl + spptOff} W`} value={spptOff} min={0} max={maxSpptOffset || 1} step={1} disabled={tdpBusy || maxSpptOffset === 0} onChange={setSpptOff} description={maxSpptOffset === 0 ? "No headroom left at this SPL" : `Slow limit headroom above SPL (max +${maxSpptOffset} W here)`} /></PanelSectionRow>
-          <PanelSectionRow><SliderField key={`fppt-${tuning.spl}-${maxFpptOffset}`} label={`FPPT +${fpptOff} W  =  ${tuning.spl + fpptOff} W`} value={fpptOff} min={0} max={maxFpptOffset || 1} step={1} disabled={tdpBusy || maxFpptOffset === 0} onChange={setFpptOff} description={maxFpptOffset === 0 ? "No headroom left at this SPL" : `Fast limit headroom above SPL (max +${maxFpptOffset} W here)`} /></PanelSectionRow>
-        </PanelSection>
-        <PanelSection title="Action">
-          <PanelSectionRow><ButtonItem layout="below" disabled={tdpBusy} onClick={() => {
-            const context = game?.appId ?? "";
-            if (tdpBusy || !validContext(context)) return;
-            const value = desiredTdp.current ?? tdp;
-            void run("tdp", async () => {
-              const next = await (perGame && game
-                ? setGameProfile(game.appId, value, "Custom", context)
-                : setTdp(value, "Custom", context));
-              if (validContext(context)) {
-                tdpDirty.current = false;
-                if (perGame && game) setSavedGamePreset("Custom");
-              }
-              return next;
-            }, "TDP apply failed", perGame && game ? `Custom settings saved for ${game.name}.` : "Custom settings applied.");
-          }}>{pendingAction === "tdp" ? "Applying..." : perGame && game ? `Apply & Save for ${game.name}` : "Apply TDP"}</ButtonItem></PanelSectionRow>
-          {status && <PanelSectionRow><div style={tdpStatusStyle(status)}>{status}</div></PanelSectionRow>}
-        </PanelSection>
-      </>}
-    </>}
+    {activeSection === "tdp" && <TdpPage visible={onScreen} />}
 
     {activeSection === "vibration" && <VibrationPage state={state} busy={busy} testing={pendingAction === "vibration"} onLevel={setVibrationLevel} onGain={setFfGain} onTest={() => void runVibrationTest()} />}
 
@@ -965,7 +555,7 @@ const Content: FC = () => {
 const Icon: FC = () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" style={{ width: "1em", height: "1em" }}><path d="M7 8h10a5 5 0 0 1 4.7 6.7l-1.1 3.1a2 2 0 0 1-3.3.8L15 16H9l-2.3 2.6a2 2 0 0 1-3.3-.8l-1.1-3.1A5 5 0 0 1 7 8Z"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="12" r="2"/></svg>;
 export default definePlugin(() => {
   // Per-game profiles must keep following Steam even while the QAM is closed.
-  AppWatcher.start();
+  startTdpWatcher();
   return {
     name: "AYANEO 3 Companion",
     titleView: <div className={staticClasses.Title}>AYANEO 3 Companion</div>,
@@ -973,7 +563,7 @@ export default definePlugin(() => {
     alwaysRender: true,
     icon: <Icon />,
     onDismount() {
-      AppWatcher.stop(); confirmedState = null;
+      stopTdpWatcher(); confirmedState = null;
       resetFanStatus();
       resetUpdates();
     },

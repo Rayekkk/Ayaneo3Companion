@@ -12,7 +12,7 @@ import main
 import audio_backend
 import ec_backend
 import fan_backend
-import power_backend
+import tdp_backend
 import system_process
 from system_process import system_env
 
@@ -28,7 +28,7 @@ class SystemProcessTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.object(subprocess, "run", return_value=child) as run:
             ec_backend._upower_time_to_full("BAT0")
-            power_backend._probe_powerstation_active()
+            tdp_backend._powerstation_active()
             main._systemctl("restart", "inputplumber")
             audio_backend._set_audio_control(0, "L0 DSP1 Firmware Load", "on")
             fan_backend.FanController()._run(["/usr/bin/systemctl", "status"])
@@ -38,11 +38,12 @@ class SystemProcessTests(unittest.TestCase):
             self.assertEqual(len(run.call_args_list), 5)
             self.assertEqual(dict(os.environ), env)
 
-    def test_ryzenadj_finds_only_its_own_library(self):
-        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/tmp/_MEI/bundled", "PATH": "/usr/bin"}, clear=True):
-            env = system_env(LC_ALL="C", LD_LIBRARY_PATH=str(power_backend.BIN_DIR))
-        self.assertEqual(env, {"PATH": "/usr/bin", "LC_ALL": "C",
-                               "LD_LIBRARY_PATH": str(power_backend.BIN_DIR)})
+    def test_ryzenadj_runs_with_system_libraries_only(self):
+        """The pinned helper links only libpci and libudev: no bundled library path at all."""
+        process = type("Process", (), {"returncode": 0, "communicate": lambda self, timeout: (b"", b"")})()
+        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/tmp/_MEI/bundled", "PATH": "/usr/bin"}, clear=True),              patch.object(subprocess, "Popen", return_value=process) as popen:
+            tdp_backend._spawn_ryzenadj(["--info"], 3)
+        self.assertEqual(popen.call_args.kwargs["env"], {"PATH": "/usr/bin", "LC_ALL": "C"})
 
     def test_run_closes_stdin_returns_failures_and_kills_at_the_timeout(self):
         code = 'import os, sys; sys.stdout.write(sys.stdin.read() + os.environ["LC_ALL"]); sys.exit(3)'

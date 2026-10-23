@@ -8,7 +8,6 @@ import asyncio
 import copy
 import os
 import platform
-import re
 import stat
 import sys
 import threading
@@ -33,20 +32,17 @@ import display_backend  # noqa: E402
 import ec_backend  # noqa: E402
 import input_backend  # noqa: E402
 import module_runtime  # noqa: E402
-import power_backend  # noqa: E402
+import tdp_backend  # noqa: E402
 import system_process  # noqa: E402
 from companion_common import LOG  # noqa: E402
 
 TM_GUARD_INTERVAL = 0.5
 CONTROLLER_GAIN_CHECK_INTERVAL = 2.0
 CONTROLLER_RESUME_THRESHOLD = 1.0
-TDP_DIAGNOSTIC_INTERVAL = 5.0
-TDP_DIAGNOSTIC_FIELDS = ("tdp_backend", "tdp_supported", "tdp_error")
 # Only diagnostic fields are remembered by a status read. Applied values and
 # game identity remain owned by their transactions and background monitors.
 SNAPSHOT_DIAGNOSTICS = (
-    "gpu_power_w", "tdp_backend", "tdp_supported", "tdp_error",
-    "controller_supported", "controller_error", "cpu_boost_supported",
+    "controller_supported", "controller_error",
     "screen_conflict", "screen_restart_needed", "screen_native", "edid_patched", "edid_game_nits",
     "charge_bypass_supported", "module_eject_supported", "module_reset_supported",
 )
@@ -55,7 +51,6 @@ VIBRATION_TEST_MS = 500
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
 fan_controller = FanController()
 _lock = threading.RLock()
-_tdp_mutation_lock = threading.RLock()
 _charge_mutation_lock = threading.RLock()
 
 
@@ -163,18 +158,14 @@ def _end_decky_listener_at_eof():
 @guard_public_calls
 class Plugin:
     _state = {}
-    _tdp_observation_epoch = 0
-    _tdp_writes = 0
     _restore_task = None
     _edid_task = None
-    _ac_task = None
     _charge_task = None
     _module_task = None
     _tm_guard_task = None
     _vibration_gain_task = None
     _audio_task = None
     _fan_task = None
-    _active_app = ""
 
     def __init__(self):
         _end_decky_listener_at_eof()
@@ -192,8 +183,38 @@ class Plugin:
         self._audio_mutation_lock = threading.RLock()
         self._startup_task = None
         self._cleanup_task = None
-        self._tdp_diagnostic_task = None
-        self._tdp_diagnostic_after = 0.0
+        # TDP Control, ported from LegionGo2Companion, keeps its own store and RPCs.
+        self._tdp = tdp_backend.Plugin(self._legacy_tdp_settings, self._forget_legacy_tdp)
+
+    # 1.2.x kept TDP in this store; tdp_backend imports these keys once.
+    LEGACY_TDP_KEYS = ("tdp", "tdp_preset", "cpu_boost", "game_profiles")
+
+    @staticmethod
+    def _legacy_tdp_settings():
+        if getattr(settings, "recovery_error", ""):
+            return {}  # Never import defaults that stand in for unreadable settings.
+        return {key: copy.deepcopy(settings.getSetting(key, None))
+                for key in Plugin.LEGACY_TDP_KEYS if settings.getSetting(key, None) is not None}
+
+    async def _start_tdp(self):
+        """Start TDP Control; its failure is reported by its own is_ready(), never fatal here."""
+        module_runtime.begin_start("tdp")
+        try:
+            await self._tdp._migration()
+            with module_runtime.starting("tdp"):
+                await self._tdp._main()
+        except module_runtime.StartStopped:
+            diagnostics.event('tdp', 'module_start_stopped')
+        except Exception as error:
+            diagnostics.event('tdp', 'module_start_failed', level='error', error=error)
+
+    @staticmethod
+    def _forget_legacy_tdp():
+        # `data` is a copy: replace() commits the whole object atomically, or keeps the old one.
+        remaining = settings.data
+        for key in Plugin.LEGACY_TDP_KEYS:
+            remaining.pop(key, None)
+        settings.replace(remaining)
 
     def _check_write_allowed(self):
         error = getattr(settings, "recovery_error", "")
@@ -219,21 +240,6 @@ class Plugin:
         return value
 
     @staticmethod
-    def _app_id(value):
-        if value is None or value == "":
-            return ""
-        if type(value) is int:
-            value = str(value)
-        if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value) is None:
-            raise ValueError("Invalid game ID")
-        return value
-
-    @classmethod
-    def _check_game(cls, expected_app_id):
-        if expected_app_id is not None and cls._app_id(expected_app_id) != cls._active_app:
-            raise RuntimeError("game is no longer active")
-
-    @staticmethod
     def _save_values(values):
         previous = copy.deepcopy(settings.data)
         try:
@@ -249,9 +255,6 @@ class Plugin:
         try:
             apply()
             Plugin._save_values(values)
-        except power_backend.TdpUnavailableError:
-            # This capability rejection occurs before any device write.
-            raise
         except Exception as error:
             try:
                 restore()
@@ -259,87 +262,9 @@ class Plugin:
                 raise RuntimeError(f"{error}; hardware rollback failed: {rollback_error}") from error
             raise RuntimeError(f"{error}; previous hardware settings restored") from error
 
-    @classmethod
-    def _apply_tdp_target(cls, target):
-        with _lock:
-            cls._tdp_writes += 1
-            cls._tdp_observation_epoch += 1
-        try:
-            power_backend.apply_tdp(target)
-            boost = settings.getSetting("cpu_boost", None)
-            if type(boost) is bool:
-                power_backend.write_cpu_boost(boost)
-        except power_backend.TdpUnavailableError as error:
-            with _lock:
-                owner = ("PowerStation" if str(error) == power_backend.POWERSTATION_TDP_ERROR
-                         else "Unavailable")
-                cls._state.update(tdp_backend=owner, tdp_supported=False, tdp_error=str(error))
-            raise
-        else:
-            with _lock:
-                cls._state.update(tdp_backend="RyzenAdj", tdp_supported=True, tdp_error="")
-        finally:
-            # Invalidate older observations even when a successful write leaves
-            # the cached capability values equal, or ownership rejects a write.
-            with _lock:
-                cls._tdp_writes -= 1
-                cls._tdp_observation_epoch += 1
-
-    @classmethod
-    def _tdp_rollback(cls, target):
-        try:
-            boost = power_backend.read_cpu_boost()
-        except (OSError, RuntimeError):
-            boost = None
-        def restore():
-            try:
-                cls._apply_tdp_target(target)
-            finally:
-                if type(boost) is bool:
-                    power_backend.write_cpu_boost(boost)
-        return restore
-
     @staticmethod
     def _save(key, value):
         Plugin._save_values({key: value})
-
-    @classmethod
-    def _reapply_current_tdp(cls):
-        """Apply this game's desired limits, including a deferred profile."""
-        with _tdp_mutation_lock:
-            with _lock:
-                target = dict(cls._state["tdp"])
-            cls._apply_tracked_tdp(target)
-            return target
-
-    @classmethod
-    def _apply_tracked_tdp(cls, target):
-        """Keep requested game context separate from the last applied limits."""
-        with _lock:
-            previous = dict(cls._state.get("_applied_tdp", cls._state["tdp"]))
-        restore = cls._tdp_rollback(previous)
-        try:
-            cls._apply_tdp_target(target)
-        except power_backend.TdpUnavailableError as error:
-            # Ownership rejection happens before a write. Keep the current
-            # game's target pending so a later availability change can apply it.
-            with _lock:
-                cls._state.update(tdp_profile_pending=True,
-                                  tdp_profile_error=str(error),
-                                  tdp_supported=False, tdp_error=str(error))
-            raise
-        except Exception as error:
-            try:
-                restore()
-            except Exception as recovery:
-                error = RuntimeError(f"{error}; TDP rollback failed: {recovery}")
-            with _lock:
-                cls._state.update(tdp_profile_pending=True,
-                                  tdp_profile_error=str(error))
-            raise error
-        with _lock:
-            cls._state.update(tdp_profile_pending=False, tdp_profile_error="",
-                              tdp_supported=True, tdp_error="", _applied_tdp=dict(target))
 
     @classmethod
     def _reconcile_current_controller(cls, recover_custom: bool,
@@ -409,9 +334,6 @@ class Plugin:
         """Acknowledge confirmed writes without unrelated hardware probes."""
         with _lock:
             state = dict(cls._state)
-            state.pop("_applied_tdp", None)
-            state["active_app_id"] = cls._active_app
-            state["tdp"] = dict(state.get("tdp", power_backend.DEFAULT_TDP))
             state["controller"] = dict(state.get("controller", controller_backend.DEFAULT_CONTROLLER))
             for side in ("left", "right"):
                 state[f"module_{side}"] = dict(state.get(
@@ -420,11 +342,10 @@ class Plugin:
         return state
 
     @classmethod
-    def _snapshot(cls, probe_tdp=True):
+    def _snapshot(cls):
         with _lock:
             state = cls._copy_state()
             identity = cls._state
-            tdp_epoch = cls._tdp_observation_epoch
         missing = object()
         before = {key: state.get(key, missing) for key in SNAPSHOT_DIAGNOSTICS}
         if state["settings_error"] or state.get("initializing") or state.get("startup_error"):
@@ -432,13 +353,8 @@ class Plugin:
         if not state.get("supported", False):
             # Never probe AYANEO-specific EC or HID registers merely because a
             # privileged Decky RPC was called on another machine.
-            state["gpu_power_w"] = None
-            state["tdp_supported"] = False
-            state["tdp_error"] = "This device is not an AYANEO 3"
             state["controller_supported"] = False
             state["controller_error"] = "This device is not an AYANEO 3"
-            state["cpu_boost_supported"] = False
-            state["cpu_boost"] = False
             state["charge_bypass_supported"] = False
             state["module_eject_supported"] = False
             state["module_reset_supported"] = False
@@ -446,9 +362,6 @@ class Plugin:
         # Hardware reads can involve sysfs, debugfs and subprocesses. Keep them
         # outside the shared state lock so the monitor loops and RPC writes do
         # not stall behind the QAM's periodic refresh.
-        state["gpu_power_w"] = power_backend.gpu_power_watts()
-        if probe_tdp:
-            state.update(power_backend.tdp_capabilities())
         try:
             controller_backend.vendor_hidraw()  # Discovery only; never issue a vendor command here.
             state["controller_supported"] = True
@@ -458,11 +371,6 @@ class Plugin:
             state["controller_error"] = str(error)
             state["module_left"] = controller_backend.module_info("left", status="unavailable")
             state["module_right"] = controller_backend.module_info("right", status="unavailable")
-        try:
-            state["cpu_boost"] = power_backend.read_cpu_boost()
-            state["cpu_boost_supported"] = True
-        except RuntimeError:
-            state["cpu_boost_supported"] = False
         state["screen_installed"] = display_backend.is_our_display_script(display_backend.LUA_TARGET)
         state["screen_conflict"] = display_backend.display_script_conflict(display_backend.LUA_TARGET)
         state["screen_restart_needed"] = display_backend.restart_needed(state["screen_installed"])
@@ -496,51 +404,74 @@ class Plugin:
             for key in SNAPSHOT_DIAGNOSTICS:
                 # A slow read must not undo newer capability information from
                 # a transaction or monitor. Never publish its copied settings.
-                if key in TDP_DIAGNOSTIC_FIELDS:
-                    continue
                 if key in state and cls._state.get(key, missing) == before[key]:
                     cls._state[key] = state[key]
-            if (probe_tdp and not cls._tdp_writes and tdp_epoch == cls._tdp_observation_epoch
-                    and all(cls._state.get(key, missing) == before[key]
-                            for key in TDP_DIAGNOSTIC_FIELDS)):
-                cls._state.update({key: state[key] for key in TDP_DIAGNOSTIC_FIELDS})
         return state
 
-    def _schedule_tdp_diagnostic(self):
-        # This cache is only for UI status. Every TDP write still checks live
-        # ownership before touching RyzenAdj, including after a download.
-        if self._closing or time.monotonic() < self._tdp_diagnostic_after:
-            return
-        if self._tdp_diagnostic_task is not None and not self._tdp_diagnostic_task.done():
-            return
-        with _lock:
-            state = Plugin._state
-            if (Plugin._tdp_writes or not state.get("supported") or state.get("initializing")
-                    or state.get("startup_error") or getattr(settings, "recovery_error", "")):
-                return
-            epoch = Plugin._tdp_observation_epoch
-            before = {key: state.get(key) for key in TDP_DIAGNOSTIC_FIELDS}
-
-        async def observe():
-            try:
-                observed = await self._offload(power_backend.tdp_capabilities)
-                with _lock:
-                    if (not self._closing and not Plugin._tdp_writes and Plugin._state is state
-                            and Plugin._tdp_observation_epoch == epoch
-                            and all(state.get(key) == before[key] for key in TDP_DIAGNOSTIC_FIELDS)):
-                        state.update(observed)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                diagnostics.event('tdp', 'ownership_probe_failed', level='warning', error=error, repeat=60)
-            finally:
-                self._tdp_diagnostic_after = time.monotonic() + TDP_DIAGNOSTIC_INTERVAL
-
-        self._tdp_diagnostic_task = asyncio.create_task(observe())
-
     async def get_state(self):
-        self._schedule_tdp_diagnostic()
-        return await self._offload(self._snapshot, False)
+        return await self._offload(self._snapshot)
+
+    # TDP / CPU (tdp_backend) ------------------------------------------------------
+
+    async def is_ready(self):
+        return await self._tdp.is_ready()
+
+    async def get_settings(self):
+        return await self._tdp.get_settings()
+
+    async def get_cpu_power_controls(self, app_id="", ac_profile=False):
+        return await self._tdp.get_cpu_power_controls(app_id, ac_profile)
+
+    async def set_cpu_boost(self, enabled, app_id="", ac_profile=False, expected_app_id=None, stored=False):
+        return await self._tdp.set_cpu_boost(enabled, app_id, ac_profile, expected_app_id, stored)
+
+    async def set_epp(self, value, app_id="", ac_profile=False, expected_app_id=None, stored=False):
+        return await self._tdp.set_epp(value, app_id, ac_profile, expected_app_id, stored)
+
+    async def get_power_source(self):
+        return await self._tdp.get_power_source()
+
+    async def retry_helper(self):
+        return await self._tdp.retry_helper()
+
+    async def set_advanced_tdp_control(self, enabled):
+        return await self._tdp.set_advanced_tdp_control(enabled)
+
+    async def get_game_profile(self, app_id):
+        return await self._tdp.get_game_profile(app_id)
+
+    async def list_game_profiles(self):
+        return await self._tdp.list_game_profiles()
+
+    async def set_game_ac_profile(self, app_id, spl, sppt, fppt, ac_separate, preset_name="", stored=False):
+        return await self._tdp.set_game_ac_profile(app_id, spl, sppt, fppt, ac_separate, preset_name, stored)
+
+    async def delete_game_profile(self, app_id):
+        return await self._tdp.delete_game_profile(app_id)
+
+    async def set_game_profile_active(self, app_id, active):
+        return await self._tdp.set_game_profile_active(app_id, active)
+
+    async def set_plugin_enabled(self, enabled):
+        return await self._tdp.set_plugin_enabled(enabled)
+
+    async def get_caps(self):
+        return await self._tdp.get_caps()
+
+    async def set_panel_active(self, active):
+        return await self._tdp.set_panel_active(active)
+
+    async def reapply(self):
+        return await self._tdp.reapply()
+
+    async def set_active_app(self, app_id):
+        return await self._tdp.set_active_app(app_id)
+
+    async def get_tdp_info(self):
+        return await self._tdp.get_tdp_info()
+
+    async def apply_tdp(self, spl, sppt, fppt, app_id="", preset_name="", expected_app_id=None, stored=False):
+        return await self._tdp.apply_tdp(spl, sppt, fppt, app_id, preset_name, expected_app_id, stored)
 
     async def get_battery_status(self):
         return await self._offload(ec_backend.battery_status)
@@ -561,160 +492,6 @@ class Plugin:
         if expected_version is None:
             raise ValueError("Select a release version before downloading")
         return await self._offload(companion_common.updater.download, expected_version)
-
-    async def set_tdp(self, raw, preset=None, expected_app_id=None):
-        value = power_backend.normalize_tdp(raw)
-        profile_name = power_backend.tdp_preset(value, preset)
-
-        def mutate():
-            with _tdp_mutation_lock:
-                self._check_game(expected_app_id)
-                previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
-                self._apply_and_save(
-                    lambda: self._apply_tdp_target(value),
-                    self._tdp_rollback(previous),
-                    {"tdp": value, "tdp_preset": profile_name})
-                with _lock:
-                    Plugin._state["tdp"] = value
-                    Plugin._state["tdp_preset"] = profile_name
-                    Plugin._state.update(tdp_profile_pending=False, tdp_profile_error="",
-                                         _applied_tdp=dict(value))
-
-        await self._offload(mutate)
-        return self._copy_state()
-
-    async def set_cpu_boost(self, enabled):
-        value = self._boolean(enabled)
-        def mutate():
-            with _tdp_mutation_lock:
-                previous = power_backend.read_cpu_boost()
-                self._apply_and_save(lambda: power_backend.write_cpu_boost(value),
-                    lambda: power_backend.write_cpu_boost(previous), {"cpu_boost": value})
-                with _lock:
-                    Plugin._state["cpu_boost"] = value
-                    Plugin._state["cpu_boost_supported"] = True
-        await self._offload(mutate)
-        return self._copy_state()
-
-    async def get_game_profile(self, app_id):
-        app_id = self._app_id(app_id)
-        def read():
-            # A settings commit holds its own lock across disk I/O. Waiting
-            # for a consistent profile belongs in a worker, never in asyncio.
-            profiles = settings.getSetting("game_profiles", {})
-            value = profiles.get(app_id) if isinstance(profiles, dict) else None
-            return {"exists": isinstance(value, dict),
-                    "profile": power_backend.normalize_tdp(value) if isinstance(value, dict) else {},
-                    "preset": power_backend.tdp_preset(value, value.get("preset"))
-                    if isinstance(value, dict) else ""}
-        return await self._offload(read)
-
-    async def set_game_profile(self, app_id, raw, preset=None, expected_app_id=None):
-        app_id = self._app_id(app_id)
-        value = power_backend.normalize_tdp(raw)
-        profile_name = power_backend.tdp_preset(value, preset)
-
-        def mutate():
-            with _tdp_mutation_lock:
-                self._check_game(expected_app_id)
-                with _lock:
-                    if not app_id or app_id != Plugin._active_app:
-                        raise RuntimeError("game is no longer active")
-                    previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
-                    profiles = settings.getSetting("game_profiles", {})
-                    profiles = dict(profiles) if isinstance(profiles, dict) else {}
-                    if app_id not in profiles and len(profiles) >= 512:
-                        raise RuntimeError("Maximum number of game profiles reached")
-                    profiles[app_id] = {**value, "preset": profile_name}
-                self._apply_and_save(lambda: self._apply_tdp_target(value),
-                    self._tdp_rollback(previous), {"game_profiles": profiles})
-                with _lock:
-                    Plugin._state["tdp"] = value
-                    Plugin._state["tdp_preset"] = profile_name
-                    Plugin._state.update(tdp_profile_pending=False, tdp_profile_error="",
-                                         _applied_tdp=dict(value))
-
-        await self._offload(mutate)
-        return self._copy_state()
-
-    async def delete_game_profile(self, app_id, expected_app_id=None):
-        app_id = self._app_id(app_id)
-
-        def mutate():
-            with _tdp_mutation_lock:
-                self._check_game(expected_app_id)
-                with _lock:
-                    profiles = settings.getSetting("game_profiles", {})
-                    profiles = dict(profiles) if isinstance(profiles, dict) else {}
-                    profiles.pop(app_id, None)
-                    target = power_backend.normalize_tdp(settings.getSetting("tdp", power_backend.DEFAULT_TDP))
-                    profile_name = power_backend.tdp_preset(
-                        target, settings.getSetting("tdp_preset", None))
-                    active = bool(app_id and app_id == Plugin._active_app)
-                    previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
-                if active:
-                    self._apply_and_save(lambda: self._apply_tdp_target(target),
-                        self._tdp_rollback(previous), {"game_profiles": profiles})
-                else:
-                    self._save("game_profiles", profiles)
-                with _lock:
-                    if active:
-                        Plugin._state["tdp"] = target
-                        Plugin._state["tdp_preset"] = profile_name
-                        Plugin._state.update(tdp_profile_pending=False, tdp_profile_error="",
-                                             _applied_tdp=dict(target))
-
-        await self._offload(mutate)
-        return self._copy_state()
-
-    async def set_active_app(self, app_id):
-        app_id = self._app_id(app_id)
-        if not companion_common.supported_device():
-            with _lock:
-                Plugin._active_app = app_id
-            return
-
-        with _lock:
-            # Do not reserve the public queue behind the monitor's slow TDP
-            # transaction when this heartbeat has no work to perform.
-            if app_id == Plugin._active_app:
-                return
-
-        def mutate():
-            with _tdp_mutation_lock:
-                with _lock:
-                    # The power monitor owns retries of a pending target. A
-                    # six-second frontend heartbeat must not start a second
-                    # slow ownership probe while holding the public RPC queue.
-                    if app_id == Plugin._active_app:
-                        return None
-                    profiles = settings.getSetting("game_profiles", {})
-                    profile = (profiles.get(app_id)
-                               if app_id and isinstance(profiles, dict) else None)
-                    target = power_backend.normalize_tdp(
-                        profile if isinstance(profile, dict)
-                        else settings.getSetting("tdp", power_backend.DEFAULT_TDP))
-                    profile_name = power_backend.tdp_preset(
-                        target,
-                        profile.get("preset") if isinstance(profile, dict)
-                        else settings.getSetting("tdp_preset", None))
-                    # App tracking is independent of SMU/PowerStation availability.
-                    # A snapshot must never pair a new game ID with the old profile.
-                    previous = dict(Plugin._state.get("_applied_tdp", Plugin._state["tdp"]))
-                    Plugin._state["_applied_tdp"] = previous
-                    Plugin._active_app = app_id
-                    Plugin._state.update(tdp=target, tdp_preset=profile_name,
-                                         tdp_profile_pending=True, tdp_profile_error="")
-                try:
-                    self._apply_tracked_tdp(target)
-                except power_backend.TdpUnavailableError:
-                    return None
-                return isinstance(profile, dict)
-
-        used_profile = await self._offload(mutate)
-        if used_profile is not None:
-            decky.logger.info(
-                f"{LOG} applied {'game ' + app_id if used_profile else 'global'} TDP")
 
     @classmethod
     def _controller_save_values(cls, previous, value):
@@ -1128,21 +905,18 @@ class Plugin:
 
     async def _restore_hardware(self, rear_buttons=False):
         """Retry pending boot work; each attempt reads the latest saved choices."""
-        pending = {"tdp", "controller"}
+        pending = {"controller"}
         if rear_buttons:
             pending.add("rear_buttons")
-        for key in ("charge_bypass", "cpu_boost"):
-            if type(settings.getSetting(key, None)) is bool:
-                pending.add(key)
+        if type(settings.getSetting("charge_bypass", None)) is bool:
+            pending.add("charge_bypass")
         attempt = 0
         while pending:
             await asyncio.sleep((1, 2, 4, 8, 30, 60)[min(attempt, 5)])
             attempt += 1
             for key in tuple(sorted(pending)):
                 try:
-                    if key == "tdp":
-                        await self._offload(Plugin._reapply_current_tdp)
-                    elif key == "controller":
+                    if key == "controller":
                         await self._offload(Plugin._restore_current_controller)
                     elif key == "rear_buttons":
                         await self._offload(Plugin._restore_rear_buttons)
@@ -1152,23 +926,19 @@ class Plugin:
                     decky.logger.info(f"{LOG} restored {key} after startup")
                 except asyncio.CancelledError:
                     raise
-                except power_backend.TdpUnavailableError as error:
-                    pending.remove(key)
-                    decky.logger.info(f"{LOG} {error}")
                 except Exception as error:
                     decky.logger.warning(f"{LOG} {key} restore attempt failed: {error}")
 
     def _restore_saved_control(self, key, only_if_changed=False):
-        # CPU Boost is reapplied by TDP writes; charge control is independent.
-        mutation_lock = _tdp_mutation_lock if key == "cpu_boost" else _charge_mutation_lock
-        with mutation_lock:
+        # Only charge control is restored here; TDP and CPU controls belong to tdp_backend.
+        if key != "charge_bypass":
+            raise ValueError(f"unknown saved control {key!r}")
+        with _charge_mutation_lock:
             value = settings.getSetting(key, None)
             if type(value) is not bool:
                 return
-            read, write = ((power_backend.read_cpu_boost, power_backend.write_cpu_boost) if key == "cpu_boost"
-                           else (ec_backend.read_charge_bypass, ec_backend.write_charge_bypass))
-            if not only_if_changed or read() != value:
-                write(value)
+            if not only_if_changed or ec_backend.read_charge_bypass() != value:
+                ec_backend.write_charge_bypass(value)
             with _lock:
                 Plugin._state[key] = value
                 Plugin._state[key + "_supported"] = True
@@ -1228,68 +998,6 @@ class Plugin:
                         audio_calibration_available=True, audio_profile="AYANEO v0.65",
                         audio_fix_error="")
             return True
-
-    async def _ac_loop(self):
-        """Restore deferred profiles, charger/resume limits and CPU drift."""
-        previous = None
-        suspend_offset = _suspend_clock_offset()
-        next_control_check = 0.0
-        next_profile_retry = time.monotonic() + 5.0
-        pending_delays = []
-        settle_at = 0.0
-        while True:
-            await asyncio.sleep(1)
-            try:
-                current = await self._offload(ec_backend.ac_online)
-                offset = _suspend_clock_offset()
-                resumed = (offset is not None and suspend_offset is not None
-                           and offset - suspend_offset > CONTROLLER_RESUME_THRESHOLD)
-                if offset is not None:
-                    suspend_offset = offset
-                if (previous is not None and current != previous) or resumed:
-                    pending_delays = [0.5, 1.0, 1.5, 3.0]
-                    settle_at = time.monotonic() + pending_delays.pop(0)
-                    next_control_check = 0.0
-                previous = current
-                now = time.monotonic()
-                tdp_attempted = False
-                if settle_at and now >= settle_at:
-                    # Advance only after success; transient failures are retried.
-                    tdp_attempted = True
-                    try:
-                        await self._offload(Plugin._reapply_current_tdp)
-                    except power_backend.TdpUnavailableError as error:
-                        # The profile remains pending. A separate retry handles
-                        # ownership changes without requiring another AC event.
-                        settle_at = 0.0
-                        pending_delays = []
-                        decky.logger.debug(f"{LOG} TDP restoration deferred: {error}")
-                    except Exception as error:
-                        settle_at = now + 5.0
-                        diagnostics.event('tdp', 'charger_reapply_retrying', level='warning', error=error, repeat=60)
-                    else:
-                        settle_at = now + pending_delays.pop(0) if pending_delays else 0.0
-                    next_profile_retry = now + 5.0
-                with _lock:
-                    profile_pending = Plugin._state.get("tdp_profile_pending", False)
-                if profile_pending and not tdp_attempted and now >= next_profile_retry:
-                    next_profile_retry = now + 5.0
-                    try:
-                        await self._offload(Plugin._reapply_current_tdp)
-                    except power_backend.TdpUnavailableError as error:
-                        decky.logger.debug(f"{LOG} game profile waiting for TDP control: {error}")
-                    except Exception as error:
-                        diagnostics.event('tdp', 'profile_reapply_retrying', level='warning', error=error, repeat=60)
-                if now >= next_control_check:
-                    next_control_check = now + 15.0
-                    try:
-                        await self._offload(self._restore_saved_control, "cpu_boost", True)
-                    except Exception as error:
-                        decky.logger.debug(f"{LOG} cpu_boost verification deferred: {error}")
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                diagnostics.event('tdp', 'power_monitor_retrying', level='warning', error=error, repeat=60)
 
     async def _charge_loop(self):
         """Verify charging independently of slow TDP retries and downloads."""
@@ -1603,8 +1311,6 @@ class Plugin:
             return await complete(self._startup_task)
         self._closing = False
         self._initializing = True
-        self._tdp_diagnostic_task = None
-        self._tdp_diagnostic_after = 0.0
         companion_common.updater.reset()
         with _lock:
             Plugin._state = {"initializing": True}
@@ -1718,13 +1424,6 @@ class Plugin:
         except (OSError, RuntimeError):
             charge_control = None
             charge_bypass = False
-        saved_tdp = power_backend.normalize_tdp(settings.getSetting("tdp", power_backend.DEFAULT_TDP))
-        try:
-            cpu_boost = await self._offload(power_backend.read_cpu_boost) if hardware_allowed else False
-            cpu_boost_supported = is_supported
-        except RuntimeError:
-            cpu_boost = False
-            cpu_boost_supported = False
         initial_state = {
             "supported": is_supported,
             "settings_error": storage_error,
@@ -1732,16 +1431,6 @@ class Plugin:
             "startup_error": "",
             "device": companion_common.dmi("product_name") or "unknown",
             "version": companion_common.updater.plugin_version(),
-            "tdp_backend": "Checking" if hardware_allowed else "Unavailable",
-            "tdp_supported": False,
-            "tdp_error": "Checking TDP ownership" if hardware_allowed else "Hardware controls are unavailable",
-            "tdp": saved_tdp,
-            "tdp_preset": power_backend.tdp_preset(saved_tdp, settings.getSetting("tdp_preset", None)),
-            "tdp_profile_pending": hardware_allowed,
-            "tdp_profile_error": "",
-            "presets": power_backend.PRESETS,
-            "cpu_boost_supported": cpu_boost_supported,
-            "cpu_boost": cpu_boost,
             "controller": saved_controller,
             # Without a saved choice the controller keeps its own lighting and
             # vibration; the monitors read them instead of applying defaults.
@@ -1766,7 +1455,6 @@ class Plugin:
             "tm_guard_enabled": tm_guard_enabled,
             "tm_guard_status": "Monitoring" if tm_guard_enabled else "Disabled",
             "tm_guard_recoveries": 0,
-            "gpu_power_w": None,
             # ALSA commands have multi-second timeouts. Their background
             # discovery must not delay unrelated controls during startup.
             "audio_fix_supported": False,
@@ -1779,18 +1467,17 @@ class Plugin:
         }
         with _lock:
             Plugin._state = initial_state
-            Plugin._active_app = ""
-        self._schedule_tdp_diagnostic()
         if hardware_allowed and not self._closing:
             Plugin._restore_task = module_runtime.background_task(
                 self._restore_hardware(reprogram_rear_buttons))
             Plugin._edid_task = module_runtime.background_task(self._edid_loop())
-            Plugin._ac_task = module_runtime.background_task(self._ac_loop())
             Plugin._charge_task = module_runtime.background_task(self._charge_loop())
             Plugin._module_task = module_runtime.background_task(self._module_loop())
             Plugin._tm_guard_task = module_runtime.background_task(self._tm_guard_loop())
             Plugin._vibration_gain_task = module_runtime.background_task(self._vibration_gain_loop())
             Plugin._audio_task = module_runtime.background_task(self._restore_audio())
+        if hardware_allowed and not self._closing:
+            await self._start_tdp()
         decky.logger.info(f"{LOG} started on {Plugin._state['device']}")
 
     async def _unload(self):
@@ -1800,15 +1487,15 @@ class Plugin:
         companion_common.updater.close()
         async def cleanup():
             diagnostics.event('plugin', 'shutdown_started', source='backend')
+            module_runtime.request_stop("tdp")  # a start still running applies nothing more
             if self._startup_task is not None and not self._startup_task.done():
                 self._startup_task.cancel()
                 await asyncio.gather(self._startup_task, return_exceptions=True)
             tasks = [task for task in (
                 Plugin._audio_task, Plugin._restore_task, Plugin._edid_task,
-                Plugin._ac_task, Plugin._charge_task, Plugin._module_task, Plugin._tm_guard_task,
+                Plugin._charge_task, Plugin._module_task, Plugin._tm_guard_task,
                 Plugin._vibration_gain_task,
                 Plugin._fan_task,
-                self._tdp_diagnostic_task,
             ) if task is not None]
             for task in tasks:
                 task.cancel()
@@ -1816,10 +1503,13 @@ class Plugin:
                 await asyncio.gather(*tasks, return_exceptions=True)
             while self._rpc_jobs or self._workers:
                 await asyncio.gather(*tuple(self._rpc_jobs | self._workers), return_exceptions=True)
-            for name in ("_audio_task", "_restore_task", "_edid_task", "_ac_task", "_charge_task",
+            for name in ("_audio_task", "_restore_task", "_edid_task", "_charge_task",
                          "_module_task", "_tm_guard_task", "_vibration_gain_task", "_fan_task"):
                 setattr(Plugin, name, None)
-            self._tdp_diagnostic_task = None
+            try:
+                await self._tdp._unload()
+            finally:
+                await module_runtime.drain("tdp")
             try:
                 await self._offload(fan_controller.close)
             except Exception as error:
@@ -1878,12 +1568,11 @@ class Plugin:
                 decky.logger.info(f"{LOG} restored automatic charging before uninstall")
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not restore charging before uninstall: {error}")
-        if is_supported and settings.getSetting("cpu_boost", True) is False:
-            try:
-                await self._offload(power_backend.write_cpu_boost, True)
-                decky.logger.info(f"{LOG} restored CPU Boost before uninstall")
-            except Exception as error:
-                decky.logger.warning(f"{LOG} could not restore CPU Boost before uninstall: {error}")
+        try:
+            # CPU Boost and EPP back to the values captured before the first change.
+            await self._tdp._uninstall()
+        except Exception as error:
+            decky.logger.warning(f"{LOG} could not restore CPU power controls before uninstall: {error}")
         if is_supported and (display_backend.display_script_owned(display_backend.LUA_TARGET)
                              or display_backend.display_script_owned(display_backend.LEGACY_LUA_TARGET)):
             try:
