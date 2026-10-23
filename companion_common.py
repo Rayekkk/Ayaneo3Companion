@@ -56,11 +56,20 @@ HARDWARE_DOWNLOAD_SECONDS = 60.0
 HARDWARE_NETWORK_TIMEOUT = 10.0
 
 
+_dmi_cache: dict[str, str] = {}
+
+
 def dmi(name: str) -> str:
+    # Firmware identity never changes while the system runs; it is asked before every hardware write.
+    if name in _dmi_cache:
+        return _dmi_cache[name]
     try:
-        return Path(f"/sys/class/dmi/id/{name}").read_text().strip()
+        value = Path(f"/sys/class/dmi/id/{name}").read_text().strip()
     except OSError:
         return ""
+    if value:
+        _dmi_cache[name] = value
+    return value
 
 
 def supported_device() -> bool:

@@ -835,13 +835,26 @@ class Plugin:
 
     async def _edid_loop(self):
         """Reapply after every gamescope session recreates its EDID copy."""
+        def file_key(path):
+            try:
+                info = os.lstat(path)
+                return info.st_ino, info.st_size, info.st_mtime_ns
+            except (OSError, TypeError):
+                return None
+        checked = None
         while True:
             try:
-                # A SteamOS profile replaces our definition but not the HDR peak fix.
-                if (display_backend.is_our_display_script(display_backend.LUA_TARGET)
-                        or (display_backend.native_profile_present()
-                            and settings.getSetting("screen_fix_enabled", None) is True)):
-                    await self._offload(display_backend.patch_published_edid)
+                # Gamescope replaces edid.bin per session and a profile change replaces the
+                # script: an unchanged stat needs no read (it checked every file every second).
+                key = (file_key(display_backend.LUA_TARGET), file_key(display_backend.PUBLISHED_EDID),
+                       display_backend.native_profile_present(), settings.getSetting("screen_fix_enabled", None))
+                if key != checked:
+                    # A SteamOS profile replaces our definition but not the HDR peak fix.
+                    if (display_backend.is_our_display_script(display_backend.LUA_TARGET)
+                            or (display_backend.native_profile_present()
+                                and settings.getSetting("screen_fix_enabled", None) is True)):
+                        await self._offload(display_backend.patch_published_edid)
+                    checked = key  # A write changes the stat, so it is checked once more.
             except asyncio.CancelledError:
                 raise
             except Exception as error:

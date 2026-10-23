@@ -2635,7 +2635,7 @@ class Plugin:
         if self._tasks:
             await asyncio.wait(self._tasks, timeout=1.0)
         self._tasks = []
-        decky.logger.info(f"{LOG} unloaded")
+        decky.logger.info(f"{LOG} TDP Control unloaded")
 
     async def _uninstall(self):
         """Hand the hardware back, else the firmware stays on the last 'custom' triplet.

@@ -952,6 +952,97 @@ class LogicTests(unittest.TestCase):
                  mock.patch.object(os, "open", side_effect=AssertionError("no reset")):
                 self.assertFalse(controller_backend._reset_stale_tm_gamepad())
 
+    def test_edid_loop_checks_the_files_only_when_their_stat_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script, edid = root / "oled.lua", root / "edid.bin"
+            script.write_text("ours"); edid.write_bytes(b"x" * 256)
+            ticks = []
+            async def sleep(_seconds):
+                ticks.append(1)
+                if len(ticks) == 3:
+                    edid.unlink(); edid.write_bytes(b"y" * 256)  # gamescope's next session
+                if len(ticks) == 6:
+                    raise asyncio.CancelledError
+            plugin = main.Plugin()
+            async def offload(fn, *args):
+                return fn(*args)
+            with mock.patch.object(main.display_backend, "LUA_TARGET", script), \
+                 mock.patch.object(main.display_backend, "PUBLISHED_EDID", edid), \
+                 mock.patch.object(main.display_backend, "is_our_display_script", return_value=True) as ours, \
+                 mock.patch.object(main.display_backend, "native_profile_present", return_value=False), \
+                 mock.patch.object(main.display_backend, "patch_published_edid", return_value=False) as patch, \
+                 mock.patch.object(plugin, "_offload", side_effect=offload), \
+                 mock.patch.object(main.asyncio, "sleep", side_effect=sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(plugin._edid_loop())
+            self.assertEqual(patch.call_count, 2, "once at start, once for the new edid.bin, not every second")
+            self.assertEqual(ours.call_count, 2)
+
+    def test_dmi_is_read_once_but_a_failed_read_is_retried(self):
+        answers = iter([OSError("not yet"), "AYANEO 3\n"])
+        reads = []
+        def read(path):
+            reads.append(path)
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        with mock.patch.dict(companion_common._dmi_cache, clear=True), \
+             mock.patch.object(Path, "read_text", read):
+            self.assertEqual(companion_common.dmi("product_name"), "")
+            self.assertEqual(companion_common.dmi("product_name"), "AYANEO 3")
+            self.assertEqual(companion_common.dmi("product_name"), "AYANEO 3")
+            self.assertEqual(len(reads), 2)
+
+    def test_vendor_hidraw_is_scanned_again_only_when_its_node_changes(self):
+        import types
+        inode = [10]
+        stat = lambda path: types.SimpleNamespace(st_ino=inode[0], st_rdev=7)
+        with mock.patch.object(controller_backend, "_vendor_hidraw_cached", None), \
+             mock.patch.object(controller_backend.glob, "glob", return_value=["/sys/class/hidraw/hidraw2"]) as found, \
+             mock.patch.object(Path, "resolve", lambda path: path), \
+             mock.patch.object(Path, "read_bytes", lambda path: b"\x06\x00\xff\x09\x01"), \
+             mock.patch.object(Path, "read_text", lambda path: "HID_ID=0003:00001C4F:00000002\n"), \
+             mock.patch.object(controller_backend, "_kernel_hid_ayaneo_active", return_value=False), \
+             mock.patch.object(controller_backend.os, "stat", side_effect=stat):
+            self.assertEqual(controller_backend.vendor_hidraw(), "/dev/hidraw2")
+            self.assertEqual(controller_backend.vendor_hidraw(), "/dev/hidraw2")
+            self.assertEqual(found.call_count, 1, "the same node is reused without a scan")
+            inode[0] = 11  # TM or a module swap re-enumerated the controller
+            self.assertEqual(controller_backend.vendor_hidraw(), "/dev/hidraw2")
+            self.assertEqual(found.call_count, 2)
+
+    def test_input_node_identity_is_read_again_only_for_a_recreated_node(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            node = root / "event5"; node.write_text("")
+            ident = root / "sys" / "event5" / "device"; (ident / "id").mkdir(parents=True)
+            for leaf, value in (("id/vendor", "1c4f"), ("id/product", "0002"), ("phys", "usb-1/input1")):
+                (ident / leaf).write_text(value + "\n")
+            reads = []
+            real = Path.read_text
+            def counting(path, *args, **kwargs):
+                reads.append(path.name)
+                return real(path, *args, **kwargs)
+            with mock.patch.object(controller_backend, "INPUT_SYSFS", root / "sys"), \
+                 mock.patch.dict(controller_backend._event_identity_cache, clear=True), \
+                 mock.patch.object(Path, "read_text", counting):
+                first = controller_backend._input_event_identity(str(node))
+                self.assertEqual(first, ("1c4f", "0002", "usb-1/input1"))
+                self.assertEqual(controller_backend._input_event_identity(str(node)), first)
+                self.assertEqual(len(reads), 3, "the second call reads nothing from sysfs")
+                (ident / "id" / "vendor").write_text("045e\n")
+                node.unlink(); node.write_text("x")  # the kernel recreated the node (new inode)
+                second = controller_backend._input_event_identity(str(node))
+                self.assertEqual(second[0], "045e")
+                (ident / "id" / "vendor").write_text("\n")
+                gone = root / "event6"  # a node that is being created: never cached empty
+                gone.write_text("")
+                with mock.patch.object(controller_backend, "INPUT_SYSFS", root / "missing"):
+                    self.assertEqual(controller_backend._input_event_identity(str(gone)), ("", "", ""))
+                self.assertNotIn(str(gone), controller_backend._event_identity_cache)
+
     def test_only_an_arrow_on_the_controllers_own_keyboard_counts_as_latched(self):
         import types
         held = {"/dev/input/event4": {103}, "/dev/input/event7": {108}, "/dev/input/event9": {38}}

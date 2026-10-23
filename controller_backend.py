@@ -270,7 +270,22 @@ def _kernel_hid_ayaneo_active(device_path: Path) -> bool:
                for name in ("module_left", "module_right", "eject", "reset"))
 
 
+_vendor_hidraw_cached: tuple[str, tuple[int, int]] | None = None
+
+
 def vendor_hidraw() -> str:
+    # Asked every half second: reuse the node while the same device node exists.
+    # A driver change or re-enumeration recreates it, which a stat notices.
+    global _vendor_hidraw_cached
+    if _vendor_hidraw_cached is not None:
+        path, key = _vendor_hidraw_cached
+        try:
+            info = os.stat(path)
+            if (info.st_ino, getattr(info, "st_rdev", 0)) == key:
+                return path
+        except OSError:
+            pass
+        _vendor_hidraw_cached = None
     for sys_path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
         device_path = Path(sys_path).resolve() / "device"
         try:
@@ -284,7 +299,13 @@ def vendor_hidraw() -> str:
                     "kernel hid-ayaneo is active; direct controller commands are disabled "
                     "to prevent conflicting HID transactions"
                 )
-            return "/dev/" + Path(sys_path).name
+            path = "/dev/" + Path(sys_path).name
+            try:
+                info = os.stat(path)
+                _vendor_hidraw_cached = (path, (info.st_ino, getattr(info, "st_rdev", 0)))
+            except OSError:
+                pass
+            return path
     raise RuntimeError("AYANEO vendor HID interface not found")
 
 
@@ -697,9 +718,25 @@ def _event_has_rumble(node: str) -> bool:
         return False
 
 
+INPUT_SYSFS = Path("/sys/class/input")
+_event_identity_cache: dict[str, tuple[tuple[int, int], tuple[str, str, str]]] = {}
+
+
 def _input_event_identity(node: str) -> tuple[str, str, str]:
-    """Return the kernel vendor, product and physical path for an event node."""
-    device = Path("/sys/class/input") / Path(node).name / "device"
+    """Return the kernel vendor, product and physical path for an event node.
+
+    Cached per device node: the guards ask every half second for every node,
+    and a recreated node gets a new inode, so a stat is enough to notice it.
+    """
+    try:
+        info = os.stat(node)
+        key = (info.st_ino, getattr(info, "st_rdev", 0))
+    except OSError:
+        key = None
+    cached = _event_identity_cache.get(node)
+    if key is not None and cached is not None and cached[0] == key:
+        return cached[1]
+    device = INPUT_SYSFS / Path(node).name / "device"
 
     def read(name: str) -> str:
         try:
@@ -707,7 +744,10 @@ def _input_event_identity(node: str) -> tuple[str, str, str]:
         except OSError:
             return ""
 
-    return read("id/vendor"), read("id/product"), read("phys")
+    identity = read("id/vendor"), read("id/product"), read("phys")
+    if key is not None and identity[0]:  # a node still being created reads empty
+        _event_identity_cache[node] = (key, identity)
+    return identity
 
 
 def _rumble_event_node() -> str | None:
