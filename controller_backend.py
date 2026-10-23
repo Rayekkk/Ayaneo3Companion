@@ -156,13 +156,16 @@ AYA_CHECK = _pad([0, 0, 0, 0, 0x08])
 AYA_CUSTOM = _pad([0, 0, 0, 0, 0x0A, 0x02])
 AYA_SAVE = _pad([0, 0, 0, 0, 0x05])
 AYA_CUSTOM_REQUIRED_INDEX = 18
+# Response byte 18 is the controller mode: 2 is the custom mode Companion
+# programs. Measured on the console: the TM button switches to 3; HHD and
+# retail HX 370 hardware report 1 for the other firmware mode.
+AYA_NON_CUSTOM_MODES = frozenset({1, 3})
 
 
 def controller_requires_custom(response: bytes) -> bool:
-    # This status flag is not part of the one-byte-shifted RGB payload. Retail
-    # HX 370 hardware and HHD both expose it at response byte 18.
+    # This status flag is not part of the one-byte-shifted RGB payload.
     return len(response) > AYA_CUSTOM_REQUIRED_INDEX and \
-        response[AYA_CUSTOM_REQUIRED_INDEX] == 1
+        response[AYA_CUSTOM_REQUIRED_INDEX] in AYA_NON_CUSTOM_MODES
 
 
 def decode_module_layout(response: bytes) -> tuple[dict, dict]:
@@ -193,7 +196,9 @@ AYA3_BUTTON_TABLE = {
     0x12: (0x02, 0x00, 0x0F),  # L / LC1
     0x13: (0x02, 0x00, 0x15),  # R / RC1
     0x16: (0x00, 0x00, 0x72),  # F23 / Guide
-    0x17: (0x02, 0x08, 0x07),  # Left Meta + D / legacy QAM
+    # QAM: the firmware's own F24. HHD programs Left Meta + D here and reads the
+    # D itself; InputPlumber's Meta+D chord never opened QAM (checked on the console).
+    0x17: (0x00, 0x00, 0x73),  # F24 / QAM
     0x18: (0x00, 0x00, 0x6B),  # F16
 }
 AYA3_REAR_BUTTON_SLOTS = (0x12, 0x13)
@@ -317,8 +322,112 @@ def _switch_to_custom_mode_fd(fd, response: bytes | None = None) -> bool:
         time.sleep(delay)
         current = _hid_exchange(fd, AYA_CHECK)
         if current and not controller_requires_custom(current):
+            _reset_stale_tm_gamepad()
+            _consume_power_cycle()  # the next TM press gets its own power cycle
             return True
     raise RuntimeError("controller did not enter custom mode")
+
+
+USB_DEVICES = Path("/sys/bus/usb/devices")
+TM_GAMEPAD_ID = ("4001", "0428")
+USBDEVFS_RESET = 0x5514  # _IO('U', 20)
+TM_GAMEPAD_RETURN_S = 5.0
+TM_POWER_OFF_S = 2.0
+TM_SWITCH_WINDOW_S = 30.0
+_tm_power_cycled_at = None
+
+
+def power_cycle_controller() -> None:
+    """Cut the controller's power through the EC, then restore it.
+
+    Measured on the console: leaving TM mode with AYA_CUSTOM alone can leave a
+    key held in the firmware's keyboard report (an arrow that is never
+    released, also merged into every later LC/RC/QAM report). Only losing power
+    clears it; the controller then returns still in TM mode and is switched
+    back within TM_SWITCH_WINDOW_S without that leftover.
+    """
+    global _tm_power_cycled_at
+    companion_common.require_supported_device("controller power cycle")
+    ec_backend.set_controller_power(False)
+    time.sleep(TM_POWER_OFF_S)
+    ec_backend.set_controller_power(True)
+    _tm_power_cycled_at = time.monotonic()
+
+
+def _power_cycled_recently() -> bool:
+    return _tm_power_cycled_at is not None and time.monotonic() - _tm_power_cycled_at < TM_SWITCH_WINDOW_S
+
+
+def _consume_power_cycle() -> None:
+    global _tm_power_cycled_at
+    _tm_power_cycled_at = None
+
+
+EVIOCGKEY = 0x80604518  # _IOR('E', 0x18, 96): the keys an evdev node reports as held
+ARROW_KEYS = (103, 105, 106, 108)  # KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN
+
+
+def latched_arrow_key() -> bool:
+    """An arrow held on the controller's own keyboard interface.
+
+    In custom mode the D-pad goes to the gamepad and this interface never sends
+    arrows. Measured: a D-pad held while TM mode is left stays latched in the
+    firmware and appears with the next LC/RC/LC1/RC1/QAM report; only a power
+    cycle clears it, and a held D-pad cannot be seen beforehand.
+    """
+    for node in glob.glob("/dev/input/event*"):
+        if _input_event_identity(node)[:2] != ("1c4f", "0002"):
+            continue
+        import fcntl  # Linux only, like these nodes
+        try:
+            fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            keys = bytearray(96)
+            fcntl.ioctl(fd, EVIOCGKEY, keys)
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+        if any(keys[key // 8] >> (key % 8) & 1 for key in ARROW_KEYS):
+            return True
+    return False
+
+
+def _reset_stale_tm_gamepad() -> bool:
+    """Make the gamepad leave its TM-mode USB identity.
+
+    Measured on the console: after AYA_CUSTOM from TM mode the firmware runs the
+    custom mode but the USB gamepad stays 4001:0428 (the kernel then floods
+    "input irq status -75" and there is no Xbox pad). A port reset makes the
+    kernel see "device firmware changed" and enumerate it again as 045e:028e.
+    """
+    import errno
+    for device in USB_DEVICES.glob("*"):
+        try:
+            if ((device / "idVendor").read_text().strip(), (device / "idProduct").read_text().strip()) != TM_GAMEPAD_ID:
+                continue
+            node = f"/dev/bus/usb/{int((device / 'busnum').read_text()):03d}/{int((device / 'devnum').read_text()):03d}"
+        except (OSError, ValueError):
+            continue
+        import fcntl  # Linux only, like the device it resets
+        fd = os.open(node, os.O_WRONLY)
+        try:
+            fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+        except OSError as error:
+            if error.errno != errno.ENODEV:  # ENODEV: the reset already re-enumerated the gamepad
+                raise
+        finally:
+            os.close(fd)
+        decky.logger.info(f"{LOG} reset the gamepad out of its TM-mode USB identity")
+        # The Xbox pad returns about 1.5 s later; FF_GAIN and the LC1/RC1 table
+        # written right after this would otherwise fail and be skipped.
+        deadline = time.monotonic() + TM_GAMEPAD_RETURN_S
+        while time.monotonic() < deadline and not _rumble_event_node():
+            time.sleep(0.1)
+        return True
+    return False
 
 
 def read_module_layout() -> tuple[dict, dict]:
@@ -470,6 +579,9 @@ def reconcile_controller(config: dict, recover_custom: bool,
 
     With repair=False only an accidental TM mode change is undone; the
     controller's own lighting and vibration are left as they are.
+    TM mode is left in two steps: "tm_power_cycle" asks the caller to cut the
+    controller's power (power_cycle_controller); the controller returns still
+    in TM mode and only then is switched back.
     """
     companion_common.require_supported_device("controller monitoring")
     config = normalize_controller(config)
@@ -483,6 +595,8 @@ def reconcile_controller(config: dict, recover_custom: bool,
             if controller_requires_custom(response):
                 if not recover_custom:
                     return "tm_mode", path
+                if not _power_cycled_recently():
+                    return "tm_power_cycle", path
                 _switch_to_custom_mode_fd(fd, response)
                 if not repair:
                     return "mode_restored", path

@@ -50,6 +50,54 @@ class ControllerOwnershipTests(unittest.TestCase):
         self.apply.assert_not_called()
         self.gain.assert_not_called()
 
+    def test_leaving_tm_mode_programs_lc1_rc1_again_until_it_succeeds(self):
+        self.stack.enter_context(patch.object(main.Plugin, "_rear_buttons_pending", False))
+        self.state.update(button_fix_installed=True)
+        program = self.stack.enter_context(patch.object(
+            controller_backend, "program_rear_buttons", side_effect=[RuntimeError("busy"), None]))
+        main.Plugin._reconcile_current_controller(True)
+        program.assert_not_called()  # healthy: the saved table is left alone
+        self.reconcile.return_value = ("mode_restored", "/dev/hidraw0")
+        main.Plugin._reconcile_current_controller(True)
+        self.assertTrue(main.Plugin._rear_buttons_pending, "a failed write is retried")
+        self.reconcile.return_value = ("healthy", "/dev/hidraw0")
+        main.Plugin._reconcile_current_controller(True)
+        self.assertEqual(program.call_count, 2)
+        self.assertFalse(main.Plugin._rear_buttons_pending)
+        main.Plugin._reconcile_current_controller(True)
+        self.assertEqual(program.call_count, 2)
+
+    def test_tm_mode_power_cycles_first_and_programs_lc1_rc1_once_back(self):
+        self.stack.enter_context(patch.object(main.Plugin, "_rear_buttons_pending", False))
+        self.state.update(button_fix_installed=True)
+        cycle = self.stack.enter_context(patch.object(controller_backend, "power_cycle_controller"))
+        program = self.stack.enter_context(patch.object(controller_backend, "program_rear_buttons"))
+        self.reconcile.return_value = ("tm_power_cycle", "/dev/hidraw0")
+        main.Plugin._reconcile_current_controller(True)
+        cycle.assert_called_once()
+        program.assert_not_called()  # the controller is re-enumerating now
+        self.assertTrue(main.Plugin._rear_buttons_pending)
+        # The module monitor may switch it back first: the guard then only sees it healthy.
+        self.reconcile.return_value = ("healthy", "/dev/hidraw0")
+        main.Plugin._reconcile_current_controller(True)
+        program.assert_called_once()
+        self.assertFalse(main.Plugin._rear_buttons_pending)
+
+    def test_a_latched_arrow_is_power_cycled_only_while_tm_guard_is_on(self):
+        self.stack.enter_context(patch.object(main.Plugin, "_rear_buttons_pending", False))
+        cycle = self.stack.enter_context(patch.object(controller_backend, "power_cycle_controller"))
+        latched = self.stack.enter_context(patch.object(controller_backend, "latched_arrow_key", return_value=False))
+        main.Plugin._reconcile_current_controller(True)
+        cycle.assert_not_called()
+        latched.return_value = True
+        self.state["tm_guard_enabled"] = False  # TM mode in use on purpose: its arrows are real
+        main.Plugin._reconcile_current_controller(False)
+        cycle.assert_not_called()
+        self.state["tm_guard_enabled"] = True
+        self.assertEqual(main.Plugin._reconcile_current_controller(True)[0], "tm_power_cycle")
+        cycle.assert_called_once()
+        self.assertTrue(main.Plugin._rear_buttons_pending)
+
     def test_first_change_records_the_found_state_once_and_takes_ownership(self):
         main.Plugin._reconcile_current_controller(True)
         asyncio.run(self.plugin.set_controller({"color": "ff0000"}))
@@ -101,6 +149,8 @@ class RepairFlagTests(unittest.TestCase):
                  patch.object(controller_backend.os, "O_NONBLOCK", 0, create=True), \
                  patch.object(controller_backend.time, "sleep"), \
                  patch.object(controller_backend, "_hid_exchange", side_effect=exchange), \
+                 patch.object(controller_backend, "_power_cycled_recently", return_value=True), \
+                 patch.object(controller_backend, "_reset_stale_tm_gamepad"), \
                  patch.object(controller_backend, "set_vibration_gain") as gain:
                 status, _ = controller_backend.reconcile_controller(config, True, repair=False)
             self.assertEqual(status, expected)

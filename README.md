@@ -32,7 +32,7 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 | **Magic Modules** | Identifies every known module and upper/lower layout, ejects either side and provides Quick Reset |
 | **Vibration** | Firmware Off/Low/Medium/High strength, 0-100% Linux FF gain and a vibration test |
 | **Lighting** | Solid, Pulse and Rainbow modes with Hue, Saturation and Brightness |
-| **Key bindings** | Programs LC1/RC1 as L5/R5, preserves LC/RC as L4/R4 and supports both QAM firmware variants |
+| **Key bindings** | Makes LC, RC, LC1 and RC1 four separate buttons in Steam and supports both QAM firmware variants |
 | **TM Guard** | Returns from accidental TM mode changes and restores the saved controller configuration |
 | **Smart amp tuning** | Loads the official AYANEO 3 CS35L41 profile for both speakers instead of the generic fallback |
 | **Speaker calibration** | Recalibrates both smart amplifiers with validation, EFI readback and automatic backup |
@@ -180,7 +180,7 @@ retrying; the note clears after a fresh read.
   console on a clear surface in a quiet room, press **Start** and confirm the prompt.
   Fully restart the console after a successful calibration so the audio driver
   reads the new EFI values.
-- Open **Key Binding** to preserve LC/RC as L4/R4 and add LC1/RC1 as L5/R5.
+- Open **Key Binding** to make LC1/RC1 work next to LC/RC; Steam shows all four under their own names.
   Native F24 and legacy Meta+D QAM events are both recognized automatically.
   TM Guard is enabled by default; disable it temporarily when deliberately
   selecting another hardware mode with the physical TM button.
@@ -282,13 +282,20 @@ TDP Control is LegionGo2Companion's, adapted to the AYANEO 3:
   restored settings; FF Gain is disabled while an action is in progress.
 - Key bindings extend InputPlumber's native `aya7` capability map instead of
   replacing its APU-specific device profile. The switch programs only the two
-  rear-button firmware slots: LC1/RC1 emit KeyL/KeyR and become L5/R5, while
-  native F21/F22 remain L4/R4. Both F24 and legacy Meta+D are accepted as QAM;
+  rear-button firmware slots: LC1/RC1 emit KeyL/KeyR (InputPlumber `LeftTop`/
+  `RightTop`), while LC/RC's native F21/F22 become `LeftPaddle2`/`RightPaddle2`;
+  Steam's controller tester shows them as LC1, RC1, LC and RC. TM mode wipes these slots, so TM Guard
+  programs them again whenever it leaves TM mode. Both F24 and legacy Meta+D are accepted as QAM;
   the inactive firmware variant never emits its mapping.
-- TM Guard polls only AYANEO's controller-mode status. If TM changes away from
-  custom gamepad mode, it sends the official custom-mode command and reapplies
-  RGB, vibration, FF Gain and enabled rear-button mappings. It does not consume
-  or remap the physical TM button itself.
+- TM Guard polls AYANEO's controller-mode status. When TM leaves custom gamepad
+  mode, it cuts the controller's power through the EC for two seconds, then sends
+  the custom-mode command, resets the gamepad's USB port (it otherwise keeps its
+  TM identity) and reapplies RGB, vibration, FF Gain and the button table.
+  Measured on the console: switching back without the power cycle could leave a
+  D-pad direction from TM mode latched as a held arrow key that no other reset
+  clears. A D-pad still held during the switch can latch one too; TM Guard
+  notices the arrow on the controller's own keyboard (which never sends arrows
+  in custom mode) and power-cycles again. It does not remap the TM button.
 - The audio fix creates the two side-specific coefficient aliases expected by
   Linux for `speaker_id=1`, using the AYANEO firmware already installed by
   SteamOS. It briefly releases PipeWire's physical PCM and reloads only the

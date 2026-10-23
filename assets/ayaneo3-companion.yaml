@@ -10,13 +10,13 @@ mapping:
       - keyboard: KeyF21
     target_event:
       gamepad:
-        button: LeftTop
+        button: LeftPaddle2
   - name: RC
     source_events:
       - keyboard: KeyF22
     target_event:
       gamepad:
-        button: RightTop
+        button: RightPaddle2
   - name: Aya Space
     source_events:
       - keyboard: KeyF23
@@ -41,11 +41,11 @@ mapping:
       - keyboard: KeyL
     target_event:
       gamepad:
-        button: LeftPaddle2
+        button: LeftTop
   - name: RC1
     source_events:
       - keyboard: KeyR
     target_event:
       gamepad:
-        button: RightPaddle2
+        button: RightTop
 filtered_events: []

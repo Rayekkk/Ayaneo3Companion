@@ -113,8 +113,8 @@ export const ButtonsPage: FC<{
   onTmGuard(enabled: boolean): void;
 }> = ({ state, busy, onButtonFix, onTmGuard }) => <PanelSection title="Controller Buttons">
   {controllerUnavailable(state)}
-  <PanelSectionRow><ToggleField label="Fix Key Binding" description="Program LC1/RC1 as L5/R5 while preserving native LC/RC as L4/R4. Menu/QAM variants are detected automatically." checked={state.button_fix_installed} disabled={busy || state.controller_supported === false} onChange={onButtonFix} /></PanelSectionRow>
-  <PanelSectionRow><ToggleField label="TM Guard" description="Return the controller to custom gamepad mode after an accidental TM press." checked={state.tm_guard_enabled} disabled={busy} onChange={onTmGuard} /></PanelSectionRow>
+  <PanelSectionRow><ToggleField label="Fix Key Binding" description="Make LC1/RC1 work next to LC/RC as four separate buttons. Menu/QAM variants are detected automatically." checked={state.button_fix_installed} disabled={busy || state.controller_supported === false} onChange={onButtonFix} /></PanelSectionRow>
+  <PanelSectionRow><ToggleField label="TM Guard" description="Return the controller to custom gamepad mode after an accidental TM press. The controller is off for about two seconds while it does." checked={state.tm_guard_enabled} disabled={busy} onChange={onTmGuard} /></PanelSectionRow>
   {infoRow(state.tm_guard_status, state.tm_guard_recoveries ? `Recovered ${state.tm_guard_recoveries} TM mode change${state.tm_guard_recoveries === 1 ? "" : "s"} since plugin start.` : "The physical TM button remains available when TM Guard is disabled.")}
 </PanelSection>;
 

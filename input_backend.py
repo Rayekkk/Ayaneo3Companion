@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
 
-"""InputPlumber aya7 capability-map extension that exposes LC1/RC1 as L5/R5."""
+"""InputPlumber aya7 capability-map extension that exposes LC, RC, LC1 and RC1 as four separate buttons."""
 
 import hashlib
 from pathlib import Path

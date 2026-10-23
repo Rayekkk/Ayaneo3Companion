@@ -163,6 +163,7 @@ class Plugin:
     _module_task = None
     _tm_guard_task = None
     _vibration_gain_task = None
+    _rear_buttons_pending = False  # LC1/RC1 still need programming after TM mode
     _audio_task = None
 
     def __init__(self):
@@ -291,6 +292,28 @@ class Plugin:
                     cls._state.update(controller=dict(controller), controller_seeded=True)
             status, path = controller_backend.reconcile_controller(
                 controller, recover_custom, force, repair=owned)
+            if (recover_custom and status in ("healthy", "configuration_restored")
+                    and controller_backend.latched_arrow_key()):
+                # A D-pad held while TM mode was left: only a power cycle releases it.
+                decky.logger.info(f"{LOG} TM Guard: arrow key latched after TM mode")
+                status = "tm_power_cycle"
+            # Measured on the console: TM mode can wipe the button table, so
+            # LC1/RC1 send nothing until it is programmed again.
+            if status == "tm_power_cycle":
+                cls._rear_buttons_pending = True
+                decky.logger.info(f"{LOG} TM Guard: TM mode detected, power-cycling the controller")
+                controller_backend.power_cycle_controller()
+                return status, path  # the controller is re-enumerating; the next pass switches it back
+            if status == "mode_restored":
+                cls._rear_buttons_pending = True
+            if cls._rear_buttons_pending:
+                try:
+                    cls._restore_rear_buttons()
+                    cls._rear_buttons_pending = False
+                except Exception as error:
+                    decky.logger.warning(f"{LOG} LC1/RC1 bindings will be programmed again: {error}")
+                else:
+                    decky.logger.info(f"{LOG} programmed LC1/RC1 again after TM mode")
             return status, path
 
     @classmethod
@@ -1234,6 +1257,13 @@ class Plugin:
                 status, path = await self._offload(
                     Plugin._reconcile_current_controller,
                     enabled, was_available is False or resumed)
+                if status == "tm_power_cycle":
+                    # The controller is re-enumerating; its new node is read on the next pass.
+                    last_device_token = None
+                    with _lock:
+                        Plugin._state["tm_guard_status"] = "Leaving TM mode"
+                    retry_delay = 2.0
+                    continue
                 device_token = await self._offload(controller_backend.device_node_token, path)
                 if (last_device_token is not None
                         and device_token != last_device_token

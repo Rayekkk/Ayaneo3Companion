@@ -481,7 +481,7 @@ const Content: FC = () => {
       {link("fan", fanSummary(fanState), undefined)}
       {link("vibration", `${titleCase(state.controller.vibration)} · FF Gain ${state.controller.ff_gain}%`)}
       {link("rgb", state.controller.rgb_mode === "off" ? "Off" : `${titleCase(state.controller.rgb_mode)} · #${state.controller.color.toUpperCase()}`)}
-      {link("buttons", `${state.button_fix_installed ? "L5/R5 enabled" : "Native mapping"} · TM Guard ${state.tm_guard_enabled ? "on" : "off"}`)}
+      {link("buttons", `${state.button_fix_installed ? "LC1/RC1 enabled" : "Native mapping"} · TM Guard ${state.tm_guard_enabled ? "on" : "off"}`)}
       {link("modules", moduleSummary)}
       {link("battery", state.charge_bypass ? "Bypass charging active" : "Automatic charging")}
       {link("audio", audioSummary)}

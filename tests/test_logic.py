@@ -1,7 +1,7 @@
 import subprocess
 import glob
 import select
-import asyncio, hashlib, io, json, os, struct, sys, tempfile, threading, unittest
+import asyncio, contextlib, hashlib, io, json, os, struct, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
@@ -142,10 +142,11 @@ class LogicTests(unittest.TestCase):
 
     def test_key_binding_map_preserves_native_buttons_and_adds_l5_r5(self):
         mapping = input_backend.button_map_bytes().decode()
-        self.assertIn("button: LeftTop", mapping)
-        self.assertIn("button: RightTop", mapping)
-        self.assertIn("button: LeftPaddle2", mapping)
-        self.assertIn("button: RightPaddle2", mapping)
+        # Checked in Steam's controller tester on the console: LC/RC and LC1/RC1
+        # were swapped with LC/RC on LeftTop/RightTop.
+        for key, button in (("KeyF21", "LeftPaddle2"), ("KeyF22", "RightPaddle2"),
+                            ("KeyL", "LeftTop"), ("KeyR", "RightTop")):
+            self.assertIn(f"keyboard: {key}\n    target_event:\n      gamepad:\n        button: {button}\n", mapping)
         self.assertIn("Quick Access legacy firmware fallback", mapping)
         self.assertIn("keyboard: KeyLeftMeta", mapping)
         self.assertIn("keyboard: KeyD", mapping)
@@ -168,7 +169,7 @@ class LogicTests(unittest.TestCase):
         self.assertEqual((by_slot[0x10][12], by_slot[0x11][12]), (0x70, 0x71))
         self.assertEqual((by_slot[0x12][12], by_slot[0x13][12]), (0x0f, 0x15))
         self.assertEqual((by_slot[0x17][7], by_slot[0x17][10], by_slot[0x17][12]),
-                         (0x02, 0x08, 0x07))
+                         (0x00, 0x00, 0x73), "QAM sends F24, which InputPlumber's aya7 map opens")
 
     def test_rear_button_programming_is_saved(self):
         calls = []
@@ -906,6 +907,129 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(response[18], 1)
         self.assertTrue(controller_backend.controller_requires_custom(response))
 
+    def test_tm_button_mode_3_requires_custom_and_custom_mode_2_does_not(self):
+        # AYA_CHECK answers captured on the console in custom mode and right after one TM press.
+        custom = bytearray(64)
+        for index, value in {3: 0x08, 6: 0x0C, 7: 0x01, 8: 0xD1, 10: 0x7A, 11: 0x01, 12: 0xD1, 14: 0x7A, 18: 0x02,
+                             21: 0x33, 22: 0x22, 23: 0x40, 31: 0x01, 32: 0x48, 33: 0x56, 36: 0x64, 37: 0x64}.items():
+            custom[index] = value
+        tm = bytearray(custom); tm[18] = 0x03
+        self.assertFalse(controller_backend.controller_requires_custom(bytes(custom)))
+        self.assertTrue(controller_backend.controller_requires_custom(bytes(tm)))
+        for unknown in (0, 4, 0xFF):  # an unknown mode is never switched blindly
+            tm[18] = unknown
+            self.assertFalse(controller_backend.controller_requires_custom(bytes(tm)))
+
+    def test_leaving_tm_mode_resets_only_the_gamepad_still_in_its_tm_identity(self):
+        import errno
+        import types
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, ids, bus, dev in (("1-1", ("1c4f", "0002"), 1, 6), ("1-2", ("4001", "0428"), 1, 7)):
+                (root / name).mkdir()
+                for leaf, value in (("idVendor", ids[0]), ("idProduct", ids[1]), ("busnum", bus), ("devnum", dev)):
+                    (root / name / leaf).write_text(f"{value}\n")
+            opened, resets = [], []
+            def ioctl(fd, request, arg):
+                resets.append((fd, request))
+                raise OSError(errno.ENODEV, "No such device")  # as measured: the reset re-enumerates at once
+            with mock.patch.object(controller_backend, "USB_DEVICES", root), \
+                 mock.patch.dict(sys.modules, fcntl=types.SimpleNamespace(ioctl=ioctl)), \
+                 mock.patch.object(os, "open", side_effect=lambda path, flags: opened.append(path) or 9), \
+                 mock.patch.object(os, "close") as close, \
+                 mock.patch.object(controller_backend.time, "sleep") as sleep, \
+                 mock.patch.object(controller_backend, "_rumble_event_node",
+                                   side_effect=[None, None, "/dev/input/event7"]) as rumble:
+                self.assertTrue(controller_backend._reset_stale_tm_gamepad())
+            self.assertEqual(rumble.call_count, 3, "waits for the Xbox pad before FF_GAIN and LC1/RC1")
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(opened, ["/dev/bus/usb/001/007"])
+            self.assertEqual(resets, [(9, controller_backend.USBDEVFS_RESET)])
+            close.assert_called_once_with(9)
+            # Already the Xbox pad: nothing to reset.
+            (root / "1-2" / "idVendor").write_text("045e\n"); (root / "1-2" / "idProduct").write_text("028e\n")
+            with mock.patch.object(controller_backend, "USB_DEVICES", root), \
+                 mock.patch.object(os, "open", side_effect=AssertionError("no reset")):
+                self.assertFalse(controller_backend._reset_stale_tm_gamepad())
+
+    def test_only_an_arrow_on_the_controllers_own_keyboard_counts_as_latched(self):
+        import types
+        held = {"/dev/input/event4": {103}, "/dev/input/event7": {108}, "/dev/input/event9": {38}}
+        identity = {"/dev/input/event4": ("1c4f", "0002", "usb-0000:c4:00.3-1/input1"),
+                    "/dev/input/event7": ("045e", "028e", "usb-0000:c4:00.3-2/input0"),
+                    "/dev/input/event9": ("1c4f", "0002", "usb-0000:c4:00.3-1/input1")}
+        opened = {}
+        def ioctl(fd, request, keys):
+            self.assertEqual(request, controller_backend.EVIOCGKEY)
+            for key in held[opened[fd]]:
+                keys[key // 8] |= 1 << (key % 8)
+        def open_node(path, flags):
+            opened[len(opened) + 10] = path
+            return len(opened) + 9
+        for nodes, expected in ((["/dev/input/event4"], True),  # Up on the controller keyboard
+                                (["/dev/input/event7"], False),  # D-pad down on the Xbox pad is real input
+                                (["/dev/input/event9"], False)):  # L from LC1 is not an arrow
+            opened.clear()
+            with self.subTest(nodes=nodes), \
+                 mock.patch.object(controller_backend.glob, "glob", return_value=nodes), \
+                 mock.patch.object(controller_backend, "_input_event_identity", side_effect=identity.get), \
+                 mock.patch.dict(sys.modules, fcntl=types.SimpleNamespace(ioctl=ioctl)), \
+                 mock.patch.object(os, "open", side_effect=open_node), \
+                 mock.patch.object(os, "O_NONBLOCK", 0, create=True), \
+                 mock.patch.object(os, "close"):
+                self.assertEqual(controller_backend.latched_arrow_key(), expected)
+
+    def test_tm_mode_is_left_only_after_a_power_cycle(self):
+        config = dict(controller_backend.DEFAULT_CONTROLLER)
+        tm = bytearray(controller_report(config)); tm[controller_backend.AYA_CUSTOM_REQUIRED_INDEX] = 3
+        sent, clock = [], [1000.0]
+        def exchange(_fd, command, timeout=0.4):
+            sent.append(command)
+            return bytes(tm) if command == controller_backend.AYA_CHECK else bytes(64)
+        with contextlib.ExitStack() as stack:
+            for item in (mock.patch.object(companion_common, "supported_device", return_value=True),
+                         mock.patch.object(controller_backend, "vendor_hidraw", return_value="/dev/fake"),
+                         mock.patch.object(os, "open", return_value=7), mock.patch.object(os, "close"),
+                         mock.patch.object(os, "O_NONBLOCK", 0, create=True),
+                         mock.patch.object(controller_backend.time, "sleep"),
+                         mock.patch.object(controller_backend.time, "monotonic", side_effect=lambda: clock[0]),
+                         mock.patch.object(controller_backend, "_tm_power_cycled_at", None),
+                         mock.patch.object(controller_backend, "_hid_exchange", side_effect=exchange),
+                         mock.patch.object(controller_backend, "_write_verified_controller"),
+                         mock.patch.object(controller_backend, "set_vibration_gain")):
+                stack.enter_context(item)
+            power = stack.enter_context(mock.patch.object(controller_backend.ec_backend, "set_controller_power"))
+            switch = stack.enter_context(mock.patch.object(controller_backend, "_switch_to_custom_mode_fd"))
+            self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "tm_power_cycle")
+            switch.assert_not_called()
+            self.assertEqual(sent, [controller_backend.AYA_CHECK], "nothing is written before the power cycle")
+            controller_backend.power_cycle_controller()
+            self.assertEqual(power.call_args_list, [mock.call(False), mock.call(True)])
+            clock[0] += 5
+            self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "mode_restored")
+            switch.assert_called_once()
+            clock[0] += controller_backend.TM_SWITCH_WINDOW_S
+            self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "tm_power_cycle",
+                             "a later TM press is power-cycled again")
+            controller_backend.power_cycle_controller()
+            controller_backend._consume_power_cycle()  # what a real switch does
+            clock[0] += 1
+            self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "tm_power_cycle",
+                             "a TM press right after a recovery still gets its own power cycle")
+
+    def test_switch_out_of_tm_mode_resets_the_gamepad_after_the_mode_is_verified(self):
+        tm, custom = bytearray(64), bytearray(64)
+        tm[3] = custom[3] = controller_backend.AYA_CHECK[4]
+        tm[18], custom[18] = 3, 2
+        answers = iter([bytes(custom), bytes(custom)])
+        with mock.patch.object(controller_backend, "_hid_exchange", side_effect=lambda fd, command: next(answers)), \
+             mock.patch.object(controller_backend.time, "sleep"), \
+             mock.patch.object(controller_backend, "_tm_power_cycled_at", 5.0), \
+             mock.patch.object(controller_backend, "_reset_stale_tm_gamepad") as reset:
+            self.assertTrue(controller_backend._switch_to_custom_mode_fd(7, bytes(tm)))
+            self.assertIsNone(controller_backend._tm_power_cycled_at, "every switch uses up the power cycle")
+        reset.assert_called_once_with()
+
     def test_unsupported_device_blocks_privileged_hardware_writes(self):
         controller = dict(controller_backend.DEFAULT_CONTROLLER)
         operations = (
@@ -1086,7 +1210,13 @@ class LogicTests(unittest.TestCase):
             source = root / "source.yaml"
             target = root / "ayaneo_type7.yaml"
             current = input_backend.INPUT_MAP_SOURCE.read_bytes()
+            # The unmarked map shipped before LC/RC and LC1/RC1 changed places.
             legacy = current.replace(input_backend.INPUT_MAP_MARKER, b"", 1)
+            for key, old in ((b"KeyF21", b"LeftTop"), (b"KeyF22", b"RightTop"),
+                             (b"KeyL", b"LeftPaddle2"), (b"KeyR", b"RightPaddle2")):
+                head = b"keyboard: " + key + b"\n    target_event:\n      gamepad:\n        button: "
+                start = legacy.index(head) + len(head)
+                legacy = legacy[:start] + old + legacy[legacy.index(b"\n", start):]
             self.assertIn(hashlib.sha256(legacy).hexdigest(), input_backend.LEGACY_INPUT_MAP_SHA256)
             source.write_bytes(current)
             target.write_bytes(legacy)

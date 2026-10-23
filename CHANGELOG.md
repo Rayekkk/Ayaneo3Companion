@@ -41,6 +41,15 @@ Companion, including its TDP Control and Fan Control.
 
 ### Fixes
 
+- **TM button pressed by accident.** TM Guard now recognises the mode the TM
+  button switches to and brings the controller back on its own in about ten
+  seconds: it briefly cuts the controller's power, which also clears an arrow
+  key that leaving TM mode could leave held. Before, it never noticed TM mode.
+- **LC1 and RC1 work again after TM mode.** TM mode wiped their bindings; TM
+  Guard now programs them again, and LC/RC no longer show up in Steam as
+  LC1/RC1: all four buttons appear under their own names.
+- **QAM with Fix Key Binding on.** The button table now sends the firmware's
+  own QAM key; the previous one never opened the menu.
 - **Colours after a SteamOS update.** The OLED display definition now lives in
   your `~/.config/gamescope/scripts`, which updates keep. Before, an update
   removed it from `/etc` and Companion put it back a moment after Gaming Mode had
