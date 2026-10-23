@@ -6,8 +6,8 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
-
-import test_logic
+import time
+import support  # noqa: F401  (the Decky harness before any backend import)
 from _harness import owner
 import main
 import display_backend
@@ -15,6 +15,7 @@ import controller_backend
 import ec_backend
 import companion_common
 from safe_settings import SettingsManager
+import safe_settings
 
 
 class ResponseTests(unittest.IsolatedAsyncioTestCase):
@@ -105,3 +106,56 @@ class ResponseTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin._offload(self.plugin._snapshot)
         self.assertTrue(self.state["charge_bypass_supported"])
 
+
+class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
+    setUp = ResponseTests.setUp
+    asyncTearDown = ResponseTests.asyncTearDown
+
+    async def assert_loop_responsive(self, action, finishes_during_commit):
+        entered, release = threading.Event(), threading.Event()
+        write = safe_settings.atomic_write_json
+        def stalled_write(path, payload):
+            if path == self.store.path:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test did not release the settings write")
+            return write(path, payload)
+
+        tasks = []
+        with patch.object(safe_settings, "atomic_write_json", side_effect=stalled_write):
+            tasks.append(asyncio.create_task(self.plugin._offload(self.store.commit)))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                # The old implementation blocks the loop itself. A thread
+                # releases the test disk even if asyncio cannot run cleanup.
+                watchdog = threading.Timer(0.65, release.set)
+                watchdog.start()
+                started = time.monotonic()
+                operation = asyncio.create_task(action())
+                tasks.append(operation)
+                async def heartbeat():
+                    await asyncio.sleep(0.02)
+                    return time.monotonic() - started
+                beat = asyncio.create_task(heartbeat())
+                tasks.append(beat)
+                elapsed = await beat
+                done, _ = await asyncio.wait([operation], timeout=0.1)
+                finished = operation in done
+            finally:
+                release.set()
+                if "watchdog" in locals():
+                    watchdog.cancel()
+                    watchdog.join()
+                results = await asyncio.wait_for(asyncio.gather(*tasks), 3)
+        self.assertLess(elapsed, 0.3, "settings fsync must not block the event loop heartbeat")
+        if finishes_during_commit:
+            self.assertTrue(finished, "this independent operation must finish before settings disk I/O")
+        return results[1]
+
+    async def test_fan_off_remains_responsive_during_settings_disk_io(self):
+        # Fan Control keeps its own store and lock: turning it off never waits for main's settings write.
+        off = dict(success=True, settings=dict(enabled=False))
+        with patch.object(self.plugin._fan, "set_enabled", return_value=off) as set_enabled:
+            result = await self.assert_loop_responsive(lambda: self.plugin.fan_set_enabled(False), True)
+        self.assertFalse(result["settings"]["enabled"])
+        set_enabled.assert_awaited_once_with(False)

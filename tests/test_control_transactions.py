@@ -9,7 +9,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import test_logic
+import support  # noqa: F401  (the Decky harness before any backend import)
 from _harness import owner
 import main
 import input_backend

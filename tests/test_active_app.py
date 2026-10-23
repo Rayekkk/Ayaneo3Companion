@@ -1,6 +1,6 @@
 import unittest
 
-import test_logic  # noqa: F401  (installs the Decky stubs before backend imports)
+import support  # noqa: F401  (the Decky harness before any backend import)
 from active_app import normalise_app_id
 
 

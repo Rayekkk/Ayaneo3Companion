@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import test_logic
+import support  # noqa: F401  (the Decky harness before any backend import)
 import main
 import companion_common
 import diagnostics

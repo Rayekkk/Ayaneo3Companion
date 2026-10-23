@@ -4,7 +4,7 @@ import pathlib
 import tempfile
 import unittest
 
-import test_logic  # noqa: F401  (Decky stubs and the plugin path)
+import support  # noqa: F401  (the Decky harness before any backend import)
 import fan_hwmon
 from fan_hwmon import EC, find_hwmon, pct_for, platform_check, pwm_for, same_target
 from fan_sleep import Retry

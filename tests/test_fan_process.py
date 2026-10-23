@@ -530,7 +530,7 @@ class FanProcessTests(unittest.TestCase):
         # Standalone model invocation does not import Decky's real settings.
         if 'decky' not in sys.modules:
             sys.path.insert(0, str(ROOT/'tests'))
-            import test_logic  # noqa: F401  (Decky stubs)
+            import support  # noqa: F401  (the Decky harness before any backend import)
         import fan_backend
         client = fan_backend.Client(runtime=self.root)
         client.process = self.p; client.socket = self.ipc; self.ipc.setblocking(False)

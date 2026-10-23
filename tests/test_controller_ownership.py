@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import test_logic
+import support  # noqa: F401  (the Decky harness before any backend import)
 import main
 import companion_common
 import controller_backend
@@ -130,7 +130,7 @@ class ControllerOwnershipTests(unittest.TestCase):
 class RepairFlagTests(unittest.TestCase):
     def test_without_repair_only_tm_mode_is_undone(self):
         config = dict(controller_backend.DEFAULT_CONTROLLER)
-        other = test_logic.controller_report(dict(config, color="00ff00"))
+        other = support.controller_report(dict(config, color="00ff00"))
         tm_mode = bytearray(other)
         tm_mode[controller_backend.AYA_CUSTOM_REQUIRED_INDEX] = 1
         for first, expected in ((other, "healthy"), (bytes(tm_mode), "mode_restored")):

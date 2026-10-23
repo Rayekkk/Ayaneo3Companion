@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
-import test_logic  # noqa: F401  (Decky stubs and the plugin path)
+import support  # noqa: F401  (the Decky harness before any backend import)
 import fan_backend as fan
 
 

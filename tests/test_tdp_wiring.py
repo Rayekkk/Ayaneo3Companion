@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import test_logic  # noqa: F401  (installs the Decky stubs before backend imports)
+import support  # noqa: F401  (the Decky harness before any backend import)
 import main
 import tdp_backend
 from safe_settings import SettingsManager

@@ -10,15 +10,17 @@ from pathlib import Path
 import stat
 import struct
 import tempfile
-import threading
 import time
 import unittest
 from unittest.mock import patch
 import urllib.error
 import urllib.request
 import zipfile
-
+from unittest import mock
+import support  # noqa: F401  (the Decky harness before any backend import)
 import lego_updater as updates
+import tdp_backend
+import companion_common
 
 CURRENT = "0.6.2"
 NEW = "0.6.3"
@@ -541,6 +543,67 @@ class DownloadFiles(_UpdateFixture):
         self.assertFalse(result["success"])
         self.assertEqual(target.read_bytes(), b"original")
         self.assertEqual(list(downloads.iterdir()), [target])
+
+
+class ReleaseAssetTests(unittest.TestCase):
+    def test_download_url_allowlist(self):
+        self.assertEqual(companion_common.checked_download_url(tdp_backend.RYZENADJ_URL), tdp_backend.RYZENADJ_URL)
+        with self.assertRaises(RuntimeError):
+            companion_common.checked_download_url("https://example.com/ryzenadj")
+
+    def test_updater_accepts_only_the_exact_release_asset(self):
+        companion_common.updater.reset()
+        current = companion_common.updater.plugin_version()
+        major, minor, _patch = (int(part) for part in current.split("."))
+        newer = f"{major}.{minor + 1}.0"  # the next release after the one in development
+
+        class Response(io.BytesIO):
+            def __init__(self, payload):
+                super().__init__(json.dumps(payload).encode())
+            def geturl(self): return companion_common.GITHUB_RELEASES_URL
+
+        release = {
+            "tag_name": f"v{newer}",
+            "draft": False, "prerelease": False,
+            "html_url": f"https://github.com/Rayekkk/Ayaneo3Companion/releases/tag/v{newer}",
+            "assets": [{
+                "name": f"Ayaneo3Companion-{newer}.zip",
+                "state": "uploaded", "size": 1234, "digest": "sha256:" + "1" * 64,
+                "browser_download_url": (
+                    "https://github.com/Rayekkk/Ayaneo3Companion/releases/download/"
+                    f"v{newer}/Ayaneo3Companion-{newer}.zip"),
+            }],
+        }
+        with mock.patch.object(companion_common.updater, "open_url", return_value=Response(release)):
+            info = companion_common.updater.check()
+        self.assertEqual(info["current_version"], current)
+        self.assertEqual(info["latest_version"], newer)
+        self.assertTrue(info["update_available"])
+        self.assertEqual(info["asset_name"], f"Ayaneo3Companion-{newer}.zip")
+
+        release["assets"][0]["name"] = "source.zip"
+        companion_common.updater._cached = None
+        with mock.patch.object(companion_common.updater, "open_url", return_value=Response(release)):
+            info = companion_common.updater.check()
+        self.assertIn(f"Ayaneo3Companion-{newer}.zip", info["error"])
+
+    def test_release_version_and_package_inventory_agree(self):
+        root = companion_common.PLUGIN_DIR
+        manifest = json.loads((root / "plugin.json").read_text())
+        package = json.loads((root / "package.json").read_text())
+        lock = json.loads((root / "package-lock.json").read_text())
+        self.assertEqual(
+            {manifest["version"], package["version"], lock["version"],
+             lock["packages"][""]["version"]},
+            {manifest["version"]},
+        )
+        package_script = (root / "scripts" / "package.mjs").read_text()
+        self.assertIn('"lego_updater.py"', package_script)
+        self.assertIn('"fan_backend.py"', package_script)
+        self.assertNotIn('"react-icons"', package_script)
+        self.assertIn("THIRD_PARTY_LICENSES", package_script)
+        self.assertIn("THIRD_PARTY_SOURCES", package_script)
+        self.assertIn("Decky Loader API 1.1.3", (root / "NOTICE").read_text())
 
 
 if __name__ == "__main__":

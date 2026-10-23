@@ -11,7 +11,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-import test_logic
+import support  # noqa: F401  (the Decky harness before any backend import)
 import main
 import controller_backend
 import companion_common

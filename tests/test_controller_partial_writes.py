@@ -13,7 +13,7 @@ import controller_backend
 import companion_common
 
 
-class AuditRound8Tests(unittest.IsolatedAsyncioTestCase):
+class PartialControllerWriteTests(unittest.IsolatedAsyncioTestCase):
     setUp = test_responsiveness.ResponseTests.setUp
 
     async def test_partial_controller_write_preserves_other_confirmed_fields(self):

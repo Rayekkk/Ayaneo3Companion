@@ -9,7 +9,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_logic  # Install the Decky import harness before loading the backend.
+import support  # noqa: F401  (the Decky harness before any backend import)
 from _harness import owner
 import main
 import controller_backend

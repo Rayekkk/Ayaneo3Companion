@@ -5,7 +5,7 @@ import pathlib
 import tempfile
 import unittest
 
-import test_logic  # noqa: F401  (installs the Decky stubs before backend imports)
+import support  # noqa: F401  (the Decky harness before any backend import)
 from fan_policy import *  # noqa: F401,F403
 from fan_policy import (CurveControl, DEFAULT_CURVE, LAST_MIN_PCT, MAX_PCT, MIN_PCT, PRESETS, TEMPLATES, SCHEMA,
                         defaults, expected_rpm, stop_timed_out, target_for, valid_pct, validate_curve, validate_settings)

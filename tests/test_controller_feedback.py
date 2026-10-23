@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_logic  # Install the isolated Decky harness before importing main.
+import support  # noqa: F401  (the Decky harness before any backend import)
 from _harness import owner
 import main
 import display_backend
@@ -18,7 +18,7 @@ import companion_common
 from safe_settings import SettingsManager
 
 
-class AuditRegressionTests(unittest.TestCase):
+class ControllerFeedbackTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
