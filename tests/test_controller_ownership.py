@@ -120,6 +120,7 @@ class DisplayConflictStateTests(unittest.TestCase):
                  patch.object(main.Plugin, "_state", state), \
                  patch.object(display_backend, "LUA_TARGET", Path(directory) / "aya.lua"), \
                  patch.object(display_backend, "install_display_script"), \
+                 patch.object(display_backend, "is_our_display_script", return_value=True), \
                  patch.object(display_backend, "display_script_conflict", return_value=False), \
                  patch.object(display_backend, "patch_published_edid"):
                 result = asyncio.run(main.Plugin().set_screen_fix(True, True))

@@ -30,6 +30,15 @@ def install():
                                         error=lambda *_: None, debug=lambda *_: None)
     decky.emit = _emitter(types.SimpleNamespace(_socket=_Socket()))
     sys.modules["decky"] = decky
+    # The suite also runs on the console itself: never touch its real gamescope definitions.
+    import display_backend
+    from pathlib import Path
+    isolated = Path(temp) / "display"
+    display_backend.CONFIG_DIR = isolated / "config"
+    display_backend.LUA_TARGET = isolated / "config" / "gamescope" / "scripts" / display_backend.SCRIPT_NAME
+    display_backend.LEGACY_LUA_TARGET = isolated / "etc" / display_backend.SCRIPT_NAME
+    display_backend.NATIVE_LUA = isolated / "usr" / display_backend.SCRIPT_NAME
+    display_backend.SCRIPT_USER = None
     settings = types.ModuleType("settings")
     class SettingsManager:
         def __init__(self, **_): self.data = {}

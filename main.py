@@ -47,7 +47,7 @@ TDP_DIAGNOSTIC_FIELDS = ("tdp_backend", "tdp_supported", "tdp_error")
 SNAPSHOT_DIAGNOSTICS = (
     "gpu_power_w", "tdp_backend", "tdp_supported", "tdp_error",
     "controller_supported", "controller_error", "cpu_boost_supported",
-    "screen_conflict", "edid_patched", "edid_game_nits",
+    "screen_conflict", "screen_restart_needed", "screen_native", "edid_patched", "edid_game_nits",
     "charge_bypass_supported", "module_eject_supported", "module_reset_supported",
 )
 VIBRATION_TEST_MS = 500
@@ -465,6 +465,8 @@ class Plugin:
             state["cpu_boost_supported"] = False
         state["screen_installed"] = display_backend.is_our_display_script(display_backend.LUA_TARGET)
         state["screen_conflict"] = display_backend.display_script_conflict(display_backend.LUA_TARGET)
+        state["screen_restart_needed"] = display_backend.restart_needed(state["screen_installed"])
+        state["screen_native"] = display_backend.native_profile_present()
         try:
             edid = display_backend.read_published_edid()
             state["edid_game_nits"] = round(display_backend.published_edid_nits(edid) or 0)
@@ -971,9 +973,12 @@ class Plugin:
         enabled = self._boolean(enabled)
         replace_existing = self._boolean(replace_existing)
         def mutate():
-            if display_backend.LUA_TARGET.is_symlink():
+            target = display_backend.LUA_TARGET
+            if target.is_symlink():
                 raise RuntimeError("refusing a symlinked gamescope definition")
-            previous = display_backend.LUA_TARGET.read_bytes() if display_backend.LUA_TARGET.exists() else None
+            # Whether the running session loaded our definition, before any copy moves.
+            display_backend.remember_loaded()
+            previous = display_backend.read_script(target)
             backup = None
             def apply():
                 nonlocal backup
@@ -982,23 +987,25 @@ class Plugin:
                 else:
                     display_backend.remove_display_script()
             def restore():
-                if display_backend.LUA_TARGET.is_symlink():
+                if target.is_symlink():
                     raise RuntimeError("display definition changed to a symlink")
-                target = display_backend.LUA_TARGET
-                current = target.read_bytes() if target.exists() else None
+                current = display_backend.read_script(target)
                 if current == previous:
                     return
-                if current is not None and not display_backend.display_script_owned(display_backend.LUA_TARGET):
+                if current is not None and not display_backend.display_script_owned(target):
                     raise RuntimeError("display definition changed outside Companion")
                 if previous is None:
-                    display_backend.LUA_TARGET.unlink(missing_ok=True)
+                    display_backend.unlink_script()
                 else:
-                    companion_common.atomic_write_bytes(display_backend.LUA_TARGET, previous)
+                    display_backend.write_script(previous)
             self._apply_and_save(apply, restore, {"screen_fix_enabled": enabled})
-            conflict = display_backend.display_script_conflict(display_backend.LUA_TARGET)
+            conflict = display_backend.display_script_conflict(target)
+            installed = display_backend.is_our_display_script(target)
+            restart = display_backend.restart_needed(installed)
             with _lock:
-                Plugin._state["screen_installed"] = enabled
-                Plugin._state["screen_conflict"] = conflict
+                Plugin._state.update(screen_installed=installed, screen_conflict=conflict,
+                                     screen_restart_needed=restart,
+                                     screen_native=display_backend.native_profile_present())
             return backup
         try:
             backup = await self._offload(mutate)
@@ -1018,11 +1025,21 @@ class Plugin:
             raise
         return self._copy_state()
 
+    async def restart_game_mode(self):
+        """Restart the gamescope session so it loads the display definition."""
+        ok, note = await self._offload(display_backend.restart_session)
+        if not ok:
+            raise RuntimeError(f"Gaming Mode restart failed: {note}")
+        return self._copy_state()
+
     async def _edid_loop(self):
         """Reapply after every gamescope session recreates its EDID copy."""
         while True:
             try:
-                if display_backend.is_our_display_script(display_backend.LUA_TARGET):
+                # A SteamOS profile replaces our definition but not the HDR peak fix.
+                if (display_backend.is_our_display_script(display_backend.LUA_TARGET)
+                        or (display_backend.native_profile_present()
+                            and settings.getSetting("screen_fix_enabled", None) is True)):
                     await self._offload(display_backend.patch_published_edid)
             except asyncio.CancelledError:
                 raise
@@ -1658,12 +1675,17 @@ class Plugin:
             except Exception as error:
                 decky.logger.warning(f"{LOG} key-binding disable recovery failed: {error}")
         key_binding_installed = await self._offload(input_backend.button_fix_installed)
-        existing_screen = display_backend.display_script_owned(display_backend.LUA_TARGET)
+        # Note what this gamescope session loaded before a copy migrates out of /etc.
+        await self._offload(display_backend.remember_loaded)
+        existing_screen = (display_backend.display_script_owned(display_backend.LUA_TARGET)
+                           or display_backend.display_script_owned(display_backend.LEGACY_LUA_TARGET))
         saved_screen_fix = settings.getSetting("screen_fix_enabled", None)
         desired_screen_fix = (saved_screen_fix if type(saved_screen_fix) is bool
                               else existing_screen)
         if (hardware_allowed and desired_screen_fix
-                and not display_backend.is_our_display_script(display_backend.LUA_TARGET)):
+                and (not display_backend.is_our_display_script(display_backend.LUA_TARGET)
+                     or display_backend.display_script_owned(display_backend.LEGACY_LUA_TARGET)
+                     or display_backend.native_profile_present())):
             try:
                 await self._offload(display_backend.install_display_script)
             except Exception as error:
@@ -1727,6 +1749,8 @@ class Plugin:
             "controller_seeded": False,
             "screen_installed": screen_installed,
             "screen_conflict": display_backend.display_script_conflict(display_backend.LUA_TARGET),
+            "screen_restart_needed": False,
+            "screen_native": display_backend.native_profile_present(),
             "edid_patched": False,
             "edid_game_nits": 0,
             "button_fix_installed": key_binding_installed,
@@ -1860,7 +1884,8 @@ class Plugin:
                 decky.logger.info(f"{LOG} restored CPU Boost before uninstall")
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not restore CPU Boost before uninstall: {error}")
-        if is_supported and display_backend.display_script_owned(display_backend.LUA_TARGET):
+        if is_supported and (display_backend.display_script_owned(display_backend.LUA_TARGET)
+                             or display_backend.display_script_owned(display_backend.LEGACY_LUA_TARGET)):
             try:
                 await self._offload(display_backend.remove_display_script)
             except Exception as error:

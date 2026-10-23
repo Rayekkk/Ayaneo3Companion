@@ -188,10 +188,14 @@ retrying; the note clears after a fresh read.
   TM Guard is enabled by default; disable it temporarily when deliberately
   selecting another hardware mode with the physical TM button.
 - Open **OLED display** to install the gamescope definition and verify its HDR metadata.
-- The Key Binding and OLED switches are saved. If a SteamOS update removes their
-  files from `/etc`, Companion reinstalls enabled definitions at startup and
-  reloads InputPlumber when the key map changes. Restart Game Mode after the
-  OLED definition is restored so gamescope loads it.
+  The definition lives in your `~/.config/gamescope/scripts`, which SteamOS
+  updates keep, so the colours survive an update. gamescope loads definitions
+  only when it starts: when the running session has not loaded the current one,
+  the page offers **Restart Gaming Mode** (after a confirmation, because Steam
+  and any running game close and reopen). If SteamOS ever ships its own AYANEO 3
+  profile, Companion leaves the display to it and keeps only the HDR peak fix.
+- The Key Binding and OLED switches are saved. If a SteamOS update removes the
+  key map from `/etc`, Companion reinstalls it at startup and reloads InputPlumber.
 - Open **About** at the bottom of the overview to see the installed version,
   check GitHub releases and download a newer plugin ZIP when one is available.
   The result remains available when returning to About during the same plugin
@@ -289,7 +293,9 @@ The Minimum preset uses 5/8/10 W. The Max preset uses 32 W SPL, 35 W SPPT and
   and a 60-second transfer deadline checked between network reads. Individual
   network operations have a 10-second timeout; a pending read may finish after
   the transfer deadline. Interrupted binary downloads retain existing components.
-- The display definition matches `AYA / 0x0113 / AYAOLED_FHD`. A runtime check
+- The display definition matches `AYA / 0x0113 / AYAOLED_FHD`. Root writes it into
+  the gamescope user's folder only through a helper running as that user, so a
+  link planted there cannot redirect the write. A runtime check
   normalizes only the CTA MaxCLL byte to AYANEO's advertised 800 nit maximum if
   the bridge or another tool publishes a different value.
 

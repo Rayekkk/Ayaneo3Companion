@@ -36,6 +36,8 @@ export interface State {
   gpu_power_w: number | null;
   screen_installed: boolean;
   screen_conflict: boolean;
+  screen_restart_needed?: boolean;
+  screen_native?: boolean;
   edid_patched: boolean;
   edid_game_nits: number;
   button_fix_installed: boolean;

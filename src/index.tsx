@@ -34,7 +34,7 @@ const ACTION_FIELDS: Record<ActionKey, ReadonlyArray<keyof State>> = {
   audio: ["audio_fix_enabled", "audio_fix_installed", "audio_calibration_available",
     "audio_calibration_last", "audio_profile", "audio_fix_error"],
   buttons: ["button_fix_installed", "tm_guard_enabled", "tm_guard_status", "tm_guard_recoveries"],
-  screen: ["screen_installed", "screen_conflict"],
+  screen: ["screen_installed", "screen_conflict", "screen_restart_needed", "screen_native"],
 };
 interface Tuning { spl: number; spptOff: number; fpptOff: number }
 
@@ -55,6 +55,7 @@ const ejectModules = callable<["left" | "right" | "both"], State>("eject_modules
 const resetModules = callable<[], State>("reset_modules");
 const setScreenFix = callable<[boolean, boolean?], State>("set_screen_fix");
 const setButtonFix = callable<[boolean], State>("set_button_fix");
+const restartGameMode = callable<[], State>("restart_game_mode");
 const setTmGuard = callable<[boolean], State>("set_tm_guard");
 const setAudioFix = callable<[boolean], State>("set_audio_fix");
 const reapplyAudioFix = callable<[], State>("reapply_audio_fix");
@@ -811,7 +812,10 @@ const Content: FC = () => {
       {link("modules", moduleSummary)}
       {link("battery", state.charge_bypass ? "Bypass charging active" : "Automatic charging")}
       {link("audio", audioSummary)}
-      {link("screen", state.screen_installed ? `Definition installed${state.edid_game_nits ? ` · ${state.edid_game_nits} nits` : ""}` : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed")}
+      {link("screen", state.screen_restart_needed ? "Restart Gaming Mode to finish"
+        : state.screen_native ? `SteamOS display profile${state.edid_game_nits ? ` · ${state.edid_game_nits} nits` : ""}`
+        : state.screen_installed ? `Definition installed${state.edid_game_nits ? ` · ${state.edid_game_nits} nits` : ""}`
+        : state.screen_conflict ? "Existing definition requires confirmation" : "Display definition not installed")}
     </PanelSection>
     <PanelSection title="Device">
       {infoRow(state.device, `SteamOS · TDP backend: ${state.tdp_backend}`)}
@@ -948,7 +952,9 @@ const Content: FC = () => {
       onTmGuard={enabled => void run("buttons", () => setTmGuard(enabled), "TM Guard failed", enabled ? "TM Guard enabled." : "TM Guard disabled.")}
     />}
 
-    {activeSection === "screen" && <DisplayPage state={state} busy={busy} onChange={changeScreenFix} />}
+    {activeSection === "screen" && <DisplayPage state={state} busy={busy} onChange={changeScreenFix}
+      onRestart={() => confirmAction("Restart Gaming Mode?", "Steam and any running game will close and reopen. Save your game first.",
+        "Restart", () => void run("screen", () => restartGameMode(), "Gaming Mode restart failed", "Gaming Mode is restarting."))} />}
 
     {activeSection === "about" && <AboutPage version={state.version} />}
 

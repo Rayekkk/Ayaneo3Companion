@@ -1136,6 +1136,7 @@ class LogicTests(unittest.TestCase):
 
     def test_display_switch_keeps_installed_definition_when_edid_retry_is_needed(self):
         with mock.patch.object(display_backend, "install_display_script") as install_display, \
+             mock.patch.object(display_backend, "is_our_display_script", return_value=True), \
              mock.patch.object(display_backend, "patch_published_edid", side_effect=OSError("busy")), \
              mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock()) as diagnostics, \
              mock.patch.object(main.decky.logger, "warning") as warning:

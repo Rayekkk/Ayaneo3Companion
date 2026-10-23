@@ -12,7 +12,7 @@ const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf
 const packageLock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
 const name = "Ayaneo3Companion";
 const files = [
-  "main.py", "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "module_runtime.py", "diagnostics.py", "system_process.py", "input_backend.py", "display_backend.py", "audio_backend.py", "power_backend.py", "controller_backend.py", "ec_backend.py", "companion_common.py", "plugin.json", "package.json", "package-lock.json",
+  "main.py", "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "display_script_io.py", "module_runtime.py", "diagnostics.py", "system_process.py", "input_backend.py", "display_backend.py", "audio_backend.py", "power_backend.py", "controller_backend.py", "ec_backend.py", "companion_common.py", "plugin.json", "package.json", "package-lock.json",
   "README.md", "CHANGELOG.md", "LICENSE", "NOTICE", "requirements.txt",
   "bootstrap.sh", "bootstrap_installer.py", "Install AYANEO 3 Companion.desktop", "rollup.config.js",
   "tsconfig.json", "src", "dist", "assets",
