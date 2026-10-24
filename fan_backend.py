@@ -373,11 +373,13 @@ class Client:
                 raise RuntimeError('Fan communication cleanup failed: '+str(errors[0])) from errors[0]
 
 
-def retire_legacy_guard():
+def retire_legacy_guard() -> bool:
     """Stop 1.2.x's manual-mode safety timer before this version owns the fan.
 
     Its transient unit would otherwise write automatic mode under a running curve;
-    the next session start releases any manual duty it left."""
+    the next session start releases any manual duty it left. True when 1.2.x left
+    a unit or its lease directory: evidence that a manual duty may be its own."""
+    found = LEGACY_LEASE_DIR.exists()
     import shutil
     import system_process
     try:
@@ -385,10 +387,12 @@ def retire_legacy_guard():
                                     'ayaneo3-companion-fan*'], 5, capture_output=True, text=True).stdout.split()
         units = [name for name in names if name.startswith('ayaneo3-companion-fan')]
         if units:
+            found = True
             system_process.run(['systemctl', 'stop', *units], 10, capture_output=True)
     except (OSError, subprocess.SubprocessError) as exc:
         diagnostic_event('fan', 'legacy_guard_stop_failed', level='warning', error=exc)
     shutil.rmtree(LEGACY_LEASE_DIR, ignore_errors=True)
+    return found
 
 
 def release_orphan():
@@ -572,7 +576,7 @@ class Plugin:
         self._load()
         try:
             await module_runtime.offload('fan', platform_check)
-            await module_runtime.offload('fan', retire_legacy_guard)
+            legacy = await module_runtime.offload('fan', retire_legacy_guard)
             self._supported = True
             diagnostic_transition('fan', 'availability', 'supported', supported=True)
             # Malformed/newer settings stay OFF and untouched until an explicit user edit.
@@ -585,7 +589,7 @@ class Plugin:
                     self._error = 'Resuming Fan Control after startup.'
                     self._task = asyncio.create_task(self._monitor(pending=True))
                     return  # The resumed session start releases any leftover override.
-            await self._release_leftover_override()
+            await self._release_leftover_override(legacy)
         except Exception as exc:
             self._error = str(exc)
             diagnostic_transition('fan', 'availability', 'unavailable', level='warning' if self._supported else 'info', error=exc,
@@ -597,14 +601,21 @@ class Plugin:
                 except Exception as save_error:
                     self._error += ' ' + str(save_error)
 
-    async def _release_leftover_override(self):
-        """Fan stays OFF: release once a manual duty left by a killed session or 1.2.x."""
+    async def _release_leftover_override(self, legacy: bool = False):
+        """Fan stays OFF: release once a manual duty left by a killed session or 1.2.x.
+
+        Only with evidence that the duty is Companion's: another fan tool (e.g. a Decky
+        plugin, invisible to the process scan) must not be reset on every start."""
         async with self._mutation:
             if self._closing or self._state['enabled']:
                 return  # An explicit enable's own session start releases it.
             observed = await module_runtime.complete(module_runtime.offload('fan', read_automatic))
             # external_override = a manual duty with a free owner lock and no known fan program.
             if observed.get('ownership', {}).get('state') != 'external_override':
+                return
+            previous = await module_runtime.offload('fan', last_session)
+            if not legacy and not (previous and previous.get('automatic') is not True):
+                diagnostic_event('fan', 'foreign_override_left', level='info', stage='startup')
                 return
             try:
                 await module_runtime.offload('fan', release_orphan)

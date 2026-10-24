@@ -268,10 +268,15 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         def client():
             made.append(clients.pop(0) if clients else FakeClient());return made[-1]
         orphan=dict(valid=True,rpm=0,automatic=False,error='',ownership=dict(blocked=False,state='external_override',override=79,reason=''))
+        ours=dict(session='session-killed',active=True,automatic=False)  # this boot's last session never proved automatic
         with patch.object(fan,'platform_check',return_value={}),patch.object(fan,'Client',side_effect=client):
-            for observed,clients,count,error in ((orphan,[],1,''),(fan.read_automatic.return_value,[],0,''),
-                                                  (orphan,[RefusedClient()],1,'release failed')):
-                with self.subTest(state=observed['ownership']['state'],error=error),patch.object(fan,'read_automatic',return_value=observed):
+            for observed,clients,count,error,receipt,legacy in (
+                    (orphan,[],1,'',ours,False),(fan.read_automatic.return_value,[],0,'',ours,False),
+                    (orphan,[RefusedClient()],1,'release failed',ours,False),
+                    (orphan,[],1,'',{},True),  # 1.2.x's guard or lease was still there
+                    # No evidence the duty is ours: another fan tool keeps the fan.
+                    (orphan,[],0,'',{},False),(orphan,[],0,'',dict(ours,automatic=True),False)):
+                with self.subTest(state=observed['ownership']['state'],error=error,receipt=receipt,legacy=legacy),                         patch.object(fan,'read_automatic',return_value=observed),                         patch.object(fan,'last_session',return_value=receipt),                         patch.object(fan,'retire_legacy_guard',return_value=legacy):
                     made.clear();fresh=fan.Plugin();self.supervisors.append(fresh)
                     await fresh._main()
                     self.assertEqual(len(made),count);self.assertTrue(all(c.calls==[] for c in made))

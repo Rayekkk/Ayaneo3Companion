@@ -191,11 +191,22 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
   const dirtyRef = useRef(false), mounted = useRef(false), baseRevision = useRef(0);
   const mutationEpoch = useRef(0), busyRef = useRef(false), acceptedRevision = useRef(-1);
   const scopeRef = useRef(scope);
+  const statusRef = useRef<FanState | null>(null);
   scopeRef.current = scope; dirtyRef.current = dirty;
   const accept = (next: FanState) => {
     if (!mounted.current) return;
     if (next.settings.revision < acceptedRevision.current) return;
     acceptedRevision.current = next.settings.revision;
+    // A revision bump that changed no curve (a fault turning it off, a failed enable) must
+    // not leave unsaved drafts refused as "changed elsewhere": move them to the new revision.
+    const prior = statusRef.current;
+    if (prior && next.settings.revision !== prior.settings.revision
+        && JSON.stringify([prior.settings.global_curve, prior.settings.presets])
+          === JSON.stringify([next.settings.global_curve, next.settings.presets])) {
+      if (baseRevision.current === prior.settings.revision) baseRevision.current = next.settings.revision;
+      for (const entry of Object.values(drafts.current)) if (entry.revision === prior.settings.revision) entry.revision = next.settings.revision;
+    }
+    statusRef.current = next;
     setReadError("");
     setStatus(next);
     if (!next.settings.assign_tdp_presets && scopeRef.current !== "global") {

@@ -320,5 +320,13 @@ run(async()=>{
   assert.match(button(rt,'Save global curve').props.description,/CAS revision/,'A concurrent curve change is never overwritten');
   assert.equal(raced.getState().settings.global_curve[0][1],55);
   assert.equal(find(rt,n=>n.type===raced.exports.CurveGraph).props.curve[0][1],30,'The refused draft is preserved');raced.unmount();
+  // A fault turns Fan Control off (revision +1, curves untouched) while the user edits: the draft stays saveable.
+  const faulted=harness(on);faulted.render();await flush();let ft=faulted.render();
+  find(ft,n=>n.type===faulted.exports.CurveGraph).props.edit(1,30,0);ft=faulted.render();
+  faulted.foreign(s=>{s.settings.enabled=false;s.settings.revision++;});
+  faulted.poll();await flush();ft=faulted.render();
+  button(ft,'Save global curve').props.onClick();await flush();ft=faulted.render();
+  assert.equal(faulted.getState().settings.global_curve[0][1],30,'A non-curve revision bump never strands the edit');
+  assert.equal(button(ft,'Save global curve').props.description,undefined);faulted.unmount();
   console.log('Fan Control: eight points in percent, ordered 0–100°C, stop/deadband, dirty scopes, CAS/failures/late reads, graph buttons, full-screen parent pause, conflict block, expiry and hidden cleanup passed.');
 });
