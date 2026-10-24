@@ -2,7 +2,7 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
-## [1.3.0] - in development
+## [1.3.0] - 2026-10-24
 
 This release brings LegionGo2Companion's design and safety work to AYANEO 3
 Companion, including its TDP Control and Fan Control.
@@ -60,6 +60,27 @@ Companion, including its TDP Control and Fan Control.
 - **L5/R5 after reinstalling.** Uninstall and Install Plugin from ZIP no longer
   leaves LC1/RC1 silent while the switch shows them enabled.
 - The overview no longer shows 800 nits before the display has been read.
+- **Turning the display definition off** now asks for the Gaming Mode restart it
+  needs, and puts back a definition Companion had replaced. The HDR fix can be
+  switched on again while SteamOS's own display profile is in use.
+- **Backups survive SteamOS updates:** speaker-calibration and display backups
+  move from `/var/lib`, which each SteamOS copy keeps separately, to
+  `/home/.ayaneo3companion-backups`.
+- **TM Guard knows when to stop:** after three tries it asks you to press TM
+  until the light is white instead of restarting the controller again and
+  again, and a USB keyboard with the same chip no longer sets it off.
+- **Speaker tuning in the background** never interrupts playback, and stops
+  retrying when the tuning does not take.
+- **TDP:** a change right after plugging in the charger no longer leaves 28 W, a
+  CPU Boost change during a profile switch no longer loses the game's profile,
+  CPU Boost and EPP are left to PowerStation while it runs, and **Retry**
+  appears when the RyzenAdj helper breaks while running.
+- **Fan Control** no longer takes the fan from another fan tool at startup, and
+  an edited curve can still be saved after Fan Control turned off on an error.
+- **Uninstall turns charge bypass off** whenever the hardware has it on, even
+  when the saved settings say otherwise.
+- **Reset Magic Modules** works again after a module was pushed back in after
+  Eject.
 
 ### Improvements
 
@@ -75,6 +96,8 @@ Companion, including its TDP Control and Fan Control.
   newest ten.
 - Helper programs no longer inherit Decky's bundled libraries, and Decky 3.2's
   stop hang no longer delays restoring the hardware.
+- **Lighter background checks:** the monitors no longer rescan every device
+  twice a second, and the controller's memory is written once per change.
 
 ## [1.2.0] - 2026-10-10
 
