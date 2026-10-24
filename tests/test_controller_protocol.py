@@ -403,7 +403,8 @@ class ControllerProtocolTests(unittest.TestCase):
                 self.assertEqual(controller_backend._input_event_identity(str(node)), first)
                 self.assertEqual(len(reads), 3, "the second call reads nothing from sysfs")
                 (ident / "id" / "vendor").write_text("045e\n")
-                node.unlink(); node.write_text("x")  # the kernel recreated the node (new inode)
+                # The kernel recreated the node. Made before the old one goes, so ext4 cannot reuse its inode.
+                fresh = root / "event5.new"; fresh.write_text("x"); os.replace(fresh, node)
                 second = controller_backend._input_event_identity(str(node))
                 self.assertEqual(second[0], "045e")
                 (ident / "id" / "vendor").write_text("\n")
