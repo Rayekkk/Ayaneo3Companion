@@ -345,7 +345,11 @@ def audio_fix_ready() -> bool:
     )
 
 
-def _apply_audio_fix_locked() -> None:
+class AudioBusy(RuntimeError):
+    """Sound is playing and the caller must not stop PipeWire for the DSP reload."""
+
+
+def _apply_audio_fix_locked(stop_playback: bool = True) -> None:
     if not companion_common.supported_device():
         raise RuntimeError("audio fix is restricted to AYANEO 3")
     _prepare_audio_aliases()
@@ -359,6 +363,9 @@ def _apply_audio_fix_locked() -> None:
     card = _audio_card_index()
     if card is None:
         raise RuntimeError("AYANEO CS35L41 audio controls were not found")
+    if not stop_playback and _audio_playback_active(card):
+        # Background retries wait for silence: the reload would stop PipeWire mid-game.
+        raise AudioBusy("audio is playing; speaker tuning waits until it stops")
     try:
         AUDIO_FIRMWARE_PATH.write_text(str(AUDIO_FIRMWARE_ROOT) + "\n")
         if AUDIO_FIRMWARE_PATH.read_text().strip() != str(AUDIO_FIRMWARE_ROOT):
@@ -377,10 +384,11 @@ def _apply_audio_fix_locked() -> None:
         raise
 
 
-def apply_audio_fix() -> None:
+def apply_audio_fix(stop_playback: bool = True) -> None:
+    """stop_playback=False (background work) refuses with AudioBusy while sound plays."""
     companion_common.require_supported_device("audio tuning")
     with _audio_apply_lock:
-        _apply_audio_fix_locked()
+        _apply_audio_fix_locked(stop_playback)
 
 
 def _remove_audio_fix_locked(reload_dsp: bool = True) -> None:
@@ -485,13 +493,32 @@ def _set_audio_firmware_type(card: int, profile: int) -> None:
                 decky.logger.error(f"{LOG} could not recover {control}: {error}")
 
 
+AUDIO_AMPLIFIER_SYSFS = Path("/sys/bus/i2c/devices")
+
+
+def _audio_i2c_bus() -> str:
+    """The speaker amplifiers' I2C bus, from sysfs: the number depends on probe order.
+
+    i2ctransfer runs with -f (past the bound driver), so a guessed bus could write
+    the calibration into another device.
+    """
+    buses = {path.resolve().parent.name
+             for path in AUDIO_AMPLIFIER_SYSFS.glob("i2c-CSC3551:00-cs35l41-hda.*")}
+    if len(buses) != 1 or not next(iter(buses)).startswith("i2c-"):
+        raise RuntimeError(f"AYANEO speaker amplifiers not found on one I2C bus: {sorted(buses)}")
+    bus = next(iter(buses))[4:]
+    if not bus.isdigit():
+        raise RuntimeError(f"unexpected I2C bus for the speaker amplifiers: {bus}")
+    return bus
+
+
 def _i2c_register_arguments(address: str, register: int) -> list[str]:
     return [f"0x{(register >> shift) & 0xff:02x}" for shift in (24, 16, 8, 0)]
 
 
 def _read_audio_dsp_register(address: str, register: int) -> int:
     result = system_process.run([
-        "/usr/bin/i2ctransfer", "-f", "-y", "1", f"w4@{address}",
+        "/usr/bin/i2ctransfer", "-f", "-y", _audio_i2c_bus(), f"w4@{address}",
         *_i2c_register_arguments(address, register), "r4",
     ], 5, capture_output=True, text=True)
     if result.returncode:
@@ -509,7 +536,7 @@ def _read_audio_dsp_register(address: str, register: int) -> int:
 def _write_audio_dsp_register(address: str, register: int, value: int) -> None:
     data = [f"0x{byte:02x}" for byte in int(value).to_bytes(4, "big")]
     result = system_process.run([
-        "/usr/bin/i2ctransfer", "-f", "-y", "1", f"w8@{address}",
+        "/usr/bin/i2ctransfer", "-f", "-y", _audio_i2c_bus(), f"w8@{address}",
         *_i2c_register_arguments(address, register), *data,
     ], 5, capture_output=True, text=True)
     if result.returncode:

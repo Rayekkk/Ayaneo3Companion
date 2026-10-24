@@ -1040,9 +1040,17 @@ class Plugin:
                     return False
                 if self._closing:
                     return True
-                audio_backend.apply_audio_fix()
+                # Never stops PipeWire: while sound plays this raises AudioBusy and waits.
+                audio_backend.apply_audio_fix(stop_playback=False)
                 if not audio_backend.audio_fix_ready():
-                    raise RuntimeError("both AYANEO speaker DSPs did not enter the tuned profile")
+                    # It ran and did not take: retrying every minute only reloads the DSPs
+                    # again. Stop here; Apply in the Audio page still tries.
+                    with _lock:
+                        if not self._closing and Plugin._state is state:
+                            state.update(audio_calibration_available=False,
+                                         audio_fix_error="both AYANEO speaker DSPs did not enter the tuned profile")
+                    decky.logger.warning(f"{LOG} speaker tuning did not take; background retries stopped")
+                    return True
             with _lock:
                 if not self._closing and Plugin._state is state:
                     state.update(audio_fix_supported=True, audio_fix_installed=True,

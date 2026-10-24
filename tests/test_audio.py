@@ -14,6 +14,55 @@ import audio_backend
 
 
 class AudioTests(unittest.TestCase):
+    def test_background_tuning_never_stops_pipewire_while_sound_plays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "path"
+            path.write_text("\n")
+            with mock.patch.object(main.companion_common, "supported_device", return_value=True), \
+                 mock.patch.object(audio_backend, "_prepare_audio_aliases"), \
+                 mock.patch.object(audio_backend, "AUDIO_FIRMWARE_PATH", path), \
+                 mock.patch.object(audio_backend, "_audio_card_index", return_value=0), \
+                 mock.patch.object(audio_backend, "_audio_playback_active", return_value=True), \
+                 mock.patch.object(audio_backend, "_set_audio_services") as services, \
+                 mock.patch.object(audio_backend, "_reload_audio_dsps") as reload:
+                with self.assertRaises(audio_backend.AudioBusy):
+                    audio_backend.apply_audio_fix(stop_playback=False)
+                services.assert_not_called(); reload.assert_not_called()
+                self.assertEqual(path.read_text(), "\n", "nothing changes before the refusal")
+                audio_backend.apply_audio_fix()  # the Audio page's Apply may stop it
+                reload.assert_called_once()
+
+    def test_background_tuning_stops_retrying_once_an_apply_did_not_take(self):
+        plugin = main.Plugin()
+        state = {"audio_fix_enabled": True}
+        with mock.patch.object(main.Plugin, "_state", state), \
+             mock.patch.object(audio_backend, "audio_fix_ready", return_value=False), \
+             mock.patch.object(audio_backend, "audio_fix_supported", return_value=True), \
+             mock.patch.object(audio_backend, "apply_audio_fix") as apply:
+            self.assertTrue(plugin._restore_audio_once(), "no endless minute-by-minute DSP reloads")
+        apply.assert_called_once_with(stop_playback=False)
+        self.assertIn("did not enter the tuned profile", state["audio_fix_error"])
+
+    def test_calibration_i2c_bus_comes_from_sysfs_never_a_guess(self):
+        # As on the console: /sys/bus/i2c/devices/i2c-CSC3551:00-cs35l41-hda.N -> .../AMDI0010:01/i2c-1/...
+        class Devices:
+            def __init__(self, *found):
+                self.found = [Path(path) for path in found]
+            def glob(self, pattern):
+                self.pattern = pattern
+                return self.found
+        both = Devices("/sys/devices/platform/AMDI0010:01/i2c-1/amp0", "/sys/devices/platform/AMDI0010:01/i2c-1/amp1")
+        with mock.patch.object(Path, "resolve", lambda path: path), \
+             mock.patch.object(audio_backend, "AUDIO_AMPLIFIER_SYSFS", both):
+            self.assertEqual(audio_backend._audio_i2c_bus(), "1")
+            self.assertEqual(both.pattern, "i2c-CSC3551:00-cs35l41-hda.*")
+            for devices, error in ((Devices(), "not found"),
+                                   (Devices("/sys/x/i2c-1/amp0", "/sys/x/i2c-3/amp1"), "one I2C bus")):
+                with self.subTest(error=error), \
+                     mock.patch.object(audio_backend, "AUDIO_AMPLIFIER_SYSFS", devices), \
+                     self.assertRaisesRegex(RuntimeError, error):
+                    audio_backend._audio_i2c_bus()
+
     def test_audio_alias_names_preserve_compression(self):
         source = Path("cs35l41-dsp1-spk-prot-1f660105.bin.zst")
         self.assertEqual(audio_backend._audio_alias_filenames(source), (
