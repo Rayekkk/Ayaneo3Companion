@@ -71,6 +71,7 @@ class CpuProfileTests(unittest.TestCase):
         }.items():
             self.stack.enter_context(patch.object(tdp, name, side_effect=callback))
         self.stack.enter_context(patch.object(tdp, '_supported_model', return_value=True))
+        self.stack.enter_context(patch.object(tdp, '_powerstation_active', return_value=False))
         self.plugin = tdp.Plugin()
         self.plugin._ready = True
 

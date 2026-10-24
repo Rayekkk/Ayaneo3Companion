@@ -298,11 +298,13 @@ interface CpuPowerControlsSectionProps {
   powerSource?: boolean;
   onBusyChange?: (owner: object, busy: boolean) => void;
   onCompatibilityNote?: (note: string) => void;
+  /** A page operation (Global, Delete, apply) is running: a CPU edit now would race it. */
+  pageBusy?: boolean;
 }
 
 const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   appId = "", acProfile = false, expectedAppId = "",
-  powerSource = false, onBusyChange, onCompatibilityNote,
+  powerSource = false, onBusyChange, onCompatibilityNote, pageBusy = false,
 }: CpuPowerControlsSectionProps = {}) => {
   const [controls, setControls] = useState<CpuPowerControls | null>(null);
   const [loading, setLoading] = useState(false);
@@ -559,7 +561,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   const shown = editorControls(controls);
   const boost = shown.cpu_boost;
   const epp = shown.epp;
-  const busy = loading || changing !== null || eppPending;
+  const busy = loading || pageBusy || changing !== null || eppPending;
   const title = eppTitle(epp);
   const biasProfiles = epp.profiles.filter((profile) =>
     Object.prototype.hasOwnProperty.call(EPP_NAMED_VALUES, profile));
@@ -598,7 +600,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
             step={10}
             showValue={true}
             valueSuffix="%"
-            disabled={loading || changing !== null || !epp.available}
+            disabled={loading || pageBusy || changing !== null || !epp.available}
             onChange={scheduleNumericEpp}
             description={errorFor("epp") || (
               epp.available && (changing === "epp" || eppPending) ? "Applying…" : eppNote(epp))}
@@ -1597,6 +1599,7 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
         powerSource={acOnline}
         onBusyChange={onCpuBusyChange}
         onCompatibilityNote={setCpuNote}
+        pageBusy={s.loading}
       />}
 
       {moreSection(s)}

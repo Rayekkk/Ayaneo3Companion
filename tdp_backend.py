@@ -505,7 +505,12 @@ def _prepare_cpu_profile(
     """
     existing = profiles.get(app_id)
     creating = existing is None
-    if creating and len(profiles) + len(_load_inactive_profiles()) >= MAX_GAME_PROFILES:
+    inactive = _load_inactive_profiles() if creating else {}
+    if app_id in inactive:
+        # A CPU edit racing "Global" would add a second, active copy, and turning the
+        # game's profile back on would then discard the tuned one.
+        raise ValueError("this game's profile is turned off; turn it on to change its CPU settings")
+    if creating and len(profiles) + len(inactive) >= MAX_GAME_PROFILES:
         raise ValueError("maximum number of game profiles reached")
     for field in (SETTINGS_FIELD_CPU_BOOST_ENABLED, SETTINGS_FIELD_EPP):
         if state.get(field) is not None or (
@@ -772,7 +777,13 @@ def _ensure_ryzenadj(cancel=None, download=True) -> bool:
 
 def _run_ryzenadj(args: list, timeout: float = 5.0) -> tuple[int, str, str]:
     """Run the verified ryzenadj, return (returncode, stdout, stderr)."""
-    if not _ryzenadj_available or not _helper_verified():
+    global _ryzenadj_available
+    if not _ryzenadj_available:
+        return -1, "", "verified ryzenadj is unavailable"
+    if not _helper_verified():
+        # Changed or deleted since start: the page shows Retry, which fetches it again.
+        _ryzenadj_available = False
+        event('tdp', 'helper_verification_failed', level='error', stage='run')
         return -1, "", "verified ryzenadj is unavailable"
     return _spawn_ryzenadj(args, timeout)
 
@@ -1041,6 +1052,19 @@ def _arm_ac_settle(target: tuple) -> int:
 
 def _cancel_ac_settle() -> int:
     return _arm_ac_settle(())
+
+
+def _settle_on(target: tuple) -> None:
+    """A write made while the re-apply after a charger change still runs: defend it.
+
+    Cancelling would let the firmware's delayed charger profile lower SPL to
+    28 W after the write, and without readback nothing would notice.
+    """
+    global _ac_target
+    if _ac_target and time.monotonic() - _ac_changed_at < sum(AC_SETTLE_DELAYS_S):
+        _ac_target = tuple(target)
+    else:
+        _cancel_ac_settle()
 
 
 def _apply_and_record(spl: int, sppt: int, fppt: int, why: str, reason: str) -> dict:
@@ -1774,6 +1798,10 @@ def _best_effort_reapply_saved_cpu_power_locked(state: dict) -> list[str]:
     """
     errors: list[str] = []
     try:
+        # PowerStation owns CPU Boost and EPP too while it runs: no second writer, every minute.
+        # An undetermined owner raises and is reported like any failed restore.
+        if _powerstation_active():
+            return errors
         state = _effective_cpu_state(state)
         boost = state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
         if type(boost) is bool:
@@ -1820,7 +1848,7 @@ def _apply_active_target(state: dict, cpu_state: dict, target: tuple) -> dict:
     result = _apply_limits_with_saved_cpu_power(cpu_state, *target)
     if result["success"]:
         state["active_spl"], state["active_sppt"], state["active_fppt"] = target
-        _cancel_ac_settle()
+        _settle_on(target)
     return result
 
 
@@ -2021,7 +2049,7 @@ def _apply_tdp_locked(s: dict, app_id: str, spl: int, sppt: int, fppt: int,
         if app_id:
             values[SETTINGS_KEY_GAME_PROFILES] = profiles
         _write_keys(values)
-        _cancel_ac_settle()
+        _settle_on(want)
         result.update(applied=True, saved_only=False)
         return restore_failed(result)
 
@@ -2414,7 +2442,7 @@ class Plugin:
                 result = _apply_limits_with_saved_cpu_power(s, *target)
                 if result["success"]:
                     _save_active(s, *target)
-                    _cancel_ac_settle()
+                    _settle_on(target)
                 decky.logger.info(
                     f"{LOG} reapply after resume: success={result['success']}")
                 return {"success": result["success"], "skipped": False,

@@ -316,5 +316,56 @@ class AyaneoTdpTests(unittest.TestCase):
         self.assertEqual(self.smu[0], 28.0, "the firmware's own value stays")
 
 
+class ChargerSettleTests(unittest.TestCase):
+    def test_a_write_inside_the_charger_window_keeps_being_defended(self):
+        # The firmware's delayed charger profile lowers SPL to 28 W; without readback
+        # nothing notices if a user write cancels the re-apply sequence.
+        clock = [100.0]
+        with patch.object(tdp.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(tdp, "_ac_changed_at", 99.0), \
+             patch.object(tdp, "_ac_target", (28000, 43000, 45000)), \
+             patch.object(tdp, "_ac_generation", 7):
+            tdp._settle_on((30000, 43000, 45000))
+            self.assertEqual(tdp._ac_target, (30000, 43000, 45000))
+            self.assertEqual(tdp._ac_generation, 7, "the running sequence carries on")
+            clock[0] = 99.0 + sum(tdp.AC_SETTLE_DELAYS_S) + 1
+            tdp._settle_on((10000, 15000, 20000))
+            self.assertEqual(tdp._ac_target, ())
+            self.assertEqual(tdp._ac_generation, 8, "outside the window a write ends it")
+
+
+class PowerStationCpuTests(unittest.TestCase):
+    def test_background_cpu_restore_never_fights_powerstation(self):
+        state = {"cpu_boost_enabled": False, "epp": "balance_power"}
+        with patch.object(tdp, "_apply_cpu_boost_hardware") as boost, \
+             patch.object(tdp, "_apply_epp_hardware") as epp:
+            with patch.object(tdp, "_powerstation_active", return_value=True):
+                self.assertEqual(tdp._best_effort_reapply_saved_cpu_power_locked(state), [])
+            with patch.object(tdp, "_powerstation_active", side_effect=RuntimeError("busctl hung")):
+                self.assertTrue(tdp._best_effort_reapply_saved_cpu_power_locked(state), "an unknown owner is reported")
+            boost.assert_not_called(); epp.assert_not_called()
+
+
+class HelperRuntimeTests(unittest.TestCase):
+    def test_a_helper_changed_after_start_turns_into_a_retry_instead_of_dead_sliders(self):
+        with patch.object(tdp, "_ryzenadj_available", True), \
+             patch.object(tdp, "_helper_verified", return_value=False), \
+             patch.object(tdp, "_spawn_ryzenadj") as spawn:
+            self.assertEqual(tdp._run_ryzenadj(["--info"])[0], -1)
+            self.assertFalse(tdp._ryzenadj_available, "get_caps now offers Retry")
+        spawn.assert_not_called()
+
+
+class GameProfileRaceTests(unittest.TestCase):
+    def test_a_cpu_edit_never_recreates_a_profile_that_was_just_turned_off(self):
+        state = {"spl": 15000, "sppt": 25000, "fppt": 30000, "active_preset": "balanced"}
+        tuned = {"spl": 22000, "sppt": 30000, "fppt": 35000, "preset": "custom"}
+        profiles = {}
+        with patch.object(tdp, "_load_inactive_profiles", return_value={"42": tuned}):
+            with self.assertRaisesRegex(ValueError, "turned off"):
+                tdp._prepare_cpu_profile(state, profiles, "42")
+        self.assertEqual(profiles, {}, "no second, active copy next to the tuned one")
+
+
 if __name__ == "__main__":
     unittest.main()
