@@ -240,10 +240,13 @@ class TmGuardTests(unittest.TestCase):
 
     def test_only_an_arrow_on_the_controllers_own_keyboard_counts_as_latched(self):
         import types
-        held = {"/dev/input/event4": {103}, "/dev/input/event7": {108}, "/dev/input/event9": {38}}
+        held = {"/dev/input/event4": {103}, "/dev/input/event7": {108}, "/dev/input/event9": {38},
+                "/dev/input/event12": {103}}
         identity = {"/dev/input/event4": ("1c4f", "0002", "usb-0000:c4:00.3-1/input1"),
                     "/dev/input/event7": ("045e", "028e", "usb-0000:c4:00.3-2/input0"),
-                    "/dev/input/event9": ("1c4f", "0002", "usb-0000:c4:00.3-1/input1")}
+                    "/dev/input/event9": ("1c4f", "0002", "usb-0000:c4:00.3-1/input1"),
+                    # An external USB keyboard with the same SiGma Micro chip
+                    "/dev/input/event12": ("1c4f", "0002", "usb-0000:c4:00.4-2/input0")}
         opened = {}
         def ioctl(fd, request, keys):
             self.assertEqual(request, controller_backend.EVIOCGKEY)
@@ -254,7 +257,8 @@ class TmGuardTests(unittest.TestCase):
             return len(opened) + 9
         for nodes, expected in ((["/dev/input/event4"], True),  # Up on the controller keyboard
                                 (["/dev/input/event7"], False),  # D-pad down on the Xbox pad is real input
-                                (["/dev/input/event9"], False)):  # L from LC1 is not an arrow
+                                (["/dev/input/event9"], False),  # L from LC1 is not an arrow
+                                (["/dev/input/event12"], False)):  # a held arrow on another keyboard is real
             opened.clear()
             with self.subTest(nodes=nodes), \
                  mock.patch.object(controller_backend.glob, "glob", return_value=nodes), \
@@ -302,6 +306,46 @@ class TmGuardTests(unittest.TestCase):
             clock[0] += 1
             self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "tm_power_cycle",
                              "a TM press right after a recovery still gets its own power cycle")
+
+    def test_a_restore_with_tm_guard_off_leaves_the_users_tm_mode_alone(self):
+        config = dict(controller_backend.DEFAULT_CONTROLLER)
+        tm = bytearray(controller_report(config)); tm[controller_backend.AYA_CUSTOM_REQUIRED_INDEX] = 3
+        sent = []
+        def exchange(_fd, command, timeout=0.4, attempts=3):
+            sent.append(command)
+            return bytes(tm)
+        with mock.patch.object(companion_common, "supported_device", return_value=True), \
+             mock.patch.object(controller_backend, "vendor_hidraw", return_value="/dev/fake"), \
+             mock.patch.object(os, "open", return_value=7), mock.patch.object(os, "close"), \
+             mock.patch.object(os, "O_NONBLOCK", 0, create=True), \
+             mock.patch.object(controller_backend, "_hid_exchange", side_effect=exchange), \
+             mock.patch.object(controller_backend, "_switch_to_custom_mode_fd") as switch:
+            self.assertFalse(controller_backend.apply_controller(config, leave_tm=False))
+        switch.assert_not_called()
+        self.assertEqual(sent, [controller_backend.AYA_CHECK], "nothing but the mode check")
+
+    def test_power_cycles_stop_after_three_tries_that_do_not_leave_tm_mode(self):
+        config = dict(controller_backend.DEFAULT_CONTROLLER)
+        tm = bytearray(controller_report(config)); tm[controller_backend.AYA_CUSTOM_REQUIRED_INDEX] = 1
+        with contextlib.ExitStack() as stack:
+            for item in (mock.patch.object(companion_common, "supported_device", return_value=True),
+                         mock.patch.object(controller_backend, "vendor_hidraw", return_value="/dev/fake"),
+                         mock.patch.object(os, "open", return_value=7), mock.patch.object(os, "close"),
+                         mock.patch.object(os, "O_NONBLOCK", 0, create=True),
+                         mock.patch.object(controller_backend.time, "sleep"),
+                         mock.patch.object(controller_backend, "_tm_power_cycled_at", None),
+                         mock.patch.object(controller_backend, "_tm_power_cycles", 0),
+                         mock.patch.object(controller_backend, "_hid_exchange", return_value=bytes(tm)),
+                         mock.patch.object(controller_backend.ec_backend, "set_controller_power")):
+                stack.enter_context(item)
+            for _ in range(controller_backend.TM_POWER_CYCLE_LIMIT):
+                self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "tm_power_cycle")
+                controller_backend.power_cycle_controller()
+                controller_backend._consume_power_cycle()  # the switch window ran out, still TM mode
+            self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "tm_stuck",
+                             "a firmware that keeps TM mode must not lose power every half minute")
+            controller_backend.controller_settled()  # the user pressed TM back to custom mode
+            self.assertEqual(controller_backend.reconcile_controller(config, True)[0], "tm_power_cycle")
 
     def test_switch_out_of_tm_mode_resets_the_gamepad_after_the_mode_is_verified(self):
         tm, custom = bytearray(64), bytearray(64)

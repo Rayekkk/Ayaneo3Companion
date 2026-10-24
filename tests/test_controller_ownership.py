@@ -37,6 +37,12 @@ class ControllerOwnershipTests(unittest.TestCase):
             controller_backend, "reconcile_controller", return_value=("healthy", "/dev/hidraw0")))
         self.apply = self.stack.enter_context(patch.object(controller_backend, "apply_controller"))
         self.gain = self.stack.enter_context(patch.object(controller_backend, "set_vibration_gain"))
+        for name, value in (("_rear_buttons_pending", False), ("_rear_buttons_failures", 0),
+                            ("_rear_buttons_retry_at", 0.0)):
+            self.stack.enter_context(patch.object(main.Plugin, name, value))
+        self.stack.enter_context(patch.object(controller_backend, "_tm_power_cycles", 0))
+        self.clock = [1000.0]
+        self.stack.enter_context(patch.object(main.time, "monotonic", side_effect=lambda: self.clock[0]))
         self.plugin = main.Plugin()
 
     def test_monitor_shows_the_controller_state_and_only_guards_tm_mode(self):
@@ -61,6 +67,9 @@ class ControllerOwnershipTests(unittest.TestCase):
         main.Plugin._reconcile_current_controller(True)
         self.assertTrue(main.Plugin._rear_buttons_pending, "a failed write is retried")
         self.reconcile.return_value = ("healthy", "/dev/hidraw0")
+        main.Plugin._reconcile_current_controller(True)
+        self.assertEqual(program.call_count, 1, "a module reset and NVRAM save are never retried every half second")
+        self.clock[0] += 10.0
         main.Plugin._reconcile_current_controller(True)
         self.assertEqual(program.call_count, 2)
         self.assertFalse(main.Plugin._rear_buttons_pending)

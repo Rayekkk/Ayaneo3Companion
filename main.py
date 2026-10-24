@@ -37,6 +37,7 @@ import system_process  # noqa: E402
 from companion_common import LOG  # noqa: E402
 
 TM_GUARD_INTERVAL = 0.5
+TM_GUARD_STUCK = "Could not leave TM mode; press TM until the light is white"
 CONTROLLER_GAIN_CHECK_INTERVAL = 2.0
 CONTROLLER_RESUME_THRESHOLD = 1.0
 # Only diagnostic fields are remembered by a status read. Applied values and
@@ -164,6 +165,9 @@ class Plugin:
     _tm_guard_task = None
     _vibration_gain_task = None
     _rear_buttons_pending = False  # LC1/RC1 still need programming after TM mode
+    _rear_buttons_failures = 0
+    _rear_buttons_retry_at = 0.0
+    _module_operation_running = False  # an eject or reset RPC is still talking to the controller
     _audio_task = None
 
     def __init__(self):
@@ -292,11 +296,16 @@ class Plugin:
                     cls._state.update(controller=dict(controller), controller_seeded=True)
             status, path = controller_backend.reconcile_controller(
                 controller, recover_custom, force, repair=owned)
-            if (recover_custom and status in ("healthy", "configuration_restored")
-                    and controller_backend.latched_arrow_key()):
-                # A D-pad held while TM mode was left: only a power cycle releases it.
-                decky.logger.info(f"{LOG} TM Guard: arrow key latched after TM mode")
-                status = "tm_power_cycle"
+            if status in ("healthy", "configuration_restored"):
+                if recover_custom and controller_backend.latched_arrow_key():
+                    # A D-pad held while TM mode was left: only a power cycle releases it.
+                    if controller_backend.power_cycles_exhausted():
+                        status = "tm_stuck"
+                    else:
+                        decky.logger.info(f"{LOG} TM Guard: arrow key latched after TM mode")
+                        status = "tm_power_cycle"
+                else:
+                    controller_backend.controller_settled()
             # Measured on the console: TM mode can wipe the button table, so
             # LC1/RC1 send nothing until it is programmed again.
             if status == "tm_power_cycle":
@@ -306,11 +315,16 @@ class Plugin:
                 return status, path  # the controller is re-enumerating; the next pass switches it back
             if status == "mode_restored":
                 cls._rear_buttons_pending = True
-            if cls._rear_buttons_pending:
+            now = time.monotonic()
+            if cls._rear_buttons_pending and now >= cls._rear_buttons_retry_at:
                 try:
                     cls._restore_rear_buttons()
                     cls._rear_buttons_pending = False
+                    cls._rear_buttons_failures = 0
                 except Exception as error:
+                    # Each try resets the modules and saves NVRAM: back off, never every half second.
+                    cls._rear_buttons_failures += 1
+                    cls._rear_buttons_retry_at = now + min(300.0, 5.0 * 2 ** cls._rear_buttons_failures)
                     decky.logger.warning(f"{LOG} LC1/RC1 bindings will be programmed again: {error}")
                 else:
                     decky.logger.info(f"{LOG} programmed LC1/RC1 again after TM mode")
@@ -327,7 +341,12 @@ class Plugin:
                 if not cls._state.get("controller_owned", True):
                     return None
                 controller = dict(cls._state["controller"])
-            controller_backend.apply_controller(controller, persist_firmware=persist_firmware)
+                leave_tm = cls._state.get("tm_guard_enabled", True)
+            # With TM Guard off a restore leaves the user's TM mode alone; the monitor
+            # restores the rest once the controller is back in custom mode.
+            if not controller_backend.apply_controller(controller, persist_firmware=persist_firmware,
+                                                       leave_tm=leave_tm):
+                return None
             controller_backend.set_vibration_gain(controller["ff_gain"])
             return controller
 
@@ -711,7 +730,11 @@ class Plugin:
             if side in ("right", "both"):
                 Plugin._state["module_right"] = controller_backend.module_info("right", status="ejecting")
         try:
-            await self._offload(controller_backend.eject_controller_modules, side, controller)
+            Plugin._module_operation_running = True
+            try:
+                await self._offload(controller_backend.eject_controller_modules, side, controller)
+            finally:
+                Plugin._module_operation_running = False
         except Exception:
             try:
                 presence = await self._offload(ec_backend.module_presence)
@@ -733,16 +756,23 @@ class Plugin:
 
     async def reset_modules(self):
         with _lock:
-            if Plugin._state.get("modules_reconnecting"):
-                raise RuntimeError("insert both modules before resetting")
+            # After a finished eject a module pushed straight back in never clears the EC
+            # presence bits, so the controller stays off: Reset is the way back.
+            # reset_controller_modules itself refuses unless the EC sees both modules.
+            if Plugin._module_operation_running:
+                raise RuntimeError("wait for the module operation to finish")
             controller = dict(Plugin._state["controller"])
             restore_buttons = Plugin._state.get("button_fix_installed", False)
             Plugin._state["modules_reconnecting"] = True
             Plugin._state["modules_detached"] = False
             Plugin._state["module_left"] = controller_backend.module_info("left", status="activating")
             Plugin._state["module_right"] = controller_backend.module_info("right", status="activating")
+            Plugin._module_operation_running = True
         try:
-            await self._offload(controller_backend.reset_controller_modules, controller, restore_buttons)
+            try:
+                await self._offload(controller_backend.reset_controller_modules, controller, restore_buttons)
+            finally:
+                Plugin._module_operation_running = False
             left, right = await self._offload(controller_backend.read_module_layout)
             with _lock:
                 Plugin._state["module_left"] = left
@@ -921,23 +951,7 @@ class Plugin:
                     Plugin._state["tm_guard_enabled"] = value
                     Plugin._state["tm_guard_status"] = "Monitoring" if value else "Disabled"
         await self._offload(commit)
-        if value:
-            with _lock:
-                controller = dict(Plugin._state["controller"])
-                restore_buttons = Plugin._state.get("button_fix_installed", False)
-                owned = Plugin._state.get("controller_owned", True)
-            try:
-                changed = await self._offload(controller_backend.recover_tm_mode, controller,
-                                              restore_buttons, owned)
-            except Exception as error:
-                with _lock:
-                    Plugin._state["tm_guard_status"] = "Waiting for controller"
-                decky.logger.debug(f"{LOG} TM Guard initial check pending: {error}")
-            else:
-                if changed:
-                    with _lock:
-                        Plugin._state["tm_guard_recoveries"] += 1
-                        Plugin._state["tm_guard_status"] = "Custom mode restored"
+        # The guard loop sees an active TM mode within half a second and leaves it.
         return self._copy_state()
 
     async def _restore_hardware(self, rear_buttons=False):
@@ -1293,10 +1307,14 @@ class Plugin:
                 with _lock:
                     if status == "mode_restored":
                         Plugin._state["tm_guard_recoveries"] += 1
+                    stuck_before = Plugin._state.get("tm_guard_status") == TM_GUARD_STUCK
                     Plugin._state["tm_guard_status"] = (
-                        "Custom mode restored"
-                        if enabled and status == "mode_restored"
+                        "Custom mode restored" if enabled and status == "mode_restored"
+                        else TM_GUARD_STUCK if enabled and status == "tm_stuck"
                         else "Monitoring" if enabled else "Disabled")
+                if status == "tm_stuck" and not stuck_before:
+                    decky.logger.warning(f"{LOG} TM Guard stopped power-cycling the controller: "
+                                         f"{controller_backend.TM_POWER_CYCLE_LIMIT} tries did not leave TM mode")
                 if status == "mode_restored":
                     decky.logger.info(f"{LOG} TM Guard restored custom controller mode")
                 elif status == "configuration_restored":

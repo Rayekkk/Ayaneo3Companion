@@ -111,6 +111,28 @@ class ModuleReinsertTests(unittest.IsolatedAsyncioTestCase):
         layout.assert_not_called()
 
 
+class ResetAfterEjectTests(unittest.TestCase):
+    def test_reset_brings_the_controller_back_after_a_module_was_pushed_straight_back_in(self):
+        state = {"controller": dict(controller_backend.DEFAULT_CONTROLLER), "button_fix_installed": False,
+                 # An eject finished, the module went back in, and the EC presence bits never dropped.
+                 "modules_reconnecting": True, "modules_detached": False, "modules_connected": True}
+        layout = (controller_backend.module_info("left", 0x48), controller_backend.module_info("right", 0x56))
+        with patch.object(main.Plugin, "_state", state), \
+             patch.object(main.Plugin, "_module_operation_running", False), \
+             patch.object(main.Plugin, "_copy_state", lambda self: dict(main.Plugin._state)), \
+             patch.object(controller_backend, "reset_controller_modules") as reset, \
+             patch.object(controller_backend, "read_module_layout", return_value=layout):
+            plugin = main.Plugin()
+            plugin._offload = lambda fn, *args: asyncio.sleep(0, fn(*args))
+            result = asyncio.run(plugin.reset_modules())
+            reset.assert_called_once()
+            self.assertFalse(result["modules_reconnecting"])
+            main.Plugin._module_operation_running = True
+            with self.assertRaisesRegex(RuntimeError, "module operation"):
+                asyncio.run(plugin.reset_modules())
+            self.assertEqual(reset.call_count, 1)
+
+
 class MagicModuleTests(unittest.TestCase):
     def test_magic_module_eject_commands(self):
         config = {"vibration": "low", "rgb_mode": "solid", "color": "ff0000", "brightness": 50}

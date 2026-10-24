@@ -47,8 +47,8 @@ class KeyBindingTests(unittest.TestCase):
     def test_rear_button_programming_is_saved(self):
         calls = []
 
-        def exchange(_fd, command, timeout=0.4):
-            calls.append((command, timeout))
+        def exchange(_fd, command, timeout=0.4, attempts=controller_backend.HID_COMMAND_ATTEMPTS):
+            calls.append((command, timeout, attempts))
             return bytes(64)
 
         with mock.patch.object(companion_common, "supported_device", return_value=True), \
@@ -60,11 +60,12 @@ class KeyBindingTests(unittest.TestCase):
             controller_backend.program_rear_buttons(True)
 
         table = calls[1:34]
-        self.assertEqual([command[5] for command, _ in table], list(range(33)))
+        self.assertEqual([command[5] for command, _, _ in table], list(range(33)))
         self.assertEqual([table[0x12][0][12], table[0x13][0][12]], [0x0f, 0x15])
         self.assertEqual(calls[-3][0][20], 0x88)
+        self.assertEqual(calls[-3][2], 1, "the physical module reset is never sent twice")
         self.assertEqual(calls[-2][0][20], 0x00)
-        self.assertEqual(calls[-1], (controller_backend.AYA_SAVE, 1.5))
+        self.assertEqual(calls[-1], (controller_backend.AYA_SAVE, 4.5, 1), "one NVRAM save, not three")
 
     def test_input_map_upgrades_owned_legacy_file_only(self):
         with tempfile.TemporaryDirectory() as directory:

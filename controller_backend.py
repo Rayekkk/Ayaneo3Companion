@@ -69,6 +69,9 @@ MODULE_INFO_RIGHT_INDEX = 33
 HID_COMMAND_ATTEMPTS = 3
 HID_AYANEO_DRIVER_NAMES = frozenset({"hid-ayaneo", "hid_ayaneo"})
 CONTROLLER_COLOR_TOLERANCE = 1
+# The internal controller's own USB port (vendor HID and its keyboard). 1c4f:0002 alone
+# is SiGma Micro's generic keyboard chip, which external USB keyboards use too.
+AYA3_CONTROLLER_PHYS_PREFIXES = ("usb-0000:c4:00.3-1/", "usb-0000:c7:00.0-1/")
 AYA3_GAMEPAD_PHYS_PATHS = frozenset({
     # InputPlumber's AYANEO 3 source definitions. The PCI topology differs
     # between the Ryzen 7 8840U and Ryzen AI 9 HX 370 variants.
@@ -293,7 +296,8 @@ def vendor_hidraw() -> str:
             uevent = (device_path / "uevent").read_text()
         except OSError:
             continue
-        if descriptor.startswith(b"\x06\x00\xff\x09\x01") and "HID_ID=0003:00001C4F:00000002" in uevent:
+        if (descriptor.startswith(b"\x06\x00\xff\x09\x01") and "HID_ID=0003:00001C4F:00000002" in uevent
+                and any(f"HID_PHYS={prefix}" in uevent for prefix in AYA3_CONTROLLER_PHYS_PREFIXES)):
             if _kernel_hid_ayaneo_active(device_path):
                 raise RuntimeError(
                     "kernel hid-ayaneo is active; direct controller commands are disabled "
@@ -309,9 +313,13 @@ def vendor_hidraw() -> str:
     raise RuntimeError("AYANEO vendor HID interface not found")
 
 
-def _hid_exchange(fd, command: bytes, timeout=0.4) -> bytes:
-    """Send a command and retry the complete transaction if it is unanswered."""
-    for _ in range(HID_COMMAND_ATTEMPTS):
+def _hid_exchange(fd, command: bytes, timeout=0.4, attempts=HID_COMMAND_ATTEMPTS) -> bytes:
+    """Send a command and retry the complete transaction if it is unanswered.
+
+    attempts=1 for commands that must not run twice when only the answer is late:
+    an NVRAM save, an eject (latch motors) and the physical module reset.
+    """
+    for _ in range(attempts):
         if os.write(fd, command) != len(command):
             continue
         deadline = time.monotonic() + timeout
@@ -355,7 +363,10 @@ USBDEVFS_RESET = 0x5514  # _IO('U', 20)
 TM_GAMEPAD_RETURN_S = 5.0
 TM_POWER_OFF_S = 2.0
 TM_SWITCH_WINDOW_S = 30.0
+# Consecutive power cycles that did not bring back a clean custom mode before TM Guard gives up.
+TM_POWER_CYCLE_LIMIT = 3
 _tm_power_cycled_at = None
+_tm_power_cycles = 0
 
 
 def power_cycle_controller() -> None:
@@ -367,8 +378,9 @@ def power_cycle_controller() -> None:
     clears it; the controller then returns still in TM mode and is switched
     back within TM_SWITCH_WINDOW_S without that leftover.
     """
-    global _tm_power_cycled_at
+    global _tm_power_cycled_at, _tm_power_cycles
     companion_common.require_supported_device("controller power cycle")
+    _tm_power_cycles += 1
     ec_backend.set_controller_power(False)
     time.sleep(TM_POWER_OFF_S)
     ec_backend.set_controller_power(True)
@@ -384,6 +396,17 @@ def _consume_power_cycle() -> None:
     _tm_power_cycled_at = None
 
 
+def power_cycles_exhausted() -> bool:
+    """A firmware that will not leave TM mode must not lose power every half minute."""
+    return _tm_power_cycles >= TM_POWER_CYCLE_LIMIT
+
+
+def controller_settled() -> None:
+    """Custom mode without a latched key: the next TM press gets fresh power cycles."""
+    global _tm_power_cycles
+    _tm_power_cycles = 0
+
+
 EVIOCGKEY = 0x80604518  # _IOR('E', 0x18, 96): the keys an evdev node reports as held
 ARROW_KEYS = (103, 105, 106, 108)  # KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN
 
@@ -397,7 +420,8 @@ def latched_arrow_key() -> bool:
     cycle clears it, and a held D-pad cannot be seen beforehand.
     """
     for node in glob.glob("/dev/input/event*"):
-        if _input_event_identity(node)[:2] != ("1c4f", "0002"):
+        vendor, product, phys = _input_event_identity(node)
+        if (vendor, product) != ("1c4f", "0002") or not phys.startswith(AYA3_CONTROLLER_PHYS_PREFIXES):
             continue
         import fcntl  # Linux only, like these nodes
         try:
@@ -482,12 +506,12 @@ def program_rear_buttons(enabled: bool, config: dict | None = None) -> None:
                     f"controller accepted only {acknowledged}/{len(commands)} button-table entries")
             if enabled:
                 current = normalize_controller(config)
-                if not _hid_exchange(fd, controller_command(current, reset=True)):
+                if not _hid_exchange(fd, controller_command(current, reset=True), timeout=1.5, attempts=1):
                     raise RuntimeError("controller rejected button-table activation reset")
                 time.sleep(0.5)
                 if not _hid_exchange(fd, controller_command(current)):
                     raise RuntimeError("controller rejected configuration restore")
-            if not _hid_exchange(fd, AYA_SAVE, timeout=1.5):
+            if not _hid_exchange(fd, AYA_SAVE, timeout=4.5, attempts=1):
                 raise RuntimeError("controller did not save LC1/RC1 firmware bindings")
         finally:
             os.close(fd)
@@ -536,7 +560,8 @@ def _write_verified_controller(fd, config: dict) -> None:
 
 def apply_controller(config: dict, vibration_feedback: bool = False,
                      previous_vibration: str | None = None,
-                     persist_firmware: bool = True) -> None:
+                     persist_firmware: bool = True, leave_tm: bool = True) -> bool:
+    """Write the configuration; False when leave_tm=False found TM mode and wrote nothing."""
     companion_common.require_supported_device("controller configuration")
     config = normalize_controller(config)
     feedback_level = config["vibration"]
@@ -555,6 +580,8 @@ def apply_controller(config: dict, vibration_feedback: bool = False,
         fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
         try:
             check = _hid_exchange(fd, AYA_CHECK)
+            if not leave_tm and controller_requires_custom(check):
+                return False  # TM Guard is off: the user's TM mode stays.
             _switch_to_custom_mode_fd(fd, check)
             _write_verified_controller(fd, config)
             # The configuration command applies the new level immediately.
@@ -568,11 +595,12 @@ def apply_controller(config: dict, vibration_feedback: bool = False,
             # for ordinary RGB/config writes, but it adds a second, much longer
             # controller-side confirmation when changing vibration strength.
             if persist_firmware:
-                if not _hid_exchange(fd, AYA_SAVE, timeout=1.5):
+                if not _hid_exchange(fd, AYA_SAVE, timeout=4.5, attempts=1):
                     decky.logger.warning(
                         f"{LOG} controller configuration applied but firmware save was unanswered")
         finally:
             os.close(fd)
+    return True
 
 
 def controller_response_matches(response: bytes, config: dict) -> bool:
@@ -617,7 +645,7 @@ def reconcile_controller(config: dict, recover_custom: bool,
                 if not recover_custom:
                     return "tm_mode", path
                 if not _power_cycled_recently():
-                    return "tm_power_cycle", path
+                    return ("tm_stuck" if power_cycles_exhausted() else "tm_power_cycle"), path
                 _switch_to_custom_mode_fd(fd, response)
                 if not repair:
                     return "mode_restored", path
@@ -647,7 +675,7 @@ def eject_controller_modules(side: str, config: dict) -> None:
         try:
             check = _hid_exchange(fd, AYA_CHECK)
             _switch_to_custom_mode_fd(fd, check)
-            if not _hid_exchange(fd, controller_command(config, side)):
+            if not _hid_exchange(fd, controller_command(config, side), timeout=1.5, attempts=1):
                 raise RuntimeError("controller rejected the eject command")
             # Match HHD's module-release verification before cutting controller
             # power so the stepper motor can finish moving the latch.
@@ -685,7 +713,7 @@ def reset_controller_modules(config: dict, restore_buttons: bool) -> None:
         try:
             check = _hid_exchange(fd, AYA_CHECK)
             _switch_to_custom_mode_fd(fd, check)
-            if not _hid_exchange(fd, controller_command(config, reset=True)):
+            if not _hid_exchange(fd, controller_command(config, reset=True), timeout=1.5, attempts=1):
                 raise RuntimeError("controller rejected the Magic Module reset")
             time.sleep(0.5)
             if not _hid_exchange(fd, controller_command(config)):
@@ -694,17 +722,9 @@ def reset_controller_modules(config: dict, restore_buttons: bool) -> None:
             os.close(fd)
     if restore_buttons:
         program_rear_buttons(True, config)
-    apply_controller(config)
+    apply_controller(config, persist_firmware=not restore_buttons)  # the button table already saved it
     set_vibration_gain(config["ff_gain"])
 
-
-def recover_tm_mode(config: dict, _restore_buttons: bool, repair: bool = True) -> bool:
-    """Undo a hardware TM mode change and restore the Companion configuration."""
-    companion_common.require_supported_device("TM Guard")
-    if not ec_backend.both_modules_connected() or not ec_backend.controller_powered():
-        return False
-    status, _ = reconcile_controller(config, True, repair=repair)
-    return status == "mode_restored"
 
 
 def _event_has_rumble(node: str) -> bool:

@@ -118,13 +118,26 @@ class ControllerProtocolTests(unittest.TestCase):
             self.assertEqual(controller_backend._hid_exchange(7, controller_backend.AYA_CHECK), b"")
         self.assertEqual(write.call_count, controller_backend.HID_COMMAND_ATTEMPTS)
 
+    def test_vendor_hidraw_skips_an_external_device_with_the_same_chip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nodes = []
+            for name, phys in (("hidraw3", "usb-0000:c4:00.4-2/input1"), ("hidraw5", "usb-0000:c4:00.3-1/input2")):
+                device = Path(directory) / name / "device"
+                device.mkdir(parents=True)
+                (device / "report_descriptor").write_bytes(b"\x06\x00\xff\x09\x01")
+                (device / "uevent").write_text(f"HID_ID=0003:00001C4F:00000002\nHID_PHYS={phys}\n")
+                nodes.append(str(device.parent))
+            with mock.patch.object(glob, "glob", return_value=nodes), \
+                 mock.patch.object(controller_backend, "_vendor_hidraw_cached", None):
+                self.assertEqual(controller_backend.vendor_hidraw(), "/dev/hidraw5")
+
     def test_vendor_hidraw_rejects_active_kernel_driver(self):
         with tempfile.TemporaryDirectory() as directory:
             hidraw = Path(directory) / "hidraw7"
             device = hidraw / "device"
             device.mkdir(parents=True)
             (device / "report_descriptor").write_bytes(b"\x06\x00\xff\x09\x01")
-            (device / "uevent").write_text("HID_ID=0003:00001C4F:00000002\n")
+            (device / "uevent").write_text("HID_ID=0003:00001C4F:00000002\nHID_PHYS=usb-0000:c4:00.3-1/input2\n")
             for name in ("module_left", "module_right", "eject", "reset"):
                 (device / name).touch()
             with mock.patch.object(glob, "glob", return_value=[str(hidraw)]):
@@ -360,7 +373,7 @@ class ControllerProtocolTests(unittest.TestCase):
              mock.patch.object(controller_backend.glob, "glob", return_value=["/sys/class/hidraw/hidraw2"]) as found, \
              mock.patch.object(Path, "resolve", lambda path: path), \
              mock.patch.object(Path, "read_bytes", lambda path: b"\x06\x00\xff\x09\x01"), \
-             mock.patch.object(Path, "read_text", lambda path: "HID_ID=0003:00001C4F:00000002\n"), \
+             mock.patch.object(Path, "read_text", lambda path: "HID_ID=0003:00001C4F:00000002\nHID_PHYS=usb-0000:c4:00.3-1/input2\n"), \
              mock.patch.object(controller_backend, "_kernel_hid_ayaneo_active", return_value=False), \
              mock.patch.object(controller_backend.os, "stat", side_effect=stat):
             self.assertEqual(controller_backend.vendor_hidraw(), "/dev/hidraw2")
