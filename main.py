@@ -1609,10 +1609,13 @@ class Plugin:
                 await self._offload(audio_backend.remove_audio_fix, False)
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not remove audio firmware path: {error}")
-        if is_supported and settings.getSetting("charge_bypass", False):
+        if is_supported:
+            # The hardware, not the saved choice: settings in recovery read as the default off,
+            # and a bypass left on keeps the battery from charging with nothing left to undo it.
             try:
-                await self._offload(ec_backend.write_charge_bypass, False)
-                decky.logger.info(f"{LOG} restored automatic charging before uninstall")
+                if await self._offload(ec_backend.read_charge_bypass):
+                    await self._offload(ec_backend.write_charge_bypass, False)
+                    decky.logger.info(f"{LOG} restored automatic charging before uninstall")
             except Exception as error:
                 decky.logger.warning(f"{LOG} could not restore charging before uninstall: {error}")
         try:

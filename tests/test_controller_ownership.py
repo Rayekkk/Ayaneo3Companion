@@ -131,9 +131,13 @@ class ControllerOwnershipTests(unittest.TestCase):
         self.stack.enter_context(patch.object(controller_backend, "program_rear_buttons"))
         self.stack.enter_context(patch.object(main.input_backend, "remove_button_fix"))
         self.stack.enter_context(patch.object(main, "_systemctl"))
+        # The saved store says nothing about bypass (as in recovery); the hardware has it on.
+        self.stack.enter_context(patch.object(main.ec_backend, "read_charge_bypass", return_value=True))
+        write = self.stack.enter_context(patch.object(main.ec_backend, "write_charge_bypass"))
         asyncio.run(self.plugin._remove_owned())
         self.apply.assert_called_once_with(controller_backend.normalize_controller(dict(FOUND, ff_gain=70)))
         self.gain.assert_called_once_with(70)
+        write.assert_called_once_with(False)
 
 
 class RepairFlagTests(unittest.TestCase):
