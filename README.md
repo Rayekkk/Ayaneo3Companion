@@ -303,8 +303,10 @@ TDP Control is LegionGo2Companion's, adapted to the AYANEO 3:
 - Recalibration loads the CS35L41 calibration profile, measures both channels,
   rejects implausible resistance changes and writes the existing Cirrus EFI
   format without changing either amplifier ID. The original variable is saved
-  under `/var/lib/ayaneo3-companion/audio-calibration` before every write. A
-  full restart is required before the driver applies the new values.
+  under `/home/.ayaneo3companion-backups/audio-calibration` before every write
+  (`/home` survives SteamOS slot updates; backups older releases kept in
+  `/var/lib/ayaneo3-companion` are copied there at startup). A full restart is
+  required before the driver applies the new values.
 - RyzenAdj and calibration-firmware downloads use incremental reads, byte limits
   and a 60-second transfer deadline checked between network reads. Individual
   network operations have a 10-second timeout; a pending read may finish after

@@ -21,14 +21,13 @@ import module_runtime
 from system_process import PYTHON, system_env
 from safe_settings import SettingsManager
 from fan_hwmon import platform_check
-from fan_guardian import secure_root, check_owners, Sensors, outcome_of, open_ec
+from fan_guardian import RUNTIME, secure_root, check_owners, Sensors, outcome_of, open_ec
 from fan_sleep import Pause, Retry
 from fan_policy import (defaults, validate_settings, validate_curve, PRESETS, TEMPLATES, MIN_PCT, LAST_MIN_PCT,
                         MAX_PCT, PCT_STEP, HARD_MAX_C, RPM_AT_MIN, RPM_PER_PCT)
 
 settings = SettingsManager('fan_settings', decky.DECKY_PLUGIN_SETTINGS_DIR)
 READING_MAX_AGE_S = 2.5
-RUNTIME = pathlib.Path('/run/ayaneo3companion-fan')
 # Companion 1.2.x's manual fan mode: its own transient systemd guard and lease directory.
 LEGACY_LEASE_DIR = pathlib.Path('/run/ayaneo3-companion')
 

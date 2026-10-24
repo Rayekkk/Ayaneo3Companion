@@ -2235,6 +2235,8 @@ class Plugin:
             }
         return await _offload(_do)
 
+    # Kept for parity with LegionGo2Companion (shared TDP module): this panel does not
+    # browse profiles or edit them with stored=True, but the RPCs stay identical.
     async def list_game_profiles(self) -> dict:
         """Every saved game profile, for browsing; a profile kept under Global is inactive."""
         def _do() -> dict:

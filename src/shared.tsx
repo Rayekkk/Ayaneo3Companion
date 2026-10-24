@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Helpers shared by the Decky pages. Render helpers are plain functions (not
 // components) so the element tree is exactly what the page used to inline.
-import { ButtonItem, ConfirmModal, Field, findModuleExport, PanelSection, PanelSectionRow, Router, showModal, Spinner } from "@decky/ui";
+import { ButtonItem, ConfirmModal, Field, findModuleExport, PanelSectionRow, Router, showModal } from "@decky/ui";
 import { Fragment, type ReactNode } from "react";
 
 /** A read-only row; `focusable` keeps it reachable with the D-pad. */
@@ -27,37 +27,9 @@ export const detailsRows = (shown: boolean, toggle: () => void, rows: Array<[Rea
   {shown && rows.map(([label, description], index) => <Fragment key={index}>{infoRow(label, description)}</Fragment>)}
 </>;
 
-/** A page's first snapshot: a spinner while loading, the error and a retry once it failed. */
-export const statusPlaceholder = ({ title, label, error, onRetry, retryLabel = "Retry status" }:
-  { title?: string; label: string; error: string; onRetry: () => void; retryLabel?: string }) =>
-  <PanelSection title={title}>
-    <PanelSectionRow>{error ? <Field focusable label={label} description={error} /> : <Spinner />}</PanelSectionRow>
-    {error && <PanelSectionRow><ButtonItem layout="below" onClick={onRetry}>{retryLabel}</ButtonItem></PanelSectionRow>}
-  </PanelSection>;
-
 /** An Error's message; anything else as the fallback, or as text when there is none. */
 export const errorText = (error: unknown, fallback?: string) =>
   error instanceof Error ? error.message : fallback ?? String(error);
-
-/**
- * Accepted edits outlive the page that made them. Each module keeps one queue;
- * later snapshot reads wait for it with `if (queue.pending) await queue.tail`
- * (synchronous when idle). An operation calls `queue.done()` once it settles.
- */
-export const mutationQueue = () => {
-  const queue = {
-    tail: Promise.resolve() as Promise<unknown>,
-    pending: 0,
-    push<T>(run: () => Promise<T>): Promise<T> {
-      queue.pending += 1;
-      const queued = queue.tail.then(run, run);
-      queue.tail = queued.catch(() => undefined);
-      return queued;
-    },
-    done() { queue.pending -= 1; },
-  };
-  return queue;
-};
 
 // ── Running app watcher ───────────────────────────────────────────────────────
 

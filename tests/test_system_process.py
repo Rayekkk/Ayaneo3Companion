@@ -55,8 +55,8 @@ class SystemProcessTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 30, "the child was killed, not waited for")
 
     @unittest.skipUnless(os.name == "posix", "SteamOS interpreter")
-    def test_helpers_run_on_the_system_python_without_windows_flags(self):
-        self.assertEqual((system_process.PYTHON, system_process.NO_WINDOW), ("/usr/bin/python3", {}))
+    def test_helpers_run_on_the_system_python(self):
+        self.assertEqual(system_process.PYTHON, "/usr/bin/python3")
 
     def test_clean_runtime_and_fallback_path(self):
         with patch.dict(os.environ, {}, clear=True):

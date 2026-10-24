@@ -21,11 +21,6 @@ from lego_updater import Updater
 LOG = "[ayaneo3companion]"
 PLUGIN_DIR = Path(decky.DECKY_PLUGIN_DIR)
 
-GITHUB_RELEASES_URL = (
-    "https://api.github.com/repos/Rayekkk/Ayaneo3Companion/releases/latest"
-)
-
-
 def decky_account():
     try:
         import pwd
@@ -40,15 +35,7 @@ def decky_account():
 
 
 DECKY_ACCOUNT = decky_account()
-updater = Updater(
-    releases_url=GITHUB_RELEASES_URL,
-    user_agent="Ayaneo3Companion",
-    log_prefix=LOG,
-    plugin_dir=str(PLUGIN_DIR),
-    asset_name_template="Ayaneo3Companion-{version}.zip",
-    logger=decky.logger,
-    **DECKY_ACCOUNT,
-)
+updater = Updater(user_agent="Ayaneo3Companion", plugin_dir=str(PLUGIN_DIR), **DECKY_ACCOUNT)
 ALLOWED_DOWNLOAD_HOSTS = frozenset({
     "github.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com",
 })

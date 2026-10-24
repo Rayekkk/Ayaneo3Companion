@@ -75,11 +75,7 @@ class Response(io.BytesIO):
 
 class _UpdateFixture(unittest.TestCase):
     def make_updater(self, **kwargs):
-        from types import SimpleNamespace
-        logger = SimpleNamespace(info=lambda *_: None, warning=lambda *_: None, error=lambda *_: None)
-        return updates.Updater(plugin_dir=str(self.root), releases_url=updates.API_URL,
-                               user_agent="Ayaneo3Companion", log_prefix="[test]", logger=logger,
-                               asset_name_template="Ayaneo3Companion-{version}.zip", **kwargs)
+        return updates.Updater(plugin_dir=str(self.root), user_agent="Ayaneo3Companion", **kwargs)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -114,12 +110,6 @@ class UpdateChecks(_UpdateFixture):
             self.updater.reset()
             self.assertTrue(self.updater.check()["success"])
         self.assertEqual(request.call_count, 2)
-
-    def test_wrong_repository_configuration_is_rejected(self):
-        with self.assertRaises(ValueError):
-            updates.Updater(plugin_dir=str(self.root), releases_url="https://api.github.com/repos/other/project/releases/latest",
-                            user_agent="test", log_prefix="[test]", logger=None,
-                            asset_name_template="Ayaneo3Companion-{version}.zip")
 
     def test_untrusted_initial_urls_are_refused_before_any_request(self):
         for url in ("https://evil.test/archive.zip", "https://github.com/another/repo/archive.zip",
@@ -560,7 +550,7 @@ class ReleaseAssetTests(unittest.TestCase):
         class Response(io.BytesIO):
             def __init__(self, payload):
                 super().__init__(json.dumps(payload).encode())
-            def geturl(self): return companion_common.GITHUB_RELEASES_URL
+            def geturl(self): return updates.API_URL
 
         release = {
             "tag_name": f"v{newer}",

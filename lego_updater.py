@@ -108,16 +108,10 @@ def _json_object(data):
 class Updater:
     """Existing manual update API with verified, bounded downloads."""
 
-    def __init__(self, *, releases_url: str, user_agent: str, log_prefix: str,
-                 plugin_dir: str, asset_name_template: str, logger,
+    def __init__(self, *, user_agent: str, plugin_dir: str,
                  user_home: str = "", user_uid: int = -1, user_gid: int = -1):
-        if releases_url != API_URL or asset_name_template != ARCHIVE_ROOT + "-{version}.zip":
-            raise ValueError("Updater configuration must name the AYANEO 3 Companion repository.")
-        self.releases_url = releases_url
+        # The repository (API_URL) and asset name (ARCHIVE_ROOT) are fixed in this module.
         self.user_agent = user_agent
-        self.log_prefix = log_prefix
-        self.asset_name_template = asset_name_template
-        self.logger = logger
         self.plugin_dir = Path(plugin_dir)
         self.user_home = user_home
         self.user_uid = user_uid
