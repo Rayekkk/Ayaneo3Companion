@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Rayekkk/Ayaneo3Companion/main/Ayaneo3Companion.png" alt="AYANEO 3 Companion" width="760">
+<img src="Ayaneo3Companion.png" alt="AYANEO 3 Companion" width="760">
 
 [![Release](https://img.shields.io/github/v/release/Rayekkk/Ayaneo3Companion?style=for-the-badge&label=release&color=C2410C&labelColor=141417)](https://github.com/Rayekkk/Ayaneo3Companion/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/Rayekkk/Ayaneo3Companion/total?style=for-the-badge&label=downloads&color=15803D&labelColor=141417)](https://github.com/Rayekkk/Ayaneo3Companion/releases)
@@ -8,10 +8,10 @@
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/github/license/Rayekkk/Ayaneo3Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
-**The missing AYANEO 3 hardware controls in one Steam overlay panel.**
-TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibration, lighting, rear buttons and OLED display support.
+**Your AYANEO 3 hardware controls, together in the Steam overlay.**
+Tune power and cooling, set vibration and lighting, fix the rear buttons, manage the Magic Modules, charging, speakers and the OLED display without leaving Gaming Mode.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Development](#development)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#quick-start) · [Modules](#using-the-modules) · [Troubleshooting](#troubleshooting) · [AI disclaimer](#ai-disclaimer)
 
 </div>
 
@@ -19,352 +19,364 @@ TDP profiles, smart-amp audio, battery bypass, Magic Modules, fan control, vibra
 
 ## Features
 
-| | |
-|---|---|
-| **TDP Control** | Silent 10/15/20, Balanced 15/25/30 and Performance 30/43/45 W presets, ported from LegionGo2Companion |
-| **Custom TDP** | SPL 5–30 W, SPPT up to 43 W and FPPT up to 45 W, as one dial or with separate boost limits |
-| **Per-game profiles** | Per game, optionally with separate battery and charger settings; a profile can be kept unused |
-| **CPU Boost and EPP** | CPU Boost and the CPU energy preference, globally or per game and charger state |
-| **Live power** | Shows the processor package's power draw on the TDP page |
-| **Charge bypass** | Powers the console from its charger while inhibiting battery charging |
-| **Fan control** | Your own eight-point fan curve, optionally one per TDP preset, guarded by an independent watchdog |
-| **Charging estimate** | Shows live battery percentage, net charging power and estimated time to full only while Battery is open |
-| **Magic Modules** | Identifies every known module and upper/lower layout, ejects either side and provides Quick Reset |
-| **Vibration** | Firmware Off/Low/Medium/High strength, 0-100% Linux FF gain and a vibration test |
-| **Lighting** | Solid, Pulse and Rainbow modes with Hue, Saturation and Brightness |
-| **Key bindings** | Makes LC, RC, LC1 and RC1 four separate buttons in Steam and supports both QAM firmware variants |
-| **TM Guard** | Returns from accidental TM mode changes and restores the saved controller configuration |
-| **Smart amp tuning** | Loads the official AYANEO 3 CS35L41 profile for both speakers instead of the generic fallback |
-| **Speaker calibration** | Recalibrates both smart amplifiers with validation, EFI readback and automatic backup |
-| **OLED definition** | Gamma 2.2 gamescope definition with 60/90/120/144 Hz modes |
-| **HDR metadata** | Sets gamescope's EDID copy to AYANEO's advertised 800 nit maximum |
-| **Persistent settings** | Restores settings after startup, follows games with the QAM closed and re-applies TDP after charger changes and sleep |
-| **Updater** | Shows the installed version and downloads the exact matching GitHub release ZIP from the About page |
+AYANEO 3 Companion brings the console's hardware controls into one Decky plugin. Your
+settings are saved and come back after startup, sleep and charger changes, also while the
+menu is closed.
 
----
+| Module | What you can do |
+|---|---|
+| [TDP](#tdp) | Choose a power preset or your own limits, set CPU Boost and CPU energy preference, and give games their own settings, also separately on battery and charger |
+| [Fan Control](#fan-control) | Draw your own fan curve with touch or controller and see the APU temperature and fan speed |
+| [Vibration](#vibration) | Set the controller's vibration strength and scale how strongly games vibrate |
+| [Lighting](#lighting) | Set the stick-light effect, colour and brightness |
+| [Key Binding](#key-binding) | Use LC, RC, LC1 and RC1 as four separate buttons, and undo an accidental TM press |
+| [Magic Modules](#magic-modules) | See which modules are attached, eject either side and reset the controller |
+| [Battery](#battery) | Power the console from the charger without charging the battery |
+| [Audio](#audio) | Load AYANEO's own speaker tuning and recalibrate the speakers |
+| [OLED Display](#oled-display) | Install the OLED colour and refresh-rate definition and fix the HDR brightness games read |
 
 ## Requirements
 
 | Requirement | Details |
 |---|---|
-| Device | AYANEO 3 OLED, verified on Ryzen 7 8840U and Ryzen AI 9 HX 370 variants |
-| OS | SteamOS or Bazzite in Game Mode |
-| Plugin loader | [Decky Loader](https://decky.xyz) |
-| Privileges | root through Decky's plugin service |
+| Device | AYANEO 3 OLED (Ryzen 7 8840U and Ryzen AI 9 HX 370 variants) |
+| System | SteamOS or Bazzite in Gaming Mode, with [Decky Loader](https://decky.xyz) |
+| Fan Control | The kernel's `ayaneo-ec` fan interface (tested on SteamOS 3.10, kernel 7.2.4) |
 
-The controller protocol and display identity were verified on retail hardware.
-Other AYANEO models are deliberately rejected by the device checks.
-The plugin retains its SteamOS 3.8/kernel 6.16 controller and charge-control paths.
-TDP control writes SPL, SPPT and FPPT with RyzenAdj and needs no active
-PowerStation writer: while PowerStation runs, TDP changes are refused and the
-TDP page says why. CPU Boost, EPP and the other controls remain available.
-Every write checks ownership again; a cached status never authorizes one.
-TDP Control keeps its own settings and serializes its own changes, so its game
-tracking never waits behind a controller or audio operation. Fan Control does
-the same, so turning it off never waits for a slow settings commit.
-Saved charge bypass is verified by a separate monitor every 15 seconds and after
-charger changes or resume.
-Controller firmware, RGB, bindings and module eject/reset require the vendor HID
-interface. If the kernel's `hid-ayaneo` driver owns it, these controls display an
-unavailable reason instead of issuing competing commands; evdev FF Gain remains
-independent. Module presence and power recovery continue through EC while the
-vendor HID interface is temporarily absent after ejecting the modules.
-Fan control needs the kernel's `ayaneo-ec` hwmon interface; it is available on
-the tested SteamOS 3.10/kernel 7.2.4 system.
-
-> [!NOTE]
-> AYANEO 3 Companion is deliberately hardware-specific. It has been tested on
-> both AYANEO 3 OLED processor variants, but it does not attempt to control other
-> AYANEO handhelds that happen to expose similar interfaces.
-
----
+Companion works only on the AYANEO 3; other AYANEO handhelds are refused, even when they
+look similar to the system. Each page explains when a control is unavailable on your console.
 
 ## Installation
 
-1. Install [Decky Loader](https://decky.xyz) if you haven't already.
-2. Download `Ayaneo3Companion-x.x.x.zip` from the [Releases](https://github.com/Rayekkk/Ayaneo3Companion/releases) page.
-3. In Gaming Mode, open the **Quick Access Menu**.
-4. Open the Decky menu, scroll to the bottom, then **Developer → Install Plugin from ZIP**.
-5. Select the downloaded zip.
+1. Install [Decky Loader](https://decky.xyz) if you do not already have it.
+2. Download `Ayaneo3Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/Ayaneo3Companion/releases).
+3. In Gaming Mode, open **Quick Access Menu → Decky → Settings → Developer**.
+4. Choose **Install Plugin from ZIP**, select the archive, then open **AYANEO 3 Companion** in Decky.
 
 <details>
-<summary><b>Building from source</b></summary>
+<summary><b>Installing without the Quick Access button</b></summary>
 
-<br>
-
-The development checks use Node.js 24 and Python 3.10 or 3.13.
-
-```bash
-git clone https://github.com/Rayekkk/Ayaneo3Companion
-cd Ayaneo3Companion
-
-npm ci --ignore-scripts --no-audit --no-fund
-npm run typecheck
-npm audit --audit-level=high
-npm run test:frontend
-npm run test:backend
-npm run build
-npm run package -- --check
-npm run package    # produces Ayaneo3Companion-<version>.zip
-```
-
-Then install the resulting zip through Decky's **Install Plugin from ZIP**, which is the
-supported path and avoids permission problems.
-
-</details>
-
-### Fresh installation without QAM
-
-On a fresh installation where the QAM button is not available yet, copy
-`bootstrap.sh` and the plugin ZIP to the console, then run:
+On a fresh system the QAM button may not work before Companion fixes the key binding. Copy
+`bootstrap.sh` and the ZIP to the console and run:
 
 ```bash
 chmod +x bootstrap.sh
 ./bootstrap.sh Ayaneo3Companion-1.3.0.zip
 ```
 
-The bootstrap installer checks the device, installs the plugin directly and
-installs its aya7 key-binding extension. Decky Loader must already be installed.
-It discovers the plugin directory from the effective Decky systemd service
-configuration, including separate privileged and user data directories and
-accounts other than `deck`. It validates the complete
-ZIP, stages a fresh deployment and replaces the plugin directory as a unit.
-Concurrent installers are excluded for the duration of the transaction. The
-previous deployment is retained until the restarted services pass their checks.
-If a file operation or service restart fails, it restores the previous plugin,
-owned InputPlumber maps and service state. If rollback fails, it keeps recovery
-files in the reported directory and does not restart Decky after an incomplete
-rollback. If Decky cannot be stopped, the installer preserves the running
-deployment and recovery files instead of replacing files under the live process.
-For a graphical Desktop Mode workflow, keep the ZIP, `bootstrap.sh` and
-`Install AYANEO 3 Companion.desktop` in the same folder, mark the launcher as
-executable and double-click it.
+Decky Loader must already be installed. The installer checks the device and the whole ZIP,
+replaces the plugin in one step and puts the previous version back if anything fails. In
+Desktop Mode you can instead keep the ZIP, `bootstrap.sh` and `Install AYANEO 3 Companion.desktop`
+in one folder and double-click the launcher.
 
-The display and button sections install persistent system definitions. Restart
-Game Mode when the panel asks for it.
+</details>
 
----
+### Updating
 
-## Usage
+1. Open **About → Check for updates**.
+2. Download the new version; the ZIP appears in your Downloads folder.
+3. Install it through **Decky Settings → Developer → Install Plugin from ZIP**.
 
-The plugin opens on a compact hardware overview. Each row shows the current
-state and opens a dedicated control page; **All Controls** returns to the
-overview and selects the row you came from. A page stays open when Quick Access
-closes, a dropdown or confirmation opens, or another Quick Access tab is shown,
-and polling pauses while the page cannot be seen. The last confirmed overview
-state is shown immediately while a fresh read completes.
-If a refresh fails, each row says how old its values are and that Companion is
-retrying; the note clears after a fresh read.
+Companion keeps its settings across updates. Only stable releases are offered, and the ZIP's
+version, size, SHA-256 digest and contents are checked before it is saved.
 
-- Open **TDP** to choose Silent, Balanced, Performance or Custom limits. While a
-  game runs, **Settings for** picks Global, **This game** or **This game +
-  charger** (separate battery and charger values). Global keeps the game's
-  profile unused instead of deleting it. The CPU section sets CPU Boost and the
-  CPU energy preference for the same scope; **Show details** shows the package
-  power draw.
-- Open **Vibration** to select firmware strength, scale Linux force feedback in
-  10% steps or play a short test.
-- Open **Lighting** to select an animation and tune Hue, Saturation and Brightness.
-- Open **Battery** to enable or disable charge bypass. The displayed state is
-  read back from the kernel charge-control interface when available, or directly
-  from the embedded controller on older kernels; it is never inferred from ACPI.
-- Open **Fan Control** to see the APU temperature and fan RPM, and to run your
-  own curve: start from Silent, Balanced or Aggressive, move the eight points
-  with touch or the D-pad (A to edit, LB/RB to pick a point), and save. Turn it
-  off to give the fan back to the console's automatic curve.
-- Open **Magic Modules** to identify the installed module type and layout,
-  eject either side or both, or run Quick Reset. Insert both modules after
-  replacement so the plugin can power and identify the controller again.
-- Open **Audio** to inspect or reapply the AYANEO smart-amplifier tuning. Once
-  both DSPs are verified, **Recalibrate Audio** becomes available. Put the
-  console on a clear surface in a quiet room, press **Start** and confirm the prompt.
-  Fully restart the console after a successful calibration so the audio driver
-  reads the new EFI values.
-- Open **Key Binding** to make LC1/RC1 work next to LC/RC; Steam shows all four under their own names.
-  Native F24 and legacy Meta+D QAM events are both recognized automatically.
-  TM Guard is enabled by default; disable it temporarily when deliberately
-  selecting another hardware mode with the physical TM button.
-- Open **OLED display** to install the gamescope definition and verify its HDR metadata.
-  The definition lives in your `~/.config/gamescope/scripts`, which SteamOS
-  updates keep, so the colours survive an update. gamescope loads definitions
-  only when it starts: when the running session has not loaded the current one,
-  the page offers **Restart Gaming Mode** (after a confirmation, because Steam
-  and any running game close and reopen). If SteamOS ever ships its own AYANEO 3
-  profile, Companion leaves the display to it and keeps only the HDR peak fix.
-- The Key Binding and OLED switches are saved. If a SteamOS update removes the
-  key map from `/etc`, Companion reinstalls it at startup and reloads InputPlumber.
-- Open **About** at the bottom of the overview to see the installed version,
-  check GitHub releases and download a newer plugin ZIP when one is available.
-  The result remains available when returning to About during the same plugin
-  session; repeated clicks do not start duplicate downloads.
+## Quick start
+
+Open Companion in Decky. **Hardware Controls** shows a short status for each module. Select a
+row to open its page and use **‹ All Controls** to go back.
+
+<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware Controls overview with module status summaries" width="360"></a>
+
+1. Turn on **Fix Key Binding** on **Key Binding** so LC1/RC1 and the QAM button work.
+2. Turn on **Install Display Definition** on **OLED Display** and restart Gaming Mode when asked.
+3. For game-specific power, start the game first and choose **This game** on **TDP**.
+4. For custom cooling, open **Fan Control**, check the curve, save any edits, then turn on **Enable Fan Control**.
+
+The screenshots in this guide show the Quick Access panel at full size: click one to open it.
+
+## Using the modules
+
+### TDP
+
+Turn on **Enable TDP control**, then pick a preset. The line under the switch shows what runs
+now and the live APU power.
+
+<a href="docs/screenshots/tdp.png"><img src="docs/screenshots/tdp.png" alt="TDP presets and power status" width="360"></a>
+
+| Preset | Sustained | Slow boost | Fast boost |
+|---|---|---|---|
+| Silent | 10 W | 15 W | 20 W |
+| Balanced | 15 W | 25 W | 30 W |
+| Performance | 30 W | 43 W | 45 W |
+
+- A preset applies and saves as soon as you press it.
+- **Custom** opens sliders for your own limits (5–30 W sustained, up to 43 W slow and 45 W fast
+  boost); press **Apply** to use them. **Separate boost limits** switches between one slider and three.
+- **Settings for &lt;game&gt;** (while a game runs) chooses **Global**, **This game**, or
+  **This game + charger** for different settings on battery and on charger. **Global** keeps
+  the game's settings unused instead of deleting them.
+- **CPU Boost** turns turbo frequencies on or off. **CPU energy preference** leans towards CPU
+  speed or leaves more power for the GPU.
+
+<details>
+<summary><b>TDP details</b></summary>
+
+The ceilings are the ones the console's SMU accepts, measured on the Ryzen 7 8840U. The
+AYANEO 3 has no firmware TDP interface, so Companion writes the limits with a pinned,
+checksum-verified `ryzenadj` that it downloads once. The firmware lowers the sustained limit
+to 28 W on every charger change, so Companion writes the limits again after each power-source
+change and after sleep. While PowerStation (another TDP service) runs, TDP changes are refused
+and the page says why; CPU Boost and EPP stay available. Settings from 1.2.x are carried over
+once.
+
+</details>
+
+### Fan Control
+
+Fan Control starts with the **Balanced** curve and stays off until you turn it on.
+
+<a href="docs/screenshots/fan-control.png"><img src="docs/screenshots/fan-control.png" alt="Fan Control readings, enable switch and fan curve" width="360"></a>
+
+1. Check the curve, adjust it if you like and press **Save global curve**.
+2. Turn on **Enable Fan Control**. Turn it off at any time to return the fan to the console's automatic curve.
+
+The graph has **8 points from 0 to 100°C** in percent of full speed. Drag a point, or focus
+the graph and use the controller:
+
+| Control | Action |
+|---|---|
+| A | Start editing points |
+| LB / RB | Select the previous / next point |
+| D-pad left / right | Change the temperature by 1°C |
+| D-pad up / down | Change the speed by the selected step |
+| B | Finish editing |
+
+**Starting curve** offers **Silent**, **Balanced** and **Aggressive**. **Full screen curve
+editor** gives you more room.
+
+<a href="docs/screenshots/fan-curve-editor.png"><img src="docs/screenshots/fan-curve-editor.png" alt="Full-screen fan curve editor with temperature and measured speed" width="760"></a>
+
+<details>
+<summary><b>Curve rules, presets and safety</b></summary>
+
+Below 10% the fan stops; the 100°C point cannot go below 40%, and at 100°C the fan runs at
+full speed whatever the curve says. Temperatures stay in order and speeds can only stay equal
+or rise. **Settings → Assign curves to TDP presets** gives each TDP preset its own curve.
+
+The curve runs in its own process, watched by an independent backup. Either one returns the
+fan to automatic when the other stops, when the plugin unloads, before sleep or after a fault,
+and the page says why. Known fan programs (jupiter-fan-control, HHD, fancontrol) block Fan
+Control instead of competing with it.
+
+</details>
+
+### Vibration
+
+Choose the controller's **Vibration** strength (Off, Low, Medium, High). **FF Gain** scales
+the vibration games send, in 10% steps, without changing the strength. **Test Vibration**
+plays a short buzz.
+
+<a href="docs/screenshots/vibration.png"><img src="docs/screenshots/vibration.png" alt="Vibration strength, FF Gain and test" width="360"></a>
+
+### Lighting
+
+Turn on **Enable LED Control** and choose an **LED Mode** (Solid, Pulse or Rainbow), then
+set **Hue**, **Saturation** and **Brightness**. Changes save automatically.
+
+<a href="docs/screenshots/lighting.png"><img src="docs/screenshots/lighting.png" alt="LED mode, hue, saturation and brightness" width="360"></a>
+
+Until you change something here, Companion leaves the controller's own lighting and vibration alone.
+
+### Key Binding
+
+**Fix Key Binding** makes LC, RC, LC1 and RC1 four separate buttons; Steam shows them under
+those names. Both QAM button variants of the firmware are recognised.
+
+**TM Guard** (on by default) undoes an accidental press of the TM button: it switches the
+controller back to the gamepad mode and restores your lighting, vibration and buttons. The
+controller is off for about two seconds while it does. Turn TM Guard off when you want to use
+a TM mode on purpose.
+
+<a href="docs/screenshots/key-binding.png"><img src="docs/screenshots/key-binding.png" alt="Fix Key Binding and TM Guard switches" width="360"></a>
+
+### Magic Modules
+
+The page shows which module is attached on each side and how it is turned. **Eject Left**,
+**Eject Right** and **Eject Both** release the modules; insert them again and Companion powers
+the controller up and restores your settings. **Reset Magic Modules** restarts the controller
+without releasing a module.
+
+<a href="docs/screenshots/magic-modules.png"><img src="docs/screenshots/magic-modules.png" alt="Installed modules and eject controls" width="360"></a>
+
+### Battery
+
+The first row shows the battery level, charging power and the time to full while charging.
+**Bypass Charging** powers the console from the charger without charging the battery.
+
+<a href="docs/screenshots/battery.png"><img src="docs/screenshots/battery.png" alt="Battery status and Bypass Charging" width="360"></a>
+
+Each change is read back from the hardware. Uninstalling Companion turns bypass off.
+
+### Audio
+
+**AYANEO Speaker Tuning** loads AYANEO's own profile for both speaker amplifiers instead of the
+generic one SteamOS uses. **Reapply Audio Fix** loads it again if the system reset the audio.
+
+<a href="docs/screenshots/audio.png"><img src="docs/screenshots/audio.png" alt="Speaker tuning and calibration" width="360"></a>
+
+**Recalibrate Audio** measures both speakers again. Put the console on a clear surface in a
+quiet room, press **Start** and confirm. Restart the console afterwards so the driver uses the
+new values.
+
+<details>
+<summary><b>Calibration safety</b></summary>
+
+Calibration is offered only after both amplifiers report the tuned profile. It rejects
+implausible results, keeps both amplifier IDs and saves the original values to
+`/home/.ayaneo3companion-backups/audio-calibration` before every write (`/home` survives
+SteamOS updates). The calibration file comes from HHD's firmware repository and is checked
+against a pinned SHA-256 digest.
+
+</details>
+
+### OLED Display
+
+**Install Display Definition** installs a gamescope definition for the AYANEO 3 OLED: Gamma 2.2
+colours, HDR and 60/90/120/144 Hz. It is stored in your home folder, so SteamOS updates keep it.
+The HDR fix makes games read AYANEO's advertised 800-nit maximum.
+
+<a href="docs/screenshots/oled-display.png"><img src="docs/screenshots/oled-display.png" alt="Display definition and HDR metadata" width="360"></a>
+
+> [!IMPORTANT]
+> gamescope loads the definition when it starts. When the page offers **Restart Gaming Mode**,
+> it asks first, then closes Steam and running games. Save your games first.
+
+If SteamOS ever ships its own AYANEO 3 profile, Companion leaves the display to it and keeps
+only the HDR fix. Turning the switch off puts back a definition that Companion replaced.
+
+### About
+
+**About** shows the installed version and checks for updates as described in [Updating](#updating).
+
+## Troubleshooting
+
+| What you see | What to do |
+|---|---|
+| LC1/RC1 or the QAM button do nothing | Turn on **Fix Key Binding**. After a SteamOS update Companion reinstalls it at startup. |
+| The controller changed mode after a TM press | Keep **TM Guard** on; it switches back within a few seconds. |
+| "Could not leave TM mode; press TM until the light is white" | TM Guard stopped after three attempts. Press TM until the light is white. |
+| An arrow key stays pressed after TM mode | TM Guard clears it by restarting the controller. With TM Guard off, turn it on or restart the console. |
+| Controller controls are unavailable | The kernel's `hid-ayaneo` driver owns the controller. FF Gain still works. |
+| TDP changes are refused | PowerStation controls TDP; stop it to use Companion's TDP. |
+| Fan Control is blocked | Stop the other fan program (jupiter-fan-control, HHD, fancontrol). |
+| Fan Control is not available | Your kernel has no `ayaneo-ec` fan interface yet; see [Requirements](#requirements). |
+| My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable Fan Control**. |
+| The battery does not charge | Turn off **Bypass Charging**. Disabling the plugin keeps bypass on; uninstalling turns it off. |
+| Colours did not change | Restart Gaming Mode when the OLED Display page asks. |
+| Calibration made no difference | Restart the console; the driver reads the new values at boot. |
+| The controller stays off after Eject | Insert both modules fully, or use **Reset Magic Modules**. |
+| Update check or download failed | Read the error and retry, or download the ZIP from Releases. |
+
+**Reporting a problem:** include the plugin version, SteamOS version, processor variant, what
+the page says and what you did. [CHANGELOG.md](CHANGELOG.md) lists the changes in each version.
 
 ## How it works
 
-Settings are committed as one complete JSON file using an atomic replacement,
-with a last-good backup. A damaged primary file is recovered from that backup;
-if neither copy can be read safely, hardware changes stop and the panel explains
-the problem. Failed setting changes restore the previous configuration where
-the hardware interface supports restoration.
+<details>
+<summary><b>Hardware interfaces and background work</b></summary>
 
-Pending RGB and vibration adjustments are saved even when their control page
-closes. Status polls never overlap and stop while QAM is hidden; completed writes and a new
-game context cannot be overwritten by an older response. Per-game tracking and
-the existing recovery monitors continue independently of the panel.
+| Area | System interface |
+|---|---|
+| TDP | Verified `ryzenadj` writing SPL, SPPT and FPPT |
+| CPU Boost / EPP | Kernel CPUFreq controls under sysfs |
+| Fan Control | `pwm1` of the `ayaneo-ec` hwmon interface, every value read back |
+| Vibration, lighting, TM Guard, buttons, modules | AYANEO's vendor HID protocol; FF Gain through Linux `FF_GAIN` |
+| Magic Module power | `ayaneo-ec` sysfs, or the EC directly on older kernels |
+| Key bindings | An extension of InputPlumber's `aya7` capability map |
+| Charge bypass | The kernel `charge_behaviour` attribute, or the same EC register on older kernels |
+| Speakers | CS35L41 tuning files already in SteamOS; calibration in the Cirrus EFI variable |
+| OLED | A gamescope display script and gamescope's published EDID copy |
 
-Custom TDP Apply uses the latest slider choice, including changes
-made immediately before pressing Apply; an unapplied Custom draft asks before a
-scope change discards it. Speaker discovery and verification run
-in the background so other controls can open while ALSA becomes available.
-Audio calibration remains unavailable until both speaker DSPs are verified.
+Settings are written atomically with a last-good backup; if neither copy can be read, hardware
+changes stop and the panel explains why. Every controller write is confirmed by the
+controller's own status report, not by an acknowledgement alone. Background monitors keep TDP,
+charge bypass, the controller and FF Gain as saved after startup, sleep, charger changes and
+module swaps. Page refreshes pause while Quick Access is hidden.
 
-GitHub downloads are limited to this plugin's stable release ZIP. The updater
-checks the release's SHA-256 digest, archive paths, sizes and plugin identity
-before publishing a complete file in Downloads.
+TM Guard watches the controller's mode. When TM leaves the gamepad mode, it cuts the
+controller's power through the EC for two seconds, switches back, resets the gamepad's USB port
+and reprograms the buttons. Without the power cycle a D-pad direction from TM mode could stay
+latched as a held arrow key. It stops after three attempts in a row.
 
-TDP Control is LegionGo2Companion's, adapted to the AYANEO 3:
+The updater accepts only this plugin's stable release ZIP and checks its SHA-256 digest, paths,
+sizes and plugin identity before saving it.
 
-- The ceilings are the ones the console's SMU keeps, measured on a Ryzen 7
-  8840U: SPL 30 W and SPPT 43 W; FPPT is limited to 45 W. Performance uses all
-  three. The 5 W floor is Companion's.
-- RyzenAdj is the only writer: the AYANEO 3 has no firmware TDP interface. The
-  pinned, checksum-verified build is kept in `/var/lib/ayaneo3companion-tdp`, so
-  a plugin update does not download it again; it is checked before every run.
-- On every charger change the firmware lowers SPL to 28 W, so Companion writes
-  the limits again after each power-source change and after sleep.
-- Stock SteamOS blocks RyzenAdj from reading the limits back on this console
-  (the BIOS leaves the SMU's table in memory the kernel marks busy). When the
-  kernel is started with `iomem=relaxed`, Companion also shows **Limits now**
-  and rewrites limits it finds changed.
-- CPU Boost writes Linux CPUFreq's global `boost` control and EPP the CPU
-  energy preference of every policy (0–100%, or the kernel's named choices).
-  Uninstall puts both back to what they were before Companion first changed them.
-- Settings from 1.2.x are carried over once: Low power becomes Silent, Balanced
-  and Performance take their new values, and Minimum, Max and Custom stay as
-  Custom limits.
-- Charge control has its own transaction lock shared with charge recovery, so
-  charge changes never wait for other controls.
-- Charge bypass prefers the upstream AYANEO `charge_behaviour` kernel ABI. On
-  older SteamOS kernels it falls back to the same AYANEO 3 EC register used by
-  Linux 6.19's `ayaneo-ec` driver. The plugin verifies every write and restores
-  automatic charging before uninstalling.
-- Magic Module power and presence use the native `ayaneo-ec` sysfs interface
-  where available. On kernel 6.16, the existing raw EC path remains in use;
-  an incomplete native interface never triggers a competing raw EC write.
-- Fan control writes `pwm1_enable` and `pwm1` of the kernel's `ayaneo-ec` hwmon
-  interface and reads every duty back. Fan Control from LegionGo2Companion runs
-  the curve in its own root process with a forked backup watchdog: either one
-  returns the fan to the firmware's automatic curve when the other dies, the
-  plugin unloads or the console prepares to sleep, and the backup sets full
-  speed at 100°C on its own. Known fan programs (jupiter-fan-control, HHD,
-  fancontrol) block Fan Control instead of competing with it.
-- Magic Module identity and upper/lower layout come from AYANEO's vendor HID status,
-  with the same known-module table used by HHD. Release uses the vendor eject
-  command; after the latch motors finish, the plugin power-cycles the controller
-  through the EC and waits for both modules before restoring the saved setup.
-  Quick Reset uses AYANEO's module reinitialisation flag and performs the same
-  complete restore without releasing either latch.
-- Firmware vibration and RGB use the AYANEO vendor HID interface. The FF Gain
-  slider writes Linux `FF_GAIN` to the physical gamepad, scaling effects from
-  games and the test button without changing the firmware strength.
-  An independent evdev monitor restores the latest saved gain after startup,
-  resume or physical input-device recreation, including when `hid-ayaneo`
-  blocks vendor HID controls. Missing devices and failed writes are retried;
-  restoration waits for module operations to finish.
-  Device selection requires one of the known internal AYANEO USB physical paths
-  for the 8840U and HX 370 variants. A matching external Xbox-compatible pad is
-  never used as a fallback while the internal evdev node is absent.
-  Combined firmware/RGB and FF Gain edits commit once after both devices succeed;
-  failure restores both previous settings before returning an error.
-  A controller write or recovery requires a matching custom-mode status report,
-  with one additional attempt if verification fails. An ACK alone is insufficient.
-  Vibration tests flush pending slider changes and wait for the whole controller
-  queue to be confirmed. A failed write prevents the test and refreshes the
-  restored settings; FF Gain is disabled while an action is in progress.
-- Key bindings extend InputPlumber's native `aya7` capability map instead of
-  replacing its APU-specific device profile. The switch programs only the two
-  rear-button firmware slots: LC1/RC1 emit KeyL/KeyR (InputPlumber `LeftTop`/
-  `RightTop`), while LC/RC's native F21/F22 become `LeftPaddle2`/`RightPaddle2`;
-  Steam's controller tester shows them as LC1, RC1, LC and RC. TM mode wipes these slots, so TM Guard
-  programs them again whenever it leaves TM mode. Both F24 and legacy Meta+D are accepted as QAM;
-  the inactive firmware variant never emits its mapping.
-- TM Guard polls AYANEO's controller-mode status. When TM leaves custom gamepad
-  mode, it cuts the controller's power through the EC for two seconds, then sends
-  the custom-mode command, resets the gamepad's USB port (it otherwise keeps its
-  TM identity) and reapplies RGB, vibration, FF Gain and the button table.
-  Measured on the console: switching back without the power cycle could leave a
-  D-pad direction from TM mode latched as a held arrow key that no other reset
-  clears. A D-pad still held during the switch can latch one too; TM Guard
-  notices the arrow on the controller's own keyboard (which never sends arrows
-  in custom mode) and power-cycles again. It does not remap the TM button.
-- The audio fix creates the two side-specific coefficient aliases expected by
-  Linux for `speaker_id=1`, using the AYANEO firmware already installed by
-  SteamOS. It briefly releases PipeWire's physical PCM and reloads only the
-  left and right DSP firmware controls.
-- Recalibration loads the CS35L41 calibration profile, measures both channels,
-  rejects implausible resistance changes and writes the existing Cirrus EFI
-  format without changing either amplifier ID. The original variable is saved
-  under `/home/.ayaneo3companion-backups/audio-calibration` before every write
-  (`/home` survives SteamOS slot updates; backups older releases kept in
-  `/var/lib/ayaneo3-companion` are copied there at startup). A full restart is
-  required before the driver applies the new values.
-- RyzenAdj and calibration-firmware downloads use incremental reads, byte limits
-  and a 60-second transfer deadline checked between network reads. Individual
-  network operations have a 10-second timeout; a pending read may finish after
-  the transfer deadline. Interrupted binary downloads retain existing components.
-- The display definition matches `AYA / 0x0113 / AYAOLED_FHD`. Root writes it into
-  the gamescope user's folder only through a helper running as that user, so a
-  link planted there cannot redirect the write. A runtime check
-  normalizes only the CTA MaxCLL byte to AYANEO's advertised 800 nit maximum if
-  the bridge or another tool publishes a different value.
-
----
+</details>
 
 ## Development
 
-The complete verification sequence is:
+<details>
+<summary><b>Build, test and package from source</b></summary>
+
+Requires Node.js 24 and Python 3.10 or newer.
 
 ```bash
 npm ci --ignore-scripts --no-audit --no-fund
-npm audit --audit-level=high
-npm run typecheck
-npm run test:frontend
-npm run test:backend
-npm run build
-npm run package -- --check
-npm run package
+npm run typecheck      # frontend types
+npm run test:frontend  # frontend regression suites
+npm run test:backend   # Python backend tests
+npm run build          # compile the frontend
+npm run package        # create Ayaneo3Companion-<version>.zip
 ```
 
-Backend tests run without AYANEO hardware, using isolated temporary files and
-mocked device interfaces. The frontend suite runs the actual components with
-controlled RPC completion order to exercise saves, polling, game changes,
-dropdowns and panel lifecycles. GitHub Actions runs the backend suite on Ubuntu
-with Python 3.10 and Windows with Python 3.13, then checks the frontend and the
-contents of the built ZIP with Node.js 24.
-Settings writes return their confirmed state without waiting for unrelated
-diagnostics; the UI merges only the action's own fields into the latest observed
-state. TDP edits carry the game they were made for, and the backend refuses
-them once another game runs. Regular status reads refresh capabilities.
-Responsiveness tests block a slow read while subsequent controller transactions
-complete. TDP Control's own tests, ported from LegionGo2Companion, run its page
-against delayed replies and game changes and its backend against a temporary
-CPUFreq tree, a fake RyzenAdj and the SMU's measured clamps. Fan Control's
-guardian, also from the Legion, runs as real processes on a model hwmon
-directory and is killed, frozen and suspended mid-write. Additional
-regressions cover HID confirmation and bounded hardware transfers. They also
-hold a TDP transaction while charge and RGB changes finish, verify charge recovery
-reads committed intent, and exercise vibration tests during queued saves.
-Installer regressions exercise real directory swaps, failed staging, map writes,
-service failures and incomplete rollback using temporary files and fake services.
-The archive check also uses the updater's runtime-file validator. The build uses
-direct Rollup plugins and native filesystem cleanup without the obsolete
-glob/delete dependency chain.
+Install the result through Decky's **Install Plugin from ZIP**. GitHub Actions runs the backend
+tests on Linux and Windows and checks the frontend and the built ZIP. Hardware calls are
+mocked, so startup, sleep, charger changes, module swaps and the controller still need testing
+on an AYANEO 3.
 
-These checks do not verify live hardware. Startup, suspend/resume, charger
-changes, module reconnection and physical controller behaviour still require
-validation on an AYANEO 3 before claiming a hardware-tested release.
+</details>
+
+---
+
+## Credits
+
+- [LegionGo2Companion](https://github.com/Rayekkk/LegionGo2Companion) - TDP Control, Fan Control and the panel layout
+- [Handheld Daemon (HHD)](https://github.com/hhd-dev/hhd) - prior art for the AYANEO 3 controller protocol and module table; no HHD code is included
+- [HHD hardware firmware](https://github.com/hhd-dev/hwfirm) - the speaker calibration file, downloaded at runtime
+- [RyzenAdj](https://github.com/FlyGoat/RyzenAdj), [InputPlumber](https://github.com/ShadowBlip/InputPlumber), the Linux `ayaneo-ec` driver and [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) - the supporting tools and interfaces
+
+Component licenses are recorded in [NOTICE](NOTICE).
 
 ---
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+BSD 3-Clause - see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+---
+
+## AI disclaimer
+
+This project was built with substantial help from AI coding assistants. Most of the code,
+tests and documentation were written by AI agents (first OpenAI Codex, later Anthropic's
+Claude Code) working under my direction: I defined what each feature should do, made the
+design and safety decisions, reviewed the results and chose what was released.
+
+The AI was used to:
+
+- write and refactor the Python backend and the Decky panel, and port TDP and Fan Control
+  from LegionGo2Companion;
+- build the automated test suites (more than 600 tests run on Linux and Windows for every change);
+- audit the code for bugs, security issues and wasted work, with every finding checked by
+  independent review passes and, where possible, reproduced before it was fixed;
+- research hardware interfaces and write this documentation.
+
+Nothing here is untested AI output. I tested the plugin continuously on my own AYANEO 3
+throughout development: in Gaming Mode, across sleep, restarts, plugin updates and
+reinstalls, with games and HDR content, module swaps and TM presses. Hardware-facing features
+(power limits, fan control, charging, speaker calibration, display) were held back until they
+behaved correctly on the real device, and safety rules such as returning the fan to automatic
+on any failure and reading back every hardware write were kept as hard requirements.
+
+Even so, Companion controls power, cooling, charging and speaker calibration on your console.
+It is provided as is, without warranty (see [License](#license)); use it at your own risk.
