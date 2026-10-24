@@ -195,13 +195,21 @@ class FanProcessTests(unittest.TestCase):
                                       revision=revision)).encode())
         return self.receive_kind('configured', 2)
 
+    def attribute(self, name):
+        # The processes write the model files truncate-then-write; real sysfs has no empty window.
+        for _ in range(100):
+            text = (self.root/'hwmon'/name).read_text()
+            if text.strip(): return int(text)
+            time.sleep(.01)
+        raise AssertionError(name+' stayed empty')
+
     def mode(self):
-        return int((self.root/'hwmon'/'pwm1_enable').read_text())
+        return self.attribute('pwm1_enable')
 
     def override(self):
         """None on the EC's own curve, else the manual duty in percent."""
         import fan_hwmon
-        return None if self.mode() == 2 else fan_hwmon.pct_for(int((self.root/'hwmon'/'pwm1').read_text()))
+        return None if self.mode() == 2 else fan_hwmon.pct_for(self.attribute('pwm1'))
 
     def wait_release(self, timeout=5):
         import fcntl
