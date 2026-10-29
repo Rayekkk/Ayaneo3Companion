@@ -318,7 +318,7 @@ sizes and plugin identity before saving it.
 <details>
 <summary><b>Build, test and package from source</b></summary>
 
-Requires Node.js 24 and Python 3.10 or newer.
+Requires Node.js 24 and Python 3.14.
 
 ```bash
 npm ci --ignore-scripts --no-audit --no-fund
@@ -326,10 +326,10 @@ npm run typecheck      # frontend types
 npm run test:frontend  # frontend regression suites
 npm run test:backend   # Python backend tests
 npm run build          # compile the frontend
-npm run package        # create Ayaneo3Companion-<version>.zip
+npm run package        # create artifacts/Ayaneo3Companion-<version>.zip
 ```
 
-Install the result through Decky's **Install Plugin from ZIP**. GitHub Actions runs the backend
+Install the result through Decky's **Install Plugin from ZIP**. `npm run check` runs all of it. GitHub Actions runs the backend
 tests on Linux and Windows and checks the frontend and the built ZIP. Hardware calls are
 mocked, so startup, sleep, charger changes, module swaps and the controller still need testing
 on an AYANEO 3.

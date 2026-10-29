@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import support  # noqa: F401  (the Decky harness before any backend import)
-from _harness import owner
+from support import owner
 import main
 import input_backend
 import audio_backend
@@ -49,10 +49,12 @@ class ControlTransactionTests(unittest.TestCase):
             side_effect=lambda: self.target.unlink(missing_ok=True)))
         self.plugin = main.Plugin()
 
+    def assert_refused(self, result, pattern="."):
+        support.assert_refused(self, result, pattern)
+
     def test_failed_enable_restores_firmware_and_removes_new_map(self):
         self.restart.side_effect = [OSError('service unavailable'), None]
-        with self.assertRaisesRegex(RuntimeError, 'previous bindings restored'):
-            asyncio.run(self.plugin.set_button_fix(True))
+        self.assert_refused(asyncio.run(self.plugin.set_button_fix(True)), 'previous bindings restored')
         self.assertFalse(self.target.exists())
         self.assertEqual([call.args[0] for call in self.program.call_args_list], [True, False])
         self.assertFalse(main.Plugin._state['button_fix_installed'])
@@ -65,24 +67,21 @@ class ControlTransactionTests(unittest.TestCase):
             self.target.unlink()
             raise OSError('interrupted map removal')
         self.remove.side_effect = remove
-        with self.assertRaisesRegex(RuntimeError, 'previous bindings restored'):
-            asyncio.run(self.plugin.set_button_fix(False))
+        self.assert_refused(asyncio.run(self.plugin.set_button_fix(False)), 'previous bindings restored')
         self.assertEqual(self.target.read_bytes(), old)
         self.assertEqual([call.args[0] for call in self.program.call_args_list], [False, True])
         self.assertTrue(main.Plugin._state['button_fix_installed'])
 
     def test_foreign_override_is_rejected_before_touching_firmware(self):
         self.target.write_bytes(b'user override')
-        with self.assertRaisesRegex(RuntimeError, 'another aya7'):
-            asyncio.run(self.plugin.set_button_fix(True))
+        self.assert_refused(asyncio.run(self.plugin.set_button_fix(True)), 'another aya7')
         self.program.assert_not_called()
         self.restart.assert_not_called()
         self.assertEqual(self.target.read_bytes(), b'user override')
 
     def test_failed_runtime_rollback_is_not_reported_as_restored(self):
         self.restart.side_effect = OSError('service unavailable')
-        with self.assertRaisesRegex(RuntimeError, 'rollback failed: InputPlumber'):
-            asyncio.run(self.plugin.set_button_fix(True))
+        self.assert_refused(asyncio.run(self.plugin.set_button_fix(True)), 'rollback failed: InputPlumber')
         self.assertFalse(self.target.exists())
 
     def test_delayed_module_power_rechecks_eject_intent_under_controller_lock(self):
@@ -118,8 +117,9 @@ class ControlTransactionTests(unittest.TestCase):
     def test_tm_guard_failed_save_preserves_saved_and_running_choice(self):
         before = self.store.data
         with patch.object(self.store, 'commit', side_effect=OSError('disk full')):
-            with self.assertRaisesRegex(OSError, 'disk full'):
-                asyncio.run(self.plugin.set_tm_guard(False))
+            # An OSError is unexpected: answered with its type only, the text stays in the log.
+            self.assertEqual(asyncio.run(self.plugin.set_tm_guard(False)), {
+                'ok': False, 'error': 'Unexpected error (OSError). Details are in the Decky log.'})
         self.assertEqual(self.store.data, before)
         self.assertTrue(main.Plugin._state['tm_guard_enabled'])
         self.assertEqual(main.Plugin._state['tm_guard_status'], 'Monitoring')
@@ -149,8 +149,8 @@ class ControlTransactionTests(unittest.TestCase):
         with patch.object(audio_backend, 'audio_fix_ready', return_value=True), \
              patch.object(audio_backend, 'perform_audio_recalibration', return_value=result) as calibrate, \
              patch.object(self.store, 'commit', side_effect=OSError('disk full')):
-            with self.assertRaisesRegex(RuntimeError, 'was applied, but its summary could not be saved'):
-                asyncio.run(self.plugin.recalibrate_audio())
+            self.assert_refused(asyncio.run(self.plugin.recalibrate_audio()),
+                                'was applied, but its summary could not be saved')
         calibrate.assert_called_once_with()
         self.assertEqual(main.Plugin._state['audio_calibration_last'], 'previous summary')
         self.assertNotIn('audio_calibration_last', self.store.data)

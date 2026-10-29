@@ -1,22 +1,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
 
-"""Shared Companion runtime: device identity, plugin paths, privileged I/O and downloads."""
+"""Shared Companion runtime: device identity, plugin paths and privileged I/O."""
 
-import contextlib
+import json
 import os
-import tempfile
-import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import decky
 
-# Decky aliases its own updater module to the bare name ``updater`` before a
-# plugin is loaded, so use the collision-proof module name shared by the other
-# Rayek plugins.
-from lego_updater import Updater
+import dk_fs
 
 LOG = "[ayaneo3companion]"
 PLUGIN_DIR = Path(decky.DECKY_PLUGIN_DIR)
@@ -35,12 +28,23 @@ def decky_account():
 
 
 DECKY_ACCOUNT = decky_account()
-updater = Updater(user_agent="Ayaneo3Companion", plugin_dir=str(PLUGIN_DIR), **DECKY_ACCOUNT)
-ALLOWED_DOWNLOAD_HOSTS = frozenset({
-    "github.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com",
-})
-HARDWARE_DOWNLOAD_SECONDS = 60.0
-HARDWARE_NETWORK_TIMEOUT = 10.0
+# GitHub release downloads (RyzenAdj): the release URL may only lead to GitHub's asset storage.
+GITHUB_ASSET_HOSTS = frozenset({"objects.githubusercontent.com", "release-assets.githubusercontent.com"})
+GITHUB_RELEASE_HOSTS = GITHUB_ASSET_HOSTS | {"github.com"}
+HARDWARE_DOWNLOAD_SECONDS = 60
+
+
+def plugin_version() -> str:
+    """The installed version: Decky's DECKY_PLUGIN_VERSION (from package.json), else package.json itself."""
+    version = os.environ.get("DECKY_PLUGIN_VERSION", "")
+    if not version:
+        try:
+            version = json.loads((PLUGIN_DIR / "package.json").read_text(encoding="utf-8")).get("version", "")
+        except (OSError, ValueError, AttributeError):
+            version = ""
+    return version if isinstance(version, str) and version else "0.0.0"
+
+
 # SteamOS keeps /var per OS slot (var-A/var-B partitions), so an update that switches
 # slots leaves it behind; /home is shared. Measured on the console.
 BACKUP_ROOT = Path("/home/.ayaneo3companion-backups")
@@ -71,13 +75,8 @@ def migrate_backups(source_root: Path = LEGACY_BACKUP_ROOT, target_root: Path = 
                 continue
             data = item.read_bytes()
             private_dir(target.parent)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-            fd = os.open(target, flags, 0o600)
-            try:
-                os.write(fd, data)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            # Atomic: a copy cut short would otherwise stay truncated, skipped as existing on every later start.
+            dk_fs.write_atomic(target, data, 0o600, no_links=True)
             if target.read_bytes() != data:
                 raise RuntimeError(f"backup copy verification failed: {target}")
             copied += 1
@@ -110,69 +109,8 @@ def require_supported_device(action: str = "hardware control") -> None:
         raise RuntimeError(f"{action} is restricted to AYANEO 3")
 
 
-def atomic_write_bytes(target: Path, data: bytes, mode: int = 0o644) -> None:
-    """Replace a regular configuration file without following a shared temp name."""
-    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp",
-                                        dir=str(target.parent))
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, target)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-
-
 def clamp(value, low, high):
     return max(low, min(high, int(value)))
-
-
-def checked_download_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    if (parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_DOWNLOAD_HOSTS
-            or parsed.username is not None or parsed.password is not None
-            or parsed.port not in (None, 443)):
-        raise RuntimeError(f"refusing untrusted hardware download host: {parsed.hostname or '?'}")
-    return url
-
-
-class _HardwareDownloadRedirect(urllib.request.HTTPRedirectHandler):
-    max_redirections = 5
-    max_repeats = 2
-
-    def redirect_request(self, request, fp, code, message, headers, new_url):
-        # Validate before following a redirect; checking only the final URL
-        # would still send a privileged request to an untrusted destination.
-        checked_download_url(new_url)
-        return super().redirect_request(request, fp, code, message, headers, new_url)
-
-
-def open_hardware_download(request):
-    opener = urllib.request.build_opener(
-        _HardwareDownloadRedirect(), urllib.request.HTTPSHandler(context=updater.ssl_context()))
-    return opener.open(request, timeout=HARDWARE_NETWORK_TIMEOUT)
-
-
-def hardware_download_chunks(response, limit: int, deadline: float):
-    """Bound transfer duration as well as bytes, even when the peer drips data."""
-    reader = getattr(response, "read1", response.read)
-    total = 0
-    while True:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("hardware download exceeded its time limit")
-        chunk = reader(min(65536, limit + 1 - total))
-        if time.monotonic() >= deadline:
-            raise TimeoutError("hardware download exceeded its time limit")
-        if not chunk:
-            return
-        total += len(chunk)
-        if total > limit:
-            raise RuntimeError("hardware download exceeded the size limit")
-        yield chunk
 
 
 def normalized_file_bytes(path: Path) -> bytes | None:

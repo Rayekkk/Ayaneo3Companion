@@ -3,6 +3,7 @@
 // components) so the element tree is exactly what the page used to inline.
 import { ButtonItem, ConfirmModal, Field, findModuleExport, PanelSectionRow, Router, showModal } from "@decky/ui";
 import { Fragment, type ReactNode } from "react";
+import type { Result } from "./result";
 
 /** A read-only row; `focusable` keeps it reachable with the D-pad. */
 export const infoRow = (label: ReactNode, description?: ReactNode) =>
@@ -30,6 +31,12 @@ export const detailsRows = (shown: boolean, toggle: () => void, rows: Array<[Rea
 /** An Error's message; anything else as the fallback, or as text when there is none. */
 export const errorText = (error: unknown, fallback?: string) =>
   error instanceof Error ? error.message : fallback ?? String(error);
+
+/** The state of a D2 answer; a refusal throws its message, as the call rejected before the D2 contract. */
+export const unwrap = <T,>(call: Promise<Result<T>>): Promise<T> => call.then(r => {
+  if (!r?.ok) throw new Error(r?.error || "Unknown error");
+  return r.state as T;
+});
 
 // ── Running app watcher ───────────────────────────────────────────────────────
 
@@ -59,6 +66,9 @@ const checkRunningApp = () => {
   return Promise.all([...gameClients].map((client) => client.check(app)));
 };
 
+/** Steam's client API, read from window as before; undefined outside Steam. */
+const steamClient = () => (window as { SteamClient?: typeof SteamClient }).SteamClient;
+
 /**
  * Subscribe to resume-from-suspend. Returns an unsubscribe function, or null
  * when the client offers no way to hear about it.
@@ -71,7 +81,7 @@ const checkRunningApp = () => {
  * legacy call stays as a fallback for older clients.
  */
 function onResumeFromSuspend(handler: () => void): (() => void) | null {
-  const asUnsub = (reg: any): (() => void) | null => {
+  const asUnsub = (reg: SteamUnregister | null | undefined): (() => void) | null => {
     if (typeof reg === "function") return reg;
     if (typeof reg?.unregister === "function") return () => reg.unregister();
     return null;
@@ -82,7 +92,8 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
       typeof e.NotifyResumeFromSuspend === "function");
 
   try {
-    const mgr = (window as any).SleepManager ?? findModuleExport(isSleepManager);
+    const mgr: SteamSleepManager | undefined = (window as { SleepManager?: SteamSleepManager }).SleepManager
+      ?? findModuleExport(isSleepManager);
     const unsub = asUnsub(mgr?.RegisterForNotifyResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
@@ -91,7 +102,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
 
   try {
     const unsub = asUnsub(
-      (window as any).SteamClient?.System?.RegisterForOnResumeFromSuspend?.(handler));
+      steamClient()?.System?.RegisterForOnResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
     console.warn("[ayaneo3companion] game_watcher.legacy_resume_registration_failed");
@@ -107,7 +118,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
 function startGameWatch() {
   const generation = ++gameGeneration;
   const live = () => generation === gameGeneration;
-  const steam = (window as any).SteamClient;
+  const steam = steamClient();
   try {
     const reg = steam?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
       if (!live()) return;
@@ -118,7 +129,7 @@ function startGameWatch() {
       }, 300);
       lateChecks.add(timer);
     });
-    if (reg?.unregister) gameUnsubs.push(() => reg.unregister());
+    if (reg && typeof reg !== "function" && reg.unregister) gameUnsubs.push(() => reg.unregister());
   } catch (e) {
     console.warn("[ayaneo3companion] game_watcher.app_notifications_unavailable");
   }

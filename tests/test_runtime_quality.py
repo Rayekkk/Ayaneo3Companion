@@ -14,13 +14,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from _harness import owner
-if "main" not in sys.modules:
-    from _harness import install
-    install()
+import support
+from support import owner
 import main
 import controller_backend
-import companion_common
 import safe_settings
 
 
@@ -60,10 +57,10 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         patch("read_charge_bypass", side_effect=lambda: self.hardware["charge_bypass"])
         patch("write_charge_bypass", side_effect=lambda value: self.write("charge_bypass", value))
         patch("apply_controller", side_effect=lambda value, *a, **kw: self.write("controller", value))
-        patch("updater", new=types.SimpleNamespace(
-            reset=mock.Mock(), close=mock.Mock(), ssl_context=mock.Mock(return_value=None),
-            plugin_version=mock.Mock(return_value="1.0.2"),
-            check=mock.Mock(return_value={"current_version": "1.0.2", "update_available": False})))
+        self.updates = types.SimpleNamespace(
+            close=mock.Mock(),
+            check=mock.Mock(return_value={"ok": True, "current_version": "1.0.2", "update_available": False}))
+        patch("_updates", return_value=self.updates)
         main.Plugin._state = {
             "supported": True, "initializing": False, "startup_error": "",
             "controller": copy.deepcopy(self.controller),
@@ -125,21 +122,24 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         self.patch("write_charge_bypass", side_effect=write)
         return entered, release
 
+    def assert_refused(self, result, pattern="."):
+        support.assert_refused(self, result, pattern)
+
     async def wait_entered(self, entered):
         self.assertTrue(await asyncio.to_thread(entered.wait, 2), "worker did not reach checkpoint")
 
     async def test_controller_failed_commit_restores_previous_configuration(self):
         before = self.checkpoint()
         wanted = {**self.controller, "brightness": 25, "color": "00ff00"}
-        with self.fail_primary_replace(), self.assertRaises(RuntimeError):
-            await self.plugin.set_controller(wanted)
+        with self.fail_primary_replace():
+            self.assert_refused(await self.plugin.set_controller(wanted))
         self.assert_restored(before)
         self.assertEqual([field for field, _ in self.writes], ["controller", "controller"])
 
     async def test_charge_bypass_failed_commit_restores_actual_charge_value(self):
         before = self.checkpoint()
-        with self.fail_primary_replace(), self.assertRaises(RuntimeError):
-            await self.plugin.set_charge_bypass(True)
+        with self.fail_primary_replace():
+            self.assert_refused(await self.plugin.set_charge_bypass(True))
         self.assert_restored(before)
         self.assertEqual(self.writes, [("charge_bypass", True), ("charge_bypass", False)])
 
@@ -152,15 +152,15 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
             attempts.append(value)
             if len(attempts) == 1:
                 raise OSError("controller disappeared after first packet")
-        with mock.patch.object(controller_backend, "apply_controller", side_effect=apply), self.assertRaisesRegex(RuntimeError, "restored"):
-            await self.plugin.set_controller(wanted)
+        with mock.patch.object(controller_backend, "apply_controller", side_effect=apply):
+            self.assert_refused(await self.plugin.set_controller(wanted), "restored")
         self.assert_restored(before)
 
     async def test_failed_hardware_rollback_is_reported_without_claiming_success(self):
         disk = self.store.data
-        with mock.patch.object(controller_backend, "apply_controller", side_effect=OSError("disconnected")), \
-                self.assertRaisesRegex(RuntimeError, "hardware rollback failed"):
-            await self.plugin.set_controller({**self.controller, "brightness": 25})
+        with mock.patch.object(controller_backend, "apply_controller", side_effect=OSError("disconnected")):
+            self.assert_refused(await self.plugin.set_controller({**self.controller, "brightness": 25}),
+                                "hardware rollback failed")
         self.assertEqual(self.store.data, disk)
 
     async def test_repeated_caller_cancellation_waits_for_real_worker_to_commit(self):
@@ -195,7 +195,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second.done())
         self.assertFalse(caller.done())
         release.set()
-        await caller
+        self.assertIs((await caller)["ok"], True)
         with self.assertRaises(asyncio.CancelledError):
             await first
         await second
@@ -203,7 +203,7 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.getSetting("charge_bypass"))
         self.assertFalse(self.plugin._rpc_jobs)
         self.assertFalse(self.plugin._workers)
-        self.assertEqual(companion_common.updater.close.call_count, 1)
+        self.assertEqual(self.updates.close.call_count, 1)
 
     async def test_shutdown_rejects_queued_write_but_drains_admitted_transaction(self):
         entered, release = self.blocking_charge_write()
@@ -215,9 +215,8 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.01)
         self.assertFalse(unload.done())
         release.set()
-        await admitted
-        with self.assertRaisesRegex(RuntimeError, "shutting down"):
-            await queued
+        self.assertIs((await admitted)["ok"], True)
+        self.assert_refused(await queued, "shutting down")
         await unload
         self.assertTrue(self.store.getSetting("charge_bypass"))
         self.assertTrue(self.store.getSetting("tm_guard_enabled"), "the queued write never ran")
@@ -227,10 +226,9 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         before = self.checkpoint()
         for operation in (self.plugin.get_state, self.plugin.check_for_updates,
                           lambda: self.plugin.set_charge_bypass(True)):
-            with self.assertRaisesRegex(RuntimeError, "shutting down"):
-                await operation()
+            self.assert_refused(await operation(), "shutting down")
         self.assert_restored(before)
-        companion_common.updater.check.assert_not_called()
+        self.updates.check.assert_not_called()
         self.assertEqual(self.writes, [])
 
     async def test_unload_during_startup_drains_worker_and_never_leaves_late_monitors(self):
@@ -278,12 +276,13 @@ class RuntimeQualityTests(unittest.IsolatedAsyncioTestCase):
         spies.append(tdp_start.start())
         self.patchers.append(tdp_start)
         await self.plugin._main()
-        state = await self.plugin.get_state()
+        answer = await self.plugin.get_state()
+        self.assertIs(answer["ok"], True)
+        state = answer["state"]
         self.assertTrue(state["settings_error"])
         self.assertFalse(state["startup_error"])
         self.assertFalse(state["initializing"])
-        with self.assertRaisesRegex(RuntimeError, "Settings need recovery"):
-            await self.plugin.set_charge_bypass(True)
+        self.assert_refused(await self.plugin.set_charge_bypass(True), "Settings need recovery")
         self.assertEqual(self.writes, [])
         for spy in spies:
             spy.assert_not_called()

@@ -4,20 +4,21 @@
 import { callable, toaster } from "@decky/api";
 import { Field, PanelSection, PanelSectionRow, Spinner } from "@decky/ui";
 import { FC, useCallback, useEffect, useState } from "react";
+import { settle, type Result } from "./result";
 import { StackedAction } from "./ui";
 
-interface UpdateInfo {
+interface UpdateInfo extends Result<never> {
   current_version?: string;
   latest_version?: string;
   update_available?: boolean;
-  download_url?: string | null;
-  asset_name?: string | null;
-  error?: string;
+  download_available?: boolean;
+  asset_name?: string;
+  no_release?: boolean;
 }
 
-const getVersion = callable<[], { version: string }>("get_version");
+const getVersion = callable<[], Result<never> & { version?: string }>("get_version");
 const checkForUpdates = callable<[], UpdateInfo>("check_for_updates");
-const performUpdate = callable<[string], { success: boolean; version?: string; path?: string; error?: string }>("perform_update");
+const performUpdate = callable<[string], Result<never> & { version?: string; path?: string; sha256?: string }>("perform_update");
 
 interface UpdateView { info: UpdateInfo | null; checking: boolean; downloading: boolean; path: string | null }
 let updateView: UpdateView = { info: null, checking: false, downloading: false, path: null };
@@ -43,9 +44,7 @@ export const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }
     let active = true;
     updateListeners.add(setView);
     setView(updateView);
-    getVersion()
-      .then(result => { if (active && result.version) setVersion(result.version); })
-      .catch(() => undefined);
+    void settle(getVersion()).then(result => { if (active && result.version) setVersion(result.version); });
     return () => { active = false; updateListeners.delete(setView); };
   }, []);
 
@@ -65,7 +64,7 @@ export const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }
     } catch (error) {
       if (generation === updateGeneration) {
         notifyFailure("Update check failed", error);
-        publishUpdate({ info: { error: error instanceof Error ? error.message : String(error) } });
+        publishUpdate({ info: { ok: false, error: error instanceof Error ? error.message : String(error) } });
       }
     } finally {
       if (generation === updateGeneration) publishUpdate({ checking: false });
@@ -81,12 +80,12 @@ export const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }
     try {
       const result = await performUpdate(expectedVersion);
       if (generation !== updateGeneration) return;
-      if (result.success && result.path && result.version === expectedVersion) publishUpdate({ path: result.path });
-      else if (result.success) throw new Error("The downloaded release does not match the selected version. Check for updates again.");
+      if (result.ok && result.path && result.version === expectedVersion) publishUpdate({ path: result.path });
+      else if (result.ok) throw new Error("The downloaded release does not match the selected version. Check for updates again.");
       else throw new Error(result.error ?? "Unknown error");
     } catch (error) {
       if (generation === updateGeneration) {
-        publishUpdate({ info: { ...(updateView.info ?? {}), error: error instanceof Error ? error.message : String(error) } });
+        publishUpdate({ info: { ...(updateView.info ?? { ok: false }), error: error instanceof Error ? error.message : String(error) } });
         notifyFailure("Download failed", error);
       }
     } finally {
@@ -100,24 +99,28 @@ export const UpdateSection: FC<{ initialVersion: string }> = ({ initialVersion }
     </span>
   );
 
+  // A release on offer that cannot be downloaded says why ("message") where the error was shown before;
+  // no published release at all still reads "Up to date".
+  const problem = updateInfo?.error || (updateInfo?.no_release ? undefined : updateInfo?.message);
+
   return <PanelSection title="Updates">
     <PanelSectionRow>
       <div style={{ width: "100%", minWidth: 0, fontSize: "12px", color: "var(--gpColor-TextMuted, rgba(255,255,255,.6))", overflowWrap: "anywhere" }}>
         Installed: {versionTag((updateInfo?.current_version ?? version) || "?")}
-        {updateInfo?.latest_version && !updateInfo.error && <>
+        {updateInfo?.latest_version && !problem && <>
           {" · "}Latest: {versionTag(updateInfo.latest_version)}
         </>}
       </div>
     </PanelSectionRow>
-    {updateInfo?.error && <PanelSectionRow>
+    {problem && <PanelSectionRow>
       <div style={{ width: "100%", minWidth: 0, padding: "8px", boxSizing: "border-box", borderRadius: "4px", background: "rgba(248,113,113,.14)", color: "var(--gpColor-Red, #f87171)", overflowWrap: "anywhere" }}>
-        {updateInfo.error}
+        {problem}
       </div>
     </PanelSectionRow>}
-    {updateInfo && !updateInfo.error && !updateInfo.update_available && !downloadPath && <PanelSectionRow>
+    {updateInfo && !problem && !updateInfo.update_available && !downloadPath && <PanelSectionRow>
       <div style={{ fontSize: "12px", color: "var(--gpColor-Green, #4ade80)" }}>Up to date</div>
     </PanelSectionRow>}
-    {updateInfo?.update_available && updateInfo.download_url && updateInfo.asset_name && !downloadPath && <StackedAction
+    {updateInfo?.update_available && updateInfo.download_available && updateInfo.asset_name && !downloadPath && <StackedAction
       title={`Version ${updateInfo.latest_version} is available`}
       description="Download the exact GitHub release ZIP to the SteamOS Downloads folder."
       disabled={downloading || checking}

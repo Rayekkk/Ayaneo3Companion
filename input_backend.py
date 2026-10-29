@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 
 import companion_common
+import dk_fs
 
 
 INPUT_MAP_SOURCE = companion_common.PLUGIN_DIR / "assets" / "ayaneo3-companion.yaml"
@@ -53,7 +54,7 @@ def install_button_fix() -> None:
     if INPUT_MAP_TARGET.exists() and not button_map_owned(INPUT_MAP_TARGET):
         raise RuntimeError("another aya7 InputPlumber override already exists")
     INPUT_MAP_TARGET.parent.mkdir(parents=True, exist_ok=True)
-    companion_common.atomic_write_bytes(INPUT_MAP_TARGET, button_map_bytes())
+    dk_fs.write_atomic(INPUT_MAP_TARGET, button_map_bytes(), 0o644)
     # InputPlumber sorts maps globally by filename and the last duplicate ID
     # wins. Matching the stock ayaneo_type7.yaml filename makes the /etc copy
     # sort after /usr/share via directory priority.

@@ -513,7 +513,7 @@ class CpuProfileTests(unittest.TestCase):
         generation = tdp._arm_ac_settle(target)
         before = self.payload()
         applies_before = len(self.applies)
-        with patch.object(safe_settings, '_atomic_write_bytes', side_effect=OSError('disk full')):
+        with patch.object(safe_settings.dk_fs, 'write_json', side_effect=OSError('disk full')):
             result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', '111'))
         self.assertFalse(result['success'])
         self.assertFalse(result['applied'])

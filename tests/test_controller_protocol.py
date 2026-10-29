@@ -447,7 +447,8 @@ class ControllerProtocolTests(unittest.TestCase):
             await asyncio.sleep(0.05)
             self.assertFalse(second.done())
             release.set()
-            await asyncio.gather(first, second)
+            answer, _ = await asyncio.gather(first, second)
+            self.assertIs(answer["ok"], True)
 
         try:
             with mock.patch.object(controller_backend, "apply_controller", side_effect=apply), \

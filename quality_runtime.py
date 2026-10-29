@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Keep Decky calls and their workers alive until hardware transactions finish."""
+"""Keep Decky calls and their workers alive until hardware transactions finish; every public call answers D2
+(DeckyKit dk_rpc: {ok, error?, state?}, no exception reaches the panel)."""
 import asyncio
 import functools
 import inspect
 import time
 
 import diagnostics
+import dk_rpc
 
 
 async def complete(operation):
@@ -80,19 +82,26 @@ def _logged_rpc(function, name):
             except Exception as error:
                 failed(error=error)
                 raise
-            if isinstance(result, dict) and result.get('success') is False:
+            if isinstance(result, dict) and result.get('ok') is False:
                 failed(reason='backend_reported_failure')
             elif quiet:
                 diagnostics.transition('plugin', 'rpc_health', 'ok', operation=name, initial=False)
             else:
                 diagnostics.event('plugin', 'rpc_completed', operation=name, duration_ms=duration(),
                                   outcome='succeeded' if isinstance(result, dict)
-                                  and result.get('success') is True else 'returned')
+                                  and result.get('ok') is True else 'returned')
             return result
     return logged
 
 
-def guard_public_calls(cls):
+def guard_public_calls(logger):
+    """Class decorator: admission, the write lock and diagnostics around every public coroutine, inside the D2
+    boundary. The backend's refusals are RuntimeError/ValueError written for users: the panel shows them as
+    they are; anything else is logged with its traceback and answered with its type only."""
+    return functools.partial(_guard, dk_rpc.boundary(logger, shown=(RuntimeError, ValueError)))
+
+
+def _guard(rpc, cls):
     for name, function in list(vars(cls).items()):
         if name.startswith('_') or not inspect.iscoroutinefunction(function):
             continue
@@ -124,6 +133,6 @@ def guard_public_calls(cls):
                 self._rpc_jobs.add(task)
                 task.add_done_callback(self._rpc_jobs.discard)
                 return await complete(task)
-            return _logged_rpc(guarded, name)
+            return rpc(_logged_rpc(guarded, name))
         setattr(cls, name, wrap(function, name))
     return cls

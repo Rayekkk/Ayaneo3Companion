@@ -18,7 +18,7 @@ import companion_common
 import display_backend
 import display_backend as display
 import display_script_io
-from system_process import PYTHON
+from dk_process import PYTHON
 import main
 
 POSIX = unittest.skipUnless(os.name == "posix", "POSIX dir_fd and symlink semantics")
@@ -347,7 +347,8 @@ class DisplayDefinitionTests(unittest.TestCase):
             result = asyncio.run(main.Plugin().set_screen_fix(True))
         install_display.assert_called_once_with(False)
         warning.assert_called_once()
-        self.assertTrue(result["screen_installed"])
+        self.assertIs(result["ok"], True)
+        self.assertTrue(result["state"]["screen_installed"])
         self.assertTrue(main.Plugin._state["screen_installed"])
         diagnostics.assert_not_called()
 

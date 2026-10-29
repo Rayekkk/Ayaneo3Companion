@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import support  # noqa: F401  (the Decky harness before any backend import)
-from _harness import owner
+from support import owner
 import main
 import controller_backend
 import companion_common
@@ -186,7 +186,7 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(controller_backend, "rumble_event_token", return_value=TOKEN))
             stack.enter_context(patch.object(controller_backend, "set_vibration_gain", side_effect=write))
             stack.enter_context(patch.object(companion_common, "supported_device", return_value=False))
-            stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())))
+            stack.enter_context(patch.object(self.plugin, "_updates", types.SimpleNamespace(close=Mock())))
             monitor = asyncio.create_task(self.plugin._vibration_gain_loop())
             main.Plugin._vibration_gain_task = monitor
             try:
@@ -216,8 +216,8 @@ class VibrationGainRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch.object(owner(name), name, return_value=None))
             stack.enter_context(patch.object(companion_common, "dmi", return_value="AYANEO 3"))
             stack.enter_context(patch.object(self.plugin, "_start_tdp", new=AsyncMock()))
-            stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(
-                ssl_context=Mock(), plugin_version=Mock(return_value="1.2.0"))))
+            stack.enter_context(patch.object(main.dk_net, "tls_context"))
+            stack.enter_context(patch.object(companion_common, "plugin_version", return_value="1.2.0"))
             for name in ("_restore_hardware", "_edid_loop", "_charge_loop", "_module_loop", "_tm_guard_loop", "_restore_audio"):
                 stack.enter_context(patch.object(self.plugin, name, new=AsyncMock()))
             gain_loop = stack.enter_context(patch.object(self.plugin, "_vibration_gain_loop", new=AsyncMock()))

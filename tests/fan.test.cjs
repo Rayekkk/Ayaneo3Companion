@@ -1,6 +1,8 @@
 // Execute the actual FanPage with controlled React hooks/RPC timing.
 // Ported from LegionGo2Companion: the curve is the AYANEO 3 EC's duty in percent, the tach is RPM only.
-const { assert, run, settle, mount, find, label, button, nodes: walk } = require('./frontend_harness.cjs');
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { harness: panel, all: walk, settle } = require('./frontend_harness.cjs');
 const curve=[[50,60],[57,62],[64,70],[71,78],[78,88],[85,100],[93,100],[100,100]];
 const limits={min_pct:10,last_min_pct:40,max_pct:100,step:1,hard_max:100,rpm_at_min:712,rpm_per_pct:(5540-712)/90};
 const initial={supported:true,error:'',active_curve:'global',settings:{enabled:false,assign_tdp_presets:true,revision:0,global_curve:curve,presets:{}},
@@ -8,36 +10,49 @@ const initial={supported:true,error:'',active_curve:'global',settings:{enabled:f
   presets:['silent','balanced','performance','custom'],limits,telemetry:{active:false,automatic:true},
   readings:{valid:true,rpm:1600,apu_temperature:44.5,age_seconds:0,automatic:true,error:''}};
 const json=x=>JSON.parse(JSON.stringify(x));
-const flush=()=>settle(30);
-function harness(initialState=initial){
-  let state=json(initialState), read=null, failSave=false,modal=null;const toasts=[];
-  const h=mount('fan.tsx',{component:'FanPage',clock:100000,
+const flush=()=>settle();
+const find=(tree,predicate)=>walk(tree).find(predicate);
+const label=(tree,name)=>find(tree,n=>n.props?.label===name);
+const buttonText=n=>Array.isArray(n.props?.children)?n.props.children.join(''):n.props?.children;
+const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&buttonText(n)===name);
+// A fake fan backend behind every RPC, answering in the D2 shape: {ok, state} or {ok: false, error}.
+function harness(initialState=initial,component='FanPage'){
+  let state=json(initialState), read=null, failSave=false,modal=null;
+  const h=panel({entry:'src/fan.tsx',component,keep:['CurveGraph','FullEditor'],
     ui:{GamepadButton:{OK:1,CANCEL:2,BUMPER_LEFT:5,BUMPER_RIGHT:6,DIR_UP:9,DIR_DOWN:10,DIR_LEFT:11,DIR_RIGHT:12},
       showModal:(node,parent,props)=>{modal={node,props,Close(){props.fnOnClose?.();}};return modal;}},
-    api:{toaster:{toast:t=>toasts.push(t)},callable:name=>async(...args)=>{
+    api:{callable:name=>async(...args)=>{
         h.calls.push({name,args:json(args)});
-        if(name==='fan_get_state')return read?read():json(state);
-        if(name==='fan_set_enabled'){state.settings.enabled=args[0];state.settings.revision++;state.telemetry.active=args[0];state.telemetry.automatic=!args[0];}
-        if(name==='fan_save_assignment_mode'){assert.equal(args[1],state.settings.revision);state.settings.assign_tdp_presets=args[0];state.settings.revision++;}
-        if(name==='fan_save_curve'){
-          if(failSave)throw Error('save rejected');assert.equal(args[2],state.settings.revision,'CAS revision');
-          if(args[0]==='global')state.settings.global_curve=json(args[1]);else if(args[1])state.settings.presets[args[0]]=json(args[1]);else delete state.settings.presets[args[0]];
-          state.settings.revision++;
-          state.needs_curve_review=false;
-        }return json(state);
+        // A failed read rejects, as Decky does when the backend is gone.
+        if(name==='fan_get_state')return read?read().then(s=>({ok:true,state:s})):{ok:true,state:json(state)};
+        try{
+          if(name==='fan_set_enabled'){state.settings.enabled=args[0];state.settings.revision++;state.telemetry.active=args[0];state.telemetry.automatic=!args[0];}
+          if(name==='fan_save_assignment_mode'){assert.equal(args[1],state.settings.revision);state.settings.assign_tdp_presets=args[0];state.settings.revision++;}
+          if(name==='fan_save_curve'){
+            if(failSave)throw Error('save rejected');assert.equal(args[2],state.settings.revision,'CAS revision');
+            if(args[0]==='global')state.settings.global_curve=json(args[1]);else if(args[1])state.settings.presets[args[0]]=json(args[1]);else delete state.settings.presets[args[0]];
+            state.settings.revision++;
+            state.needs_curve_review=false;
+          }
+        }catch(error){return{ok:false,error:error.message};}
+        return{ok:true,state:json(state)};
       }}});
-  return{exports:h.exports,calls:h.calls,timers:h.timers,render:(component=h.exports.FanPage,props={})=>h.render(props,component),
-    hide(){h.hide();return this.render();},show(){h.show();return this.render();},unmount:h.unmount,
-    poll(){const [id,t]=[...h.timers].find(([,t])=>t.kind==='timeout');h.timers.delete(id);t.fn();},
-    advance(ms){h.advance(ms);h.fire('interval');},
-    setRead(fn){read=fn;},failSave(v){failSave=v;},getState:()=>json(state),foreign(fn){fn(state);},getModal:()=>modal,toasts};
+  h.advance(100000);
+  const live=()=>[...h.timers,...h.intervals].filter(t=>!t.done);
+  return{exports:h.exports,calls:h.calls,live,render:(props={})=>h.render(props),
+    hide(){h.hide();return h.render();},show(){h.show();return h.render();},unmount:()=>h.unmount(),
+    poll(){const t=h.timers.find(t=>!t.done);t.done=true;t.fn();},
+    advance(ms){h.advance(ms);},
+    setRead(fn){read=fn;},failSave(v){failSave=v;},getState:()=>json(state),foreign(fn){fn(state);},getModal:()=>modal,toasts:h.toasts};
 }
+const graphHarness=()=>harness(initial,'CurveGraph');
 const text=node=>node==null||node===false?'':typeof node!=='object'?String(node):
   (Array.isArray(node)?node:[node.props?.children]).map(text).join(' ');
 const summaryText=tree=>find(tree,n=>n.props?.['data-fan-summary']).props.children[0].props.children;
-run(async()=>{
+
+test('eight points in percent, stop/deadband, dirty scopes, CAS/failures/late reads, graph buttons, full-screen parent pause, conflict block, expiry and hidden cleanup',async()=>{
   const h=harness();h.render();await flush();let tree=h.render();
-  assert.equal(h.calls.filter(c=>c.name==='fan_get_state').length,1);assert.equal(h.timers.size,2);
+  assert.equal(h.calls.filter(c=>c.name==='fan_get_state').length,1);assert.equal(h.live().length,2);
   const summary=find(tree,n=>n.props?.['data-fan-summary']);
   const telemetry=find(summary,n=>n!==summary && n.props && text(n)==='APU 44.5°C · 1600 RPM');
   assert.ok(telemetry,'The summary shows measured temperature and tachometer values');
@@ -79,11 +94,11 @@ run(async()=>{
   button(st,'Full screen curve editor').props.onClick();st=simple.render();
   const fm=simple.getModal(),editor=harness(simple.getState());
   const fullPropsTemplates={fullscreen:true,initialEditor:fm.node.props.initial,onEditorChange:fm.node.props.onResult};
-  editor.render(undefined,fullPropsTemplates);await flush();let et=editor.render(undefined,fullPropsTemplates);
-  find(et,n=>n.type==='Dropdown'&&n.props.menuLabel==='Starting curve').props.onChange({data:'balanced'});et=editor.render(undefined,fullPropsTemplates);
-  find(et,n=>n.type===editor.exports.CurveGraph).props.edit(1,59,0);et=editor.render(undefined,fullPropsTemplates);
+  editor.render(fullPropsTemplates);await flush();let et=editor.render(fullPropsTemplates);
+  find(et,n=>n.type==='Dropdown'&&n.props.menuLabel==='Starting curve').props.onChange({data:'balanced'});et=editor.render(fullPropsTemplates);
+  find(et,n=>n.type===editor.exports.CurveGraph).props.edit(1,59,0);et=editor.render(fullPropsTemplates);
   const editedFull=json(find(et,n=>n.type===editor.exports.CurveGraph).props.curve);
-  find(et,n=>n.type==='DialogButton'&&n.props.children==='Save global curve').props.onClick();await flush();et=editor.render(undefined,fullPropsTemplates);
+  find(et,n=>n.type==='DialogButton'&&n.props.children==='Save global curve').props.onClick();await flush();et=editor.render(fullPropsTemplates);
   assert.deepEqual(editor.getState().settings.global_curve,editedFull,'Fullscreen template edits save through ordinary curve RPC');
   simple.setRead(async()=>editor.getState());fm.Close();simple.render();await flush();st=simple.render();
   assert.deepEqual(json(find(st,n=>n.type===simple.exports.CurveGraph).props.curve),editedFull,'Saved fullscreen draft synchronizes with parent');
@@ -163,13 +178,13 @@ run(async()=>{
   assert.equal(h.toasts.at(-1).body,'Curve saved.');
   button(tree,'Use global curve for Silent').props.onClick();await flush();assert.equal(h.getState().settings.presets.silent,undefined);
   tree=h.render();button(tree,'Full screen curve editor').props.onClick();tree=h.render();
-  assert.equal(h.timers.size,0,'Parent does no polling behind full-screen modal');
-  assert.ok(h.getModal());h.getModal().Close();h.render();await flush();h.render();assert.equal(h.timers.size,2);
-  h.hide();assert.equal(h.timers.size,0);h.unmount();
+  assert.equal(h.live().length,0,'Parent does no polling behind full-screen modal');
+  assert.ok(h.getModal());h.getModal().Close();h.render();await flush();h.render();assert.equal(h.live().length,2);
+  h.hide();assert.equal(h.live().length,0);h.unmount();
 
-  const g=harness();let selected=0,edited=[];
+  const g=graphHarness();let selected=0,edited=[];
   const props={curve,status:{...initial,receivedAt:100000},selected,disabled:false,step:1,select:i=>selected=i,edit:(...args)=>edited.push(args)};
-  let graphics=g.render(g.exports.CurveGraph,props),svg=find(graphics,n=>n.type==='svg');
+  let graphics=g.render(props),svg=find(graphics,n=>n.type==='svg');
   assert.equal(graphics.props.tabIndex,0,'The graph must be an eligible native keyboard/gamepad focus target');
   assert.equal(find(svg,n=>n.props?.['data-fan-point']===8).type,'circle');
   const marker=find(svg,n=>n.props?.['data-fan-live-marker']);
@@ -178,17 +193,17 @@ run(async()=>{
   assert.ok(Math.abs(marker.props.children[0].props.cy-at(10+(1600-712)/limits.rpm_per_pct))<1e-9,'The tach marker sits at the duty a healthy fan needs for its RPM');
   const event=button=>({detail:{button},preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;}});
   assert.equal(graphics.props.onGamepadDirection,undefined,'Normal navigation remains available outside edit mode');
-  graphics.props.onOKButton(event(1));graphics=g.render(g.exports.CurveGraph,props);
-  graphics.props.onActivate(event(1));graphics=g.render(g.exports.CurveGraph,props);
+  graphics.props.onOKButton(event(1));graphics=g.render(props);
+  graphics.props.onActivate(event(1));graphics=g.render(props);
   assert.equal(graphics.props['data-fan-editing'],'true','Activate and OK both enter idempotently');
   graphics.props.onButtonDown(event(6));assert.equal(selected,1);
-  props.selected=1;graphics=g.render(g.exports.CurveGraph,props);
+  props.selected=1;graphics=g.render(props);
   graphics.props.onButtonDown(event(5));assert.equal(selected,0,'LB selects the previous point');
-  props.selected=0;graphics=g.render(g.exports.CurveGraph,props);
+  props.selected=0;graphics=g.render(props);
   graphics.props.onButtonDown(event(5));assert.equal(selected,7,'LB wraps from the first point to the last point');
-  props.selected=7;graphics=g.render(g.exports.CurveGraph,props);
+  props.selected=7;graphics=g.render(props);
   graphics.props.onButtonDown(event(6));assert.equal(selected,0,'RB wraps from the last point to the first');
-  props.selected=1;graphics=g.render(g.exports.CurveGraph,props);
+  props.selected=1;graphics=g.render(props);
   graphics.props.onButtonDown(event(12));assert.equal(edited.length,0,'ButtonDown must not duplicate the native direction path');
   graphics.props.onGamepadDirection(event(12));graphics.props.onGamepadDirection(event(9));
   assert.deepEqual(json(edited),[[0,58],[1,63]],'D-pad edits temperature by one degree and selected speed step');
@@ -212,18 +227,18 @@ run(async()=>{
   pointerSvg.props.onPointerMove({pointerId:1,clientX:100,clientY:100});
   assert.equal(edited.length,0,'Losing capture must end a drag before mouse hover can edit again');
   const b=event(2);graphics.props.onCancelButton(b);assert.ok(b.prevented && b.stopped,'B exits steering without leaving module');
-  graphics=g.render(g.exports.CurveGraph,props);assert.equal(graphics.props.onCancelButton,undefined,'Next B follows native navigation');
+  graphics=g.render(props);assert.equal(graphics.props.onCancelButton,undefined,'Next B follows native navigation');
   assert.equal(graphics.props.onGamepadFocus,undefined,'Focus alone does not enter edit mode');
   assert.equal(graphics.props['data-fan-editing'],'false');
-  graphics.props.onOKButton(event(1));graphics=g.render(g.exports.CurveGraph,props);
+  graphics.props.onOKButton(event(1));graphics=g.render(props);
   assert.equal(graphics.props['data-fan-editing'],'true','A explicitly enters controller editing');
-  graphics.props.onGamepadBlur(event(0));graphics=g.render(g.exports.CurveGraph,props);assert.equal(graphics.props.onGamepadDirection,undefined,'Blur exits edit mode');
-  props.status={...props.status,receivedAt:96000};graphics=g.render(g.exports.CurveGraph,props);
+  graphics.props.onGamepadBlur(event(0));graphics=g.render(props);assert.equal(graphics.props.onGamepadDirection,undefined,'Blur exits edit mode');
+  props.status={...props.status,receivedAt:96000};graphics=g.render(props);
   assert.equal(find(graphics,n=>n.props?.['data-fan-live-marker']),undefined,'Stale sample removes marker');g.unmount();
 
-  const wide=harness();let wideEdits=[];
+  const wide=graphHarness();let wideEdits=[];
   const wideProps={...props,status:{...initial,receivedAt:100000},fullscreen:true,selected:1,edit:(...args)=>wideEdits.push(args)};
-  const wideTree=wide.render(wide.exports.CurveGraph,wideProps),wideSvg=find(wideTree,n=>n.type==='svg');
+  const wideTree=wide.render(wideProps),wideSvg=find(wideTree,n=>n.type==='svg');
   const metrics=wide.exports.graphLayout(true);
   wideSvg.props.ref.current={getScreenCTM:()=>({inverse:()=>({})}),createSVGPoint:()=>({matrixTransform(){return{x:(this.x-40)/1.5,y:(this.y-60)/1.5};}}),setPointerCapture(){}};
   const wideHit=find(wideSvg,n=>n.type==='g'&&n.props.children[0].props['data-fan-point']===2);
@@ -234,8 +249,8 @@ run(async()=>{
   wideSvg.props.onPointerCancel();wideEdits=[];
   wideSvg.props.onPointerMove({pointerId:7,clientX:100,clientY:100});assert.equal(wideEdits.length,0,'Cancelled fullscreen drag cannot edit');wide.unmount();
   const full=harness();let closed=0;const fullProps={fullscreen:true,onClose:()=>closed++};
-  let fullTree=full.render(undefined,fullProps);
-  await flush();fullTree=full.render(undefined,fullProps);
+  let fullTree=full.render(fullProps);
+  await flush();fullTree=full.render(fullProps);
   assert.ok(find(fullTree,n=>n.type==='DialogBody'));assert.ok(find(fullTree,n=>n.type==='DialogFooter'));
   for(const attr of ['data-fan-controls','data-fan-footer'])assert.equal(find(fullTree,n=>n.props?.[attr]).props['flow-children'],'row','Horizontal controls use native horizontal focus flow');
   assert.equal(find(fullTree,n=>n.type==='Dropdown'&&n.props.menuLabel==='Speed unit'),undefined,'No unit choice in the dialog either');
@@ -275,7 +290,7 @@ run(async()=>{
   expire.hide();const count=expire.calls.length;pendingResolve(initial);await flush();assert.equal(expire.calls.length,count);expire.unmount();
   const late=harness();late.render();await flush();let end;late.setRead(()=>new Promise(r=>end=r));const pending=late.exports.getFanState();await flush();
   late.advance(3000);end(json(initial));assert.match(late.exports.fanSummary(await pending),/APU —/);late.unmount();
-  const queued=harness();queued.render();await flush();const callbacks=[...queued.timers.values()].map(t=>t.fn),countQ=queued.calls.length;
+  const queued=harness();queued.render();await flush();const callbacks=queued.live().map(t=>t.fn),countQ=queued.calls.length;
   queued.hide();callbacks.forEach(fn=>fn());await flush();assert.equal(queued.calls.length,countQ);
   await assert.rejects(queued.exports.getFanState(()=>false),/no longer visible/);queued.unmount();
   const paused=json(initial);paused.settings.enabled=true;paused.telemetry={active:false,automatic:true};paused.error='Fan Control paused; resuming automatically.';
@@ -328,5 +343,4 @@ run(async()=>{
   button(ft,'Save global curve').props.onClick();await flush();ft=faulted.render();
   assert.equal(faulted.getState().settings.global_curve[0][1],30,'A non-curve revision bump never strands the edit');
   assert.equal(button(ft,'Save global curve').props.description,undefined);faulted.unmount();
-  console.log('Fan Control: eight points in percent, ordered 0–100°C, stop/deadband, dirty scopes, CAS/failures/late reads, graph buttons, full-screen parent pause, conflict block, expiry and hidden cleanup passed.');
 });

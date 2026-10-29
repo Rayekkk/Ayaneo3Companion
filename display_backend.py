@@ -22,7 +22,8 @@ from pathlib import Path
 import decky
 
 import companion_common
-import system_process
+import dk_fs
+import dk_process
 from companion_common import LOG
 
 
@@ -111,9 +112,9 @@ def _script_io(operation: str, data: bytes = b"") -> int:
     """display_script_io.py as the gamescope user; its exit code, 1 on failure."""
     uid, gid = SCRIPT_USER
     try:
-        result = system_process.run([system_process.PYTHON, "-I", str(SCRIPT_IO), operation,
-                                     str(CONFIG_DIR), SCRIPT_NAME], 10, stdin=None, input=data,
-                                    capture_output=True, cwd="/", user=uid, group=gid, extra_groups=[])
+        result = dk_process.run([dk_process.PYTHON, "-I", str(SCRIPT_IO), operation,
+                                 str(CONFIG_DIR), SCRIPT_NAME], 10, stdin=None, input=data,
+                                capture_output=True, cwd="/", user=uid, group=gid, extra_groups=[])
     except (OSError, ValueError) as error:
         decky.logger.warning(f"{LOG} display script {operation} failed: {error}")
         return 1
@@ -123,7 +124,7 @@ def _script_io(operation: str, data: bytes = b"") -> int:
 def write_script(data: bytes) -> None:
     if SCRIPT_USER is None:
         LUA_TARGET.parent.mkdir(parents=True, exist_ok=True)
-        companion_common.atomic_write_bytes(LUA_TARGET, data, 0o644)
+        dk_fs.write_atomic(LUA_TARGET, data, 0o644)
     elif _script_io("write", data) != 0:
         raise RuntimeError(f"could not write {LUA_TARGET}")
 
@@ -297,8 +298,8 @@ def restart_session() -> tuple[bool, str]:
                    f"USER={name}", f"LOGNAME={name}", f"XDG_RUNTIME_DIR={runtime}",
                    f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus", *argv]
         try:
-            result = system_process.run(command, 20, capture_output=True, text=True)
-        except (OSError, system_process.subprocess.SubprocessError) as error:
+            result = dk_process.run(command, 20, capture_output=True, text=True)
+        except (OSError, dk_process.subprocess.SubprocessError) as error:
             failures.append(f"{label}: {error}")
             continue
         if result.returncode == 0:

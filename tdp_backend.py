@@ -12,8 +12,9 @@ the target is written again after each power-source change and resume.
 
 import decky
 from diagnostics import event, transition
-from system_process import system_env
-import system_process
+from dk_process import system_env
+import dk_net
+import dk_process
 import module_runtime
 import companion_common
 from companion_common import LOG
@@ -27,12 +28,12 @@ import hashlib
 import os
 import re
 import stat
+import shutil
 import subprocess
 import tarfile
 import tempfile
 import time
 import threading
-import urllib.request
 from safe_settings import CorruptSettings, SettingsManager
 
 # Root's own directory outside Decky's tree: Decky deletes the plugin directory on
@@ -137,11 +138,11 @@ def _powerstation_active() -> bool:
     """PowerStation, the other SteamOS TDP service, owns the limits while it runs.
 
     Raises when ownership cannot be determined: never guess and write."""
-    if system_process.run(["busctl", "--system", "status", "org.shadowblip.PowerStation"], 5,
-                          capture_output=True).returncode == 0:
+    if dk_process.run(["busctl", "--system", "status", "org.shadowblip.PowerStation"], 5,
+                      capture_output=True).returncode == 0:
         return True
     # Also detect startup/reload periods before D-Bus owns its name.
-    result = system_process.run(["systemctl", "show", "powerstation.service", "--property=ActiveState",
+    result = dk_process.run(["systemctl", "show", "powerstation.service", "--property=ActiveState",
                                  "--value"], 5, capture_output=True, text=True)
     if result.returncode == 4:
         return False
@@ -681,39 +682,40 @@ def _helper_verified() -> bool:
 
 
 def _download_archive(out, cancel=None) -> None:
-    """The pinned archive over verified HTTPS from GitHub, bounded in bytes and time."""
-    deadline = time.monotonic() + companion_common.HARDWARE_DOWNLOAD_SECONDS
-    request = urllib.request.Request(
-        companion_common.checked_download_url(RYZENADJ_URL),
-        headers={"User-Agent": f"Ayaneo3Companion/{companion_common.updater.plugin_version()}"})
-    with companion_common.open_hardware_download(request) as response:
-        companion_common.checked_download_url(response.geturl())
-        declared = response.headers.get("Content-Length")
-        if declared and int(declared) > MAX_DOWNLOAD_BYTES:
-            raise RuntimeError("RyzenAdj archive is unexpectedly large")
-        for chunk in companion_common.hardware_download_chunks(response, MAX_DOWNLOAD_BYTES, deadline):
-            if cancel is not None and cancel():
-                raise InterruptedError("RyzenAdj download was cancelled")
-            out.write(chunk)
+    """The pinned archive over verified HTTPS from GitHub (dk_net: its own process, bounded in bytes and time)."""
+    try:
+        body = dk_net.spool(RYZENADJ_URL, BIN_DIR, MAX_DOWNLOAD_BYTES, RYZENADJ_SHA256,
+                            hosts=companion_common.GITHUB_RELEASE_HOSTS, redirects=companion_common.GITHUB_ASSET_HOSTS,
+                            deadline=companion_common.HARDWARE_DOWNLOAD_SECONDS, cancel=cancel)
+    except dk_net.NetError as error:
+        if cancel is not None and cancel():
+            raise InterruptedError("RyzenAdj download was cancelled") from None
+        raise RuntimeError(f"RyzenAdj download failed: {error}") from error
+    with body:
+        shutil.copyfileobj(body, out)
 
 
 def _download_ryzenadj(cancel=None) -> None:
     decky.logger.info(f"{LOG} Downloading ryzenadj from {RYZENADJ_URL}")
     _helper_dir()
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz")
-    os.close(tmp_fd)
+    # Anonymous, in root's folder (not /tmp: RAM): a kill mid-download leaves nothing behind.
+    with tempfile.TemporaryFile(dir=BIN_DIR) as archive:
+        _install_from_archive(archive, cancel)
+
+
+def _install_from_archive(archive, cancel) -> None:
     bin_tmp = ""
     try:
-        with open(tmp_path, "wb") as out:
-            _download_archive(out, cancel)
-
-        actual = _sha256_file(tmp_path)
+        _download_archive(archive, cancel)
+        archive.seek(0)
+        actual = hashlib.sha256(archive.read()).hexdigest()
         if actual != RYZENADJ_SHA256:
             raise RuntimeError(
                 f"ryzenadj archive checksum mismatch: got {actual}, "
                 f"expected {RYZENADJ_SHA256}")
 
-        with tarfile.open(tmp_path, "r:gz") as tar:
+        archive.seek(0)
+        with tarfile.open(fileobj=archive, mode="r:gz") as tar:
             member = next(
                 (m for m in tar.getmembers()
                  if os.path.basename(m.name) == "ryzenadj" and m.isfile()),
@@ -740,11 +742,9 @@ def _download_ryzenadj(cancel=None) -> None:
         bin_tmp = ""
         event('tdp','helper_installed',source='ryzenadj',outcome='verified')
     finally:
-        for path in (tmp_path, bin_tmp):
-            if not path:
-                continue
+        if bin_tmp:
             try:
-                os.unlink(path)
+                os.unlink(bin_tmp)
             except OSError:
                 pass
 
@@ -2514,7 +2514,7 @@ class Plugin:
         await _offload(_refresh_info_cache)
         with _info_cache_lock:
             values = dict(_info_cache)
-        await decky.emit("tdp_info", {"success": True, "values": values})
+        await decky.emit("tdp_info", {"ok": True, "values": values})  # the shape of get_tdp_info (D2)
         return True
 
     async def _info_loop(self):

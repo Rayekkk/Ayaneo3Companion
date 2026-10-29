@@ -3,14 +3,16 @@
 // https://github.com/Rayekkk/Ayaneo3Companion
 
 import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
-import { DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, SliderField, Spinner, staticClasses, ToggleField } from "@decky/ui";
+import { DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, Spinner, staticClasses, ToggleField } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { PageShell, SectionHeader, SectionLink, StackedAction, type SectionKey } from "./ui";
-import { confirmAction, infoRow } from "./shared";
+import { confirmAction, infoRow, unwrap } from "./shared";
+import type { Result } from "./result";
 import { resetUpdates } from "./updates";
 import { AboutPage } from "./about";
 import { AudioPage, BatteryPage, ButtonsPage, DisplayPage, MagicModulesPage, VibrationPage } from "./device_pages";
 import { FanPage, fanSummary, getFanState, type FanState } from "./fan";
+import { clamp, hexToHsv, hsvToHex, SlowSliderField } from "./lighting";
 import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
 import { overviewSummary, type SettingsLimits } from "./tdp_model";
 import type { BatteryStatus, Controller, Hsv, RgbMode, State, Vibration } from "./model";
@@ -36,64 +38,29 @@ const ACTION_FIELDS: Record<ActionKey, ReadonlyArray<keyof State>> = {
   screen: ["screen_installed", "screen_conflict", "screen_restart_needed", "screen_native", "screen_fix_enabled"],
 };
 
-const getState = callable<[], State>("get_state");
-const getBatteryStatus = callable<[], BatteryStatus>("get_battery_status");
+const getState = callable<[], Result<State>>("get_state");
+const getBatteryStatus = callable<[], Result<BatteryStatus>>("get_battery_status");
 // TDP Control has its own page and RPCs (tdp.tsx); the overview row reads its settings.
-const getTdpSettings = callable<[], SettingsLimits>("get_settings");
-const setController = callable<[Partial<Controller>], State>("set_controller");
-const setControllerWithVibrationFeedback = callable<[Partial<Controller>], State>("set_controller_with_vibration_feedback");
-const setVibrationGain = callable<[number], State>("set_vibration_gain");
-const testVibration = callable<[number], { success: boolean; error?: string }>("test_vibration");
-const setChargeBypass = callable<[boolean], State>("set_charge_bypass");
-const ejectModules = callable<["left" | "right" | "both"], State>("eject_modules");
-const resetModules = callable<[], State>("reset_modules");
-const setScreenFix = callable<[boolean, boolean?], State>("set_screen_fix");
-const setButtonFix = callable<[boolean], State>("set_button_fix");
-const restartGameMode = callable<[], State>("restart_game_mode");
-const setTmGuard = callable<[boolean], State>("set_tm_guard");
-const setAudioFix = callable<[boolean], State>("set_audio_fix");
-const reapplyAudioFix = callable<[], State>("reapply_audio_fix");
-const recalibrateAudio = callable<[], State>("recalibrate_audio");
+const getTdpSettings = callable<[], Result<SettingsLimits>>("get_settings");
+const setController = callable<[Partial<Controller>], Result<State>>("set_controller");
+const setControllerWithVibrationFeedback = callable<[Partial<Controller>], Result<State>>("set_controller_with_vibration_feedback");
+const setVibrationGain = callable<[number], Result<State>>("set_vibration_gain");
+const testVibration = callable<[number], Result<never>>("test_vibration");
+const setChargeBypass = callable<[boolean], Result<State>>("set_charge_bypass");
+const ejectModules = callable<["left" | "right" | "both"], Result<State>>("eject_modules");
+const resetModules = callable<[], Result<State>>("reset_modules");
+const setScreenFix = callable<[boolean, boolean?], Result<State>>("set_screen_fix");
+const setButtonFix = callable<[boolean], Result<State>>("set_button_fix");
+const restartGameMode = callable<[], Result<State>>("restart_game_mode");
+const setTmGuard = callable<[boolean], Result<State>>("set_tm_guard");
+const setAudioFix = callable<[boolean], Result<State>>("set_audio_fix");
+const reapplyAudioFix = callable<[], Result<State>>("reapply_audio_fix");
+const recalibrateAudio = callable<[], Result<State>>("recalibrate_audio");
 const VIBRATION_LEVELS: Vibration[] = ["off", "low", "medium", "high"];
 const VIBRATION_TEST_MS = 500;
 const VIBRATION_APPLY_DELAY_MS = 150;
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const titleCase = (value: string) => value ? value[0].toUpperCase() + value.slice(1) : value;
-function hsvToHex(hue: number, saturation: number): string {
-  const h = ((hue % 360) + 360) % 360;
-  const s = clamp(saturation, 0, 100) / 100;
-  const c = s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = 1 - c;
-  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
-    : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
-  return [r, g, b].map(channel => Math.round((channel + m) * 255).toString(16).padStart(2, "0")).join("");
-}
-
-function hexToHsv(hex: string): { hue: number; saturation: number } {
-  const value = hex.replace("#", "").padEnd(6, "0").slice(0, 6);
-  const [r, g, b] = [0, 2, 4].map(offset => parseInt(value.slice(offset, offset + 2), 16) / 255);
-  if (![r, g, b].every(Number.isFinite)) return { hue: 0, saturation: 100 };
-  const max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min;
-  if (delta === 0) return { hue: 0, saturation: 0 };
-  const hue = max === r ? 60 * (((g - b) / delta) % 6)
-    : max === g ? 60 * ((b - r) / delta + 2) : 60 * ((r - g) / delta + 4);
-  return { hue: Math.round((hue + 360) % 360), saturation: Math.round(delta / max * 100) };
-}
-
-interface SlowSliderProps {
-  label: string; value: number; min: number; max: number; className: string; valueSuffix: string;
-  disabled?: boolean;
-  onChange(value: number): void; onChangeEnd(value: number): void;
-}
-
-// The parent owns the debounce and write queue, so leaving the RGB page cannot
-// discard a pending slider value or send an older sibling slider closure.
-const SlowSliderField: FC<SlowSliderProps> = slider => <SliderField
-  label={slider.label} disabled={slider.disabled} value={slider.value} min={slider.min} max={slider.max}
-  validValues="range" showValue valueSuffix={slider.valueSuffix} className={slider.className}
-  onChange={value => { if (!slider.disabled) { slider.onChange(value); slider.onChangeEnd(value); } }}
-/>;
-
-const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 let confirmedState: State | null = null;
 
 const Content: FC = () => {
@@ -172,7 +139,7 @@ const Content: FC = () => {
     reading.current = true;
     const request = revision.current;
     try {
-      const next = await getState();
+      const next = await unwrap(getState());
       if (!mounted.current || !visibleRef.current || request !== revision.current) return;
       acceptState(next);
       lastReadAt.current = Date.now();
@@ -219,7 +186,7 @@ const Content: FC = () => {
     const read = () => {
       if (reading) return;
       reading = true;
-      getTdpSettings().then(next => { if (!cancelled) setTdpSettings(next); })
+      unwrap(getTdpSettings()).then(next => { if (!cancelled) setTdpSettings(next); })
         .catch(() => undefined).finally(() => { reading = false; });
     };
     read();
@@ -250,7 +217,7 @@ const Content: FC = () => {
       if (cancelled || readingBattery.current) return;
       readingBattery.current = true;
       try {
-        const next = await getBatteryStatus();
+        const next = await unwrap(getBatteryStatus());
         if (!cancelled) { setBattery(next); setBatteryReadError(""); }
       } catch (error) {
         if (!cancelled) setBatteryReadError(error instanceof Error ? error.message : String(error));
@@ -280,14 +247,14 @@ const Content: FC = () => {
     }
   };
 
-  const run = async (action: ActionKey, work: () => Promise<State>, title: string, success?: string) => {
+  const run = async (action: ActionKey, work: () => Promise<Result<State>>, title: string, success?: string) => {
     if (pendingActionRef.current || state?.settings_error || state?.initializing) return;
     const canAccept = () => mounted.current;
     ++revision.current;
     pendingActionRef.current = action;
     setPendingAction(action); setStatus(null);
     try {
-      const next = await work();
+      const next = await unwrap(work());
       if (canAccept()) { acceptState(next, ACTION_FIELDS[action]); if (success) setStatus(success); }
     } catch (error) {
       notifyFailure(title, error);
@@ -341,13 +308,13 @@ const Content: FC = () => {
           try {
             let applied: State | null = null;
             if (firmwareChanged) {
-              applied = patch.vibration !== undefined
-                ? await setControllerWithVibrationFeedback(patch)
-                : await setController(patch);
+              applied = await unwrap(patch.vibration !== undefined
+                ? setControllerWithVibrationFeedback(patch)
+                : setController(patch));
             }
             // Mixed edits commit firmware and FF_GAIN in one transaction;
             // gain alone still avoids an unnecessary HID write.
-            if (patch.ff_gain !== undefined && !firmwareChanged) applied = await setVibrationGain(patch.ff_gain);
+            if (patch.ff_gain !== undefined && !firmwareChanged) applied = await unwrap(setVibrationGain(patch.ff_gain));
             // A later independent patch does not confirm fields that failed
             // earlier in this drain. An explicit newer edit of that same field
             // can still supersede the failure and become confirmed.
@@ -438,7 +405,7 @@ const Content: FC = () => {
       controllerConfirmed = await flushController();
       if (!controllerConfirmed || !mounted.current) return;
       const result = await testVibration(VIBRATION_TEST_MS);
-      if (!result.success) notifyFailure("Vibration test failed", result.error ?? "Unknown error");
+      if (!result.ok) notifyFailure("Vibration test failed", result.error ?? "Unknown error");
     } catch (error) {
       notifyFailure("Vibration test failed", error);
     } finally {

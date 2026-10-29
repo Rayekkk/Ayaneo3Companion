@@ -2,7 +2,7 @@
 """Disk I/O must not stop the Decky event loop; all device access is mocked."""
 import unittest
 from unittest.mock import MagicMock, Mock, patch
-from _harness import owner
+from support import owner
 import ec_backend
 
 

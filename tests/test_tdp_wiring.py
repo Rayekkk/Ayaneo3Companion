@@ -21,16 +21,16 @@ class TdpWiringTests(unittest.TestCase):
 
     def test_main_passes_scope_and_expected_game_without_dropping_arguments(self):
         plugin = main.Plugin()
-        plugin._tdp = type("FakeTdp", (), {name: AsyncMock(return_value={}) for name in (
+        plugin._tdp = type("FakeTdp", (), {name: AsyncMock(return_value={"success": True}) for name in (
             "get_cpu_power_controls", "set_cpu_boost", "set_epp", "apply_tdp", "set_game_ac_profile")})()
 
         async def scenario():
-            await plugin.get_cpu_power_controls("111", True)
-            await plugin.set_cpu_boost(False, "111", True, "111")
-            await plugin.set_epp("26", "111", True, "111", True)
-            await plugin.apply_tdp(15000, 25000, 30000, "111", "balanced", "111")
-            await plugin.set_game_ac_profile("111", 30000, 43000, 45000, True, "performance")
-        asyncio.run(scenario())
+            return [await plugin.get_cpu_power_controls("111", True),
+                    await plugin.set_cpu_boost(False, "111", True, "111"),
+                    await plugin.set_epp("26", "111", True, "111", True),
+                    await plugin.apply_tdp(15000, 25000, 30000, "111", "balanced", "111"),
+                    await plugin.set_game_ac_profile("111", 30000, 43000, 45000, True, "performance")]
+        self.assertEqual(asyncio.run(scenario()), [{"ok": True}] * 5)
         plugin._tdp.get_cpu_power_controls.assert_awaited_once_with("111", True)
         plugin._tdp.set_cpu_boost.assert_awaited_once_with(False, "111", True, "111", False)
         plugin._tdp.set_epp.assert_awaited_once_with("26", "111", True, "111", True)
@@ -54,6 +54,21 @@ class TdpWiringTests(unittest.TestCase):
         with patch.object(self.store, "_recovery_error", "corrupt"):
             self.assertEqual(main.Plugin._legacy_tdp_settings(), {})
 
+
+
+class TdpResultTests(unittest.TestCase):
+    def test_tdp_answers_keep_the_text_the_panel_showed_before(self):
+        """stderr where the port reports one (an empty one lets the panel use its own text), else error."""
+        self.assertEqual(main._result({"success": False, "stderr": "", "error": "detail", "applied": False}),
+                         {"ok": False, "error": "", "applied": False})
+        self.assertEqual(main._result({"success": False, "stderr": "firmware refused", "returncode": -1}),
+                         {"ok": False, "error": "firmware refused", "returncode": -1})
+        self.assertEqual(main._result({"success": False, "error": "EPP is unsupported"}),
+                         {"ok": False, "error": "EPP is unsupported"})
+        self.assertEqual(main._result({"success": True, "error": "", "available": True}),
+                         {"ok": True, "available": True})
+        self.assertEqual(main._result({"success": True, "error": "boost unreadable"}),
+                         {"ok": True, "error": "boost unreadable"})
 
 if __name__ == "__main__":
     unittest.main()

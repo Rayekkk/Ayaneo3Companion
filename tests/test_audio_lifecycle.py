@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import test_responsiveness
-from _harness import owner
+from support import owner
 import main
 import audio_backend
 import companion_common
@@ -29,8 +29,9 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
                             ("ensure_charge_bypass_control", None), ("audio_fix_installed", True),
                             ("audio_fix_ready", True), ("audio_fix_supported", True)):
             self.stack.enter_context(patch.object(owner(name), name, return_value=value))
-        self.stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(
-            reset=Mock(), close=Mock(), ssl_context=Mock(), plugin_version=Mock(return_value="1.2.0"))))
+        self.stack.enter_context(patch.object(main, "_updates", return_value=types.SimpleNamespace(close=Mock())))
+        self.stack.enter_context(patch.object(main.dk_net, "tls_context"))
+        self.stack.enter_context(patch.object(companion_common, "plugin_version", return_value="1.2.0"))
 
     async def assert_diagnostics_deferred(self, name, enabled):
         self.prepare_startup()
@@ -149,7 +150,7 @@ class AudioStartupTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main.asyncio, "sleep", side_effect=quick_retry), \
              patch.object(self.plugin, "_restore_audio_once", side_effect=failing_worker) as restore, \
              patch.object(companion_common, "supported_device", return_value=False), \
-             patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())):
+             patch.object(self.plugin, "_updates", types.SimpleNamespace(close=Mock())):
             monitor = asyncio.create_task(self.plugin._restore_audio())
             main.Plugin._audio_task = monitor
             unloading = None

@@ -18,7 +18,7 @@ import time
 import decky
 from diagnostics import event as diagnostic_event, transition as diagnostic_transition
 import module_runtime
-from system_process import PYTHON, system_env
+from dk_process import PYTHON, system_env
 from safe_settings import SettingsManager
 from fan_hwmon import platform_check
 from fan_guardian import RUNTIME, secure_root, check_owners, Sensors, outcome_of, open_ec
@@ -380,14 +380,14 @@ def retire_legacy_guard() -> bool:
     a unit or its lease directory: evidence that a manual duty may be its own."""
     found = LEGACY_LEASE_DIR.exists()
     import shutil
-    import system_process
+    import dk_process
     try:
-        names = system_process.run(['systemctl', 'list-units', '--all', '--plain', '--no-legend',
-                                    'ayaneo3-companion-fan*'], 5, capture_output=True, text=True).stdout.split()
+        names = dk_process.run(['systemctl', 'list-units', '--all', '--plain', '--no-legend',
+                                'ayaneo3-companion-fan*'], 5, capture_output=True, text=True).stdout.split()
         units = [name for name in names if name.startswith('ayaneo3-companion-fan')]
         if units:
             found = True
-            system_process.run(['systemctl', 'stop', *units], 10, capture_output=True)
+            dk_process.run(['systemctl', 'stop', *units], 10, capture_output=True)
     except (OSError, subprocess.SubprocessError) as exc:
         diagnostic_event('fan', 'legacy_guard_stop_failed', level='warning', error=exc)
     shutil.rmtree(LEGACY_LEASE_DIR, ignore_errors=True)

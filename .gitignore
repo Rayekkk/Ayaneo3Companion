@@ -29,6 +29,7 @@ venv/
 .env.*
 !.env.example
 *.pem
+!/tests/tls/*.pem
 *.key
 *.log
 /*settings.json

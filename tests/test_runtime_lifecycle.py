@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, patch
 
 import support  # noqa: F401  (the Decky harness before any backend import)
 import main
-import companion_common
 import diagnostics
 
 
@@ -148,14 +147,12 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.plugin = main.Plugin()
 
     async def test_failure_and_success_keep_result_operation_and_privacy(self):
-        update = AsyncMock(return_value={'success': False, 'error': 'token=SECRET'})
-        with patch.object(companion_common, 'updater', SimpleNamespace(download=lambda _version: update.return_value)):
-            failure = await self.plugin.perform_update('1.2.1')
-        self.assertFalse(failure['success'])
-        with patch.object(companion_common, 'updater', SimpleNamespace(
-                download=lambda _version: {'success': True, 'private': 'not logged'})):
-            success = await self.plugin.perform_update('1.2.1')
-        self.assertTrue(success['success'])
+        self.plugin._updates = SimpleNamespace(download=lambda _version: {'ok': False, 'error': 'token=SECRET'})
+        failure = await self.plugin.perform_update('1.2.1')
+        self.assertIs(failure['ok'], False)
+        self.plugin._updates = SimpleNamespace(download=lambda _version: {'ok': True, 'private': 'not logged'})
+        success = await self.plugin.perform_update('1.2.1')
+        self.assertIs(success['ok'], True)
         terminals = [r for r in self.records if r['event'] in ('rpc_failed', 'rpc_completed')]
         self.assertEqual([r['event'] for r in terminals], ['rpc_failed', 'rpc_completed'])
         self.assertNotEqual(terminals[0]['operation_id'], terminals[1]['operation_id'])
@@ -165,10 +162,10 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeated_read_failure_and_recovery_are_coalesced(self):
         with patch.object(main.Plugin, '_snapshot', side_effect=ConnectionResetError(errno.ECONNRESET, 'peer reset')):
             for _ in range(6):
-                with self.assertRaises(ConnectionResetError):
-                    await self.plugin.get_state()
+                self.assertEqual(await self.plugin.get_state(), {
+                    'ok': False, 'error': 'Unexpected error (ConnectionResetError). Details are in the Decky log.'})
         with patch.object(main.Plugin, '_snapshot', return_value={'supported': True}):
-            await self.plugin.get_state()
+            self.assertEqual(await self.plugin.get_state(), {'ok': True, 'state': {'supported': True}})
         health = [r for r in self.records if r['event'] == 'rpc_health']
         self.assertEqual([r['context']['status'] for r in health], ['failed', 'ok'])
         self.assertEqual(health[0]['error']['errno'], errno.ECONNRESET)
@@ -182,11 +179,11 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row['level'], 'info')
 
     async def test_failed_logging_cannot_change_success_or_failure(self):
-        with patch.object(diagnostics, '_sink', side_effect=OSError(errno.ENOSPC, 'full')), \
-             patch.object(companion_common, 'updater', SimpleNamespace(download=lambda _v: {'success': True})):
-            self.assertTrue((await self.plugin.perform_update('1.2.1'))['success'])
-            with self.assertRaises(ValueError):
-                await self.plugin.perform_update(None)
+        self.plugin._updates = SimpleNamespace(download=lambda _v: {'ok': True})
+        with patch.object(diagnostics, '_sink', side_effect=OSError(errno.ENOSPC, 'full')):
+            self.assertEqual(await self.plugin.perform_update('1.2.1'), {'ok': True})
+            self.assertEqual(await self.plugin.perform_update(None),
+                             {'ok': False, 'error': 'Select a release version before downloading'})
 
     async def test_uninstall_keeps_logging_after_inner_unload_until_cleanup_finishes(self):
         with patch.object(self.plugin, '_remove_owned', AsyncMock(side_effect=self.plugin._unload)):

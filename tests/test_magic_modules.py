@@ -126,10 +126,13 @@ class ResetAfterEjectTests(unittest.TestCase):
             plugin._offload = lambda fn, *args: asyncio.sleep(0, fn(*args))
             result = asyncio.run(plugin.reset_modules())
             reset.assert_called_once()
-            self.assertFalse(result["modules_reconnecting"])
+            self.assertIs(result["ok"], True)
+            self.assertFalse(result["state"]["modules_reconnecting"])
             main.Plugin._module_operation_running = True
-            with self.assertRaisesRegex(RuntimeError, "module operation"):
-                asyncio.run(plugin.reset_modules())
+            refused = asyncio.run(plugin.reset_modules())
+            self.assertEqual(set(refused), {"ok", "error"})
+            self.assertIs(refused["ok"], False)
+            self.assertRegex(refused["error"], "module operation")
             self.assertEqual(reset.call_count, 1)
 
 
@@ -175,7 +178,7 @@ class MagicModuleTests(unittest.TestCase):
         try:
             with mock.patch.object(controller_backend, "eject_controller_modules", side_effect=eject), \
                  mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})):
-                asyncio.run(main.Plugin().eject_modules("right"))
+                self.assertIs(asyncio.run(main.Plugin().eject_modules("right"))["ok"], True)
             self.assertTrue(main.Plugin._state["modules_reconnecting"])
         finally:
             main.Plugin._state = previous_state

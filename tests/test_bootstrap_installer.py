@@ -11,7 +11,7 @@ from unittest.mock import patch
 import zipfile
 
 import bootstrap_installer as installer
-from lego_updater import ARCHIVE_ROOT, REQUIRED_RUNTIME_FILES
+from bootstrap_installer import ARCHIVE_ROOT, REQUIRED
 
 
 class Services:
@@ -66,8 +66,9 @@ class BootstrapInstallerTests(unittest.TestCase):
         self.legacy = self.input_root / installer.LEGACY_MAPS[0]
         self.legacy.parent.mkdir()
         self.legacy.write_bytes(self.old_map + b"legacy")
-        files = {name: b"new runtime" for name in REQUIRED_RUNTIME_FILES}
-        files.update({"plugin.json": json.dumps({"name": "AYANEO 3 Companion", "version": "1.2.0"}),
+        files = {name: b"new runtime" for name in REQUIRED}
+        files.update({"plugin.json": json.dumps({"name": "AYANEO 3 Companion", "version": "1.2.0",
+                                                 "flags": ["root"]}),
                       "package.json": json.dumps({"name": "ayaneo3companion", "version": "1.2.0"}),
                       "main.py": b"new backend", "dist/index.js": b"new frontend",
                       "assets/ayaneo3-companion.yaml": self.new_map})

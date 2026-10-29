@@ -25,6 +25,7 @@ from safe_settings import SettingsManager  # noqa: E402
 from quality_runtime import complete, guard_public_calls  # noqa: E402
 import fan_backend  # noqa: E402
 import audio_backend  # noqa: E402
+import bootstrap_installer  # noqa: E402  (REQUIRED: the files of a complete package)
 import companion_common  # noqa: E402
 import controller_backend  # noqa: E402
 import diagnostics  # noqa: E402
@@ -33,7 +34,11 @@ import ec_backend  # noqa: E402
 import input_backend  # noqa: E402
 import module_runtime  # noqa: E402
 import tdp_backend  # noqa: E402
-import system_process  # noqa: E402
+import dk_fs  # noqa: E402
+import dk_net  # noqa: E402
+import dk_process  # noqa: E402
+import dk_rpc  # noqa: E402
+import dk_update  # noqa: E402
 from companion_common import LOG  # noqa: E402
 
 TM_GUARD_INTERVAL = 0.5
@@ -50,13 +55,17 @@ SNAPSHOT_DIAGNOSTICS = (
 VIBRATION_TEST_MS = 500
 
 settings = SettingsManager(name="settings", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR)
+# Hardware work runs in worker threads (_offload), so its locks are threading locks; Plugin._rpc_lock (asyncio) only
+# admits RPC writes one at a time. Order, never the reverse: a mutation lock (controller_backend.controller_apply_lock,
+# _charge_mutation_lock, Plugin._audio_mutation_lock) -> _lock (Plugin._state, held briefly) -> a device lock
+# (ec_backend._ec_lock and the other leaf locks).
 _lock = threading.RLock()
 _charge_mutation_lock = threading.RLock()
 
 
 def _systemctl(*arguments, check: bool = False):
-    return system_process.run(["/usr/bin/systemctl", *arguments], 20, check=check,
-                              capture_output=True, text=True)
+    return dk_process.run(["/usr/bin/systemctl", *arguments], 20, check=check,
+                          capture_output=True, text=True)
 
 
 def _suspend_clock_offset() -> float | None:
@@ -155,7 +164,29 @@ def _end_decky_listener_at_eof():
     diagnostics.event('plugin', 'decky_listener_unpatched', level='warning')
 
 
-@guard_public_calls
+def _result(answer):
+    """TDP Control's {success, error|stderr, ...} (ported from LegionGo2Companion, kept as it is there) as D2:
+    the same fields with ok, and one error text."""
+    rest = {key: value for key, value in answer.items() if key not in ("success", "error", "stderr")}
+    # The text the panel showed before D2: stderr where the port has it, else error; empty = the panel's own text.
+    error = answer["stderr"] if "stderr" in answer else answer.get("error", "")
+    if answer.get("success"):
+        return dk_rpc.ok(**rest, **({"error": error} if error else {}))  # a control's own note, e.g. EPP
+    return dk_rpc.fail(error, **rest)
+
+
+def _updates():
+    return dk_update.Updates(
+        repo="Rayekkk/Ayaneo3Companion", folder="Ayaneo3Companion", plugin_name="AYANEO 3 Companion",
+        package_name="ayaneo3companion", flags=["root"], current=companion_common.plugin_version(),
+        home=decky.DECKY_USER_HOME, required=bootstrap_installer.REQUIRED, logger=decky.logger)
+
+
+def _fan(state):
+    return dk_rpc.ok({key: value for key, value in state.items() if key != "success"})
+
+
+@guard_public_calls(decky.logger)
 class Plugin:
     _state = {}
     _restore_task = None
@@ -185,6 +216,7 @@ class Plugin:
         # TDP and Fan Control, ported from LegionGo2Companion, keep their own stores and RPCs.
         self._tdp = tdp_backend.Plugin(self._legacy_tdp_settings, self._forget_legacy_tdp)
         self._fan = fan_backend.Plugin()
+        self._updates = _updates()
 
     # 1.2.x kept TDP in this store; tdp_backend imports these keys once.
     LEGACY_TDP_KEYS = ("tdp", "tdp_preset", "cpu_boost", "game_profiles")
@@ -455,97 +487,99 @@ class Plugin:
         return state
 
     async def get_state(self):
-        return await self._offload(self._snapshot)
+        return dk_rpc.ok(await self._offload(self._snapshot))
 
     # TDP / CPU (tdp_backend) ------------------------------------------------------
 
     async def is_ready(self):
-        return await self._tdp.is_ready()
+        return dk_rpc.ok(await self._tdp.is_ready())
 
     async def get_settings(self):
-        return await self._tdp.get_settings()
+        return dk_rpc.ok(await self._tdp.get_settings())
 
     async def get_cpu_power_controls(self, app_id="", ac_profile=False):
-        return await self._tdp.get_cpu_power_controls(app_id, ac_profile)
+        return _result(await self._tdp.get_cpu_power_controls(app_id, ac_profile))
 
     async def set_cpu_boost(self, enabled, app_id="", ac_profile=False, expected_app_id=None, stored=False):
-        return await self._tdp.set_cpu_boost(enabled, app_id, ac_profile, expected_app_id, stored)
+        return _result(await self._tdp.set_cpu_boost(enabled, app_id, ac_profile, expected_app_id, stored))
 
     async def set_epp(self, value, app_id="", ac_profile=False, expected_app_id=None, stored=False):
-        return await self._tdp.set_epp(value, app_id, ac_profile, expected_app_id, stored)
+        return _result(await self._tdp.set_epp(value, app_id, ac_profile, expected_app_id, stored))
 
     async def get_power_source(self):
-        return await self._tdp.get_power_source()
+        return dk_rpc.ok(await self._tdp.get_power_source())
 
     async def retry_helper(self):
-        return await self._tdp.retry_helper()
+        return _result(await self._tdp.retry_helper())
 
     async def set_advanced_tdp_control(self, enabled):
-        return await self._tdp.set_advanced_tdp_control(enabled)
+        return _result(await self._tdp.set_advanced_tdp_control(enabled))
 
     async def get_game_profile(self, app_id):
-        return await self._tdp.get_game_profile(app_id)
+        return dk_rpc.ok(await self._tdp.get_game_profile(app_id))
 
     async def list_game_profiles(self):
-        return await self._tdp.list_game_profiles()
+        return dk_rpc.ok(await self._tdp.list_game_profiles())
 
     async def set_game_ac_profile(self, app_id, spl, sppt, fppt, ac_separate, preset_name="", stored=False):
-        return await self._tdp.set_game_ac_profile(app_id, spl, sppt, fppt, ac_separate, preset_name, stored)
+        return _result(await self._tdp.set_game_ac_profile(app_id, spl, sppt, fppt, ac_separate, preset_name, stored))
 
     async def delete_game_profile(self, app_id):
-        return await self._tdp.delete_game_profile(app_id)
+        return _result(await self._tdp.delete_game_profile(app_id))
 
     async def set_game_profile_active(self, app_id, active):
-        return await self._tdp.set_game_profile_active(app_id, active)
+        return _result(await self._tdp.set_game_profile_active(app_id, active))
 
     async def set_plugin_enabled(self, enabled):
-        return await self._tdp.set_plugin_enabled(enabled)
+        return _result(await self._tdp.set_plugin_enabled(enabled))
 
     async def get_caps(self):
-        return await self._tdp.get_caps()
+        return dk_rpc.ok(await self._tdp.get_caps())
 
     async def set_panel_active(self, active):
-        return await self._tdp.set_panel_active(active)
+        await self._tdp.set_panel_active(active)
+        return dk_rpc.ok()
 
     async def reapply(self):
-        return await self._tdp.reapply()
+        return _result(await self._tdp.reapply())
 
     async def set_active_app(self, app_id):
-        return await self._tdp.set_active_app(app_id)
+        await self._tdp.set_active_app(app_id)
+        return dk_rpc.ok()
 
     async def get_tdp_info(self):
-        return await self._tdp.get_tdp_info()
+        return _result(await self._tdp.get_tdp_info())
 
     async def apply_tdp(self, spl, sppt, fppt, app_id="", preset_name="", expected_app_id=None, stored=False):
-        return await self._tdp.apply_tdp(spl, sppt, fppt, app_id, preset_name, expected_app_id, stored)
+        return _result(await self._tdp.apply_tdp(spl, sppt, fppt, app_id, preset_name, expected_app_id, stored))
 
     # Fan Control (fan_backend) ----------------------------------------------------
 
     async def fan_get_state(self):
-        return await self._fan.get_state()
+        return _fan(await self._fan.get_state())
 
     async def fan_set_enabled(self, enabled):
-        return await self._fan.set_enabled(enabled)
+        return _fan(await self._fan.set_enabled(enabled))
 
     async def fan_save_curve(self, scope, curve, expected_revision):
-        return await self._fan.save_curve(scope, curve, expected_revision)
+        return _fan(await self._fan.save_curve(scope, curve, expected_revision))
 
     async def fan_save_assignment_mode(self, enabled, expected_revision):
-        return await self._fan.save_assignment_mode(enabled, expected_revision)
+        return _fan(await self._fan.save_assignment_mode(enabled, expected_revision))
 
     async def get_battery_status(self):
-        return await self._offload(ec_backend.battery_status)
+        return dk_rpc.ok(await self._offload(ec_backend.battery_status))
 
     async def get_version(self):
-        return {"version": companion_common.updater.plugin_version()}
+        return dk_rpc.ok(version=companion_common.plugin_version())
 
     async def check_for_updates(self):
-        return await self._offload(companion_common.updater.check)
+        return await self._offload(self._updates.check, True)
 
     async def perform_update(self, expected_version):
         if expected_version is None:
             raise ValueError("Select a release version before downloading")
-        return await self._offload(companion_common.updater.download, expected_version)
+        return await self._offload(self._updates.download, expected_version)
 
     @classmethod
     def _controller_save_values(cls, previous, value):
@@ -599,13 +633,13 @@ class Plugin:
         if not isinstance(raw, dict):
             raise ValueError("Expected controller settings")
         await self._offload(self._set_controller_transaction, dict(raw))
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def set_controller_with_vibration_feedback(self, raw):
         if not isinstance(raw, dict):
             raise ValueError("Expected controller settings")
         await self._offload(self._set_controller_transaction, dict(raw), True)
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def set_vibration_gain(self, percent):
         value = companion_common.clamp(percent, 0, 100)
@@ -622,17 +656,17 @@ class Plugin:
                     Plugin._state.update(controller=controller, controller_owned=True)
 
         await self._offload(mutate)
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def test_vibration(self, duration_ms=VIBRATION_TEST_MS):
         with _lock:
             level = Plugin._state["controller"]["vibration"]
         try:
             await self._offload(controller_backend.play_vibration_test, level, duration_ms)
-            return {"success": True}
+            return dk_rpc.ok()
         except Exception as error:
             decky.logger.error(f"{LOG} vibration test failed: {error}")
-            return {"success": False, "error": str(error)}
+            return dk_rpc.fail(str(error))
 
     async def set_charge_bypass(self, enabled):
         value = self._boolean(enabled)
@@ -645,7 +679,7 @@ class Plugin:
                     Plugin._state["charge_bypass"] = value
                     Plugin._state["charge_bypass_supported"] = True
         await self._offload(mutate)
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def set_audio_fix(self, enabled):
         value = self._boolean(enabled)
@@ -676,7 +710,7 @@ class Plugin:
                         audio_calibration_available=value,
                         audio_profile="AYANEO v0.65" if value else "Generic fallback")
         await self._offload(mutate)
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def reapply_audio_fix(self):
         with _lock:
@@ -714,7 +748,7 @@ class Plugin:
                 Plugin._state["audio_calibration_available"] = ready
                 Plugin._state["audio_fix_error"] = str(error)
             raise
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def eject_modules(self, side):
         side = str(side or "").lower()
@@ -752,7 +786,7 @@ class Plugin:
                 Plugin._state["module_right"] = right
             raise
         decky.logger.info(f"{LOG} ejected {side} controller module(s)")
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def reset_modules(self):
         with _lock:
@@ -798,7 +832,7 @@ class Plugin:
                 Plugin._state["module_left"] = left
                 Plugin._state["module_right"] = right
             raise
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def set_screen_fix(self, enabled, replace_existing=False):
         enabled = self._boolean(enabled)
@@ -854,14 +888,14 @@ class Plugin:
         except Exception as error:
             decky.logger.error(f"{LOG} display definition change failed: {error}")
             raise
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def restart_game_mode(self):
         """Restart the gamescope session so it loads the display definition."""
         ok, note = await self._offload(display_backend.restart_session)
         if not ok:
             raise RuntimeError(f"Gaming Mode restart failed: {note}")
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def _edid_loop(self):
         """Reapply after every gamescope session recreates its EDID copy."""
@@ -926,7 +960,7 @@ class Plugin:
                             if path in before:
                                 if path.exists() and not input_backend.button_map_owned(path):
                                     raise RuntimeError("the override changed outside Companion")
-                                companion_common.atomic_write_bytes(path, before[path])
+                                dk_fs.write_atomic(path, before[path], 0o644)
                             elif input_backend.button_map_owned(path):
                                 path.unlink()
                         except Exception as recovery:
@@ -940,7 +974,7 @@ class Plugin:
                 with _lock:
                     Plugin._state["button_fix_installed"] = value
         await self._offload(mutate)
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def set_tm_guard(self, enabled):
         value = self._boolean(enabled)
@@ -952,7 +986,7 @@ class Plugin:
                     Plugin._state["tm_guard_status"] = "Monitoring" if value else "Disabled"
         await self._offload(commit)
         # The guard loop sees an active TM mode within half a second and leaves it.
-        return self._copy_state()
+        return dk_rpc.ok(self._copy_state())
 
     async def _restore_hardware(self, rear_buttons=False):
         """Retry pending boot work; each attempt reads the latest saved choices."""
@@ -1350,7 +1384,7 @@ class Plugin:
             return await complete(self._startup_task)
         self._closing = False
         self._initializing = True
-        companion_common.updater.reset()
+        self._updates = _updates()  # the previous one was closed by _unload
         with _lock:
             Plugin._state = {"initializing": True}
         try:
@@ -1371,7 +1405,7 @@ class Plugin:
     async def _start(self):
         await asyncio.to_thread(diagnostics.configure, diagnostics.LOG_DIR, decky.logger)
         await asyncio.to_thread(_rotate_logs)
-        diagnostics.event('plugin', 'startup', version=companion_common.updater.plugin_version(),
+        diagnostics.event('plugin', 'startup', version=companion_common.plugin_version(),
                           source='backend')
         diagnostics.event('plugin', 'runtime', source='backend', kernel=platform.release(),
                           python=platform.python_version(), architecture=platform.machine(),
@@ -1381,7 +1415,7 @@ class Plugin:
         storage_error = getattr(settings, "recovery_error", "")
         hardware_allowed = is_supported and not storage_error
         try:
-            await self._offload(companion_common.updater.ssl_context)
+            await self._offload(dk_net.tls_context)
         except Exception as error:
             decky.logger.warning(f"{LOG} updater TLS initialization failed: {error}")
         saved_controller = controller_backend.normalize_controller(
@@ -1471,7 +1505,7 @@ class Plugin:
             "initializing": False,
             "startup_error": "",
             "device": companion_common.dmi("product_name") or "unknown",
-            "version": companion_common.updater.plugin_version(),
+            "version": companion_common.plugin_version(),
             "controller": saved_controller,
             # Without a saved choice the controller keeps its own lighting and
             # vibration; the monitors read them instead of applying defaults.
@@ -1529,7 +1563,7 @@ class Plugin:
         if self._cleanup_task is not None:
             return await complete(self._cleanup_task)
         self._closing = True
-        companion_common.updater.close()
+        self._updates.close()
         async def cleanup():
             diagnostics.event('plugin', 'shutdown_started', source='backend')
             module_runtime.request_stop("tdp")  # a start still running applies nothing more

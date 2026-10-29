@@ -1,25 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Environment for external Linux programs launched by frozen Decky Python."""
+"""Kept only so that new releases stay downloadable from older versions.
 
-import os
-import subprocess
-import sys
-
-PYTHON = sys.executable if os.name == "nt" else "/usr/bin/python3"
-
-
-def system_env(**extra) -> dict:
-    # System binaries must not link Decky's bundled OpenSSL/readline libraries.
-    # Keep the parent's environment untouched, including its own Python runtime.
-    blocked = {"LD_LIBRARY_PATH", "LD_LIBRARY_PATH_ORIG", "LD_PRELOAD", "LD_AUDIT"}
-    env = {key: value for key, value in os.environ.items() if key not in blocked}
-    env.setdefault("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    env.update(extra)
-    return env
-
-
-def run(argv, timeout, *, env=None, stdin=subprocess.DEVNULL, check=False, **kwargs):
-    """The one way to run a short external program: subprocess.run, which kills the child and
-    re-raises TimeoutExpired at `timeout`. Default env: system libraries with LC_ALL=C."""
-    return subprocess.run(argv, stdin=stdin, timeout=timeout, check=check,
-                          env=system_env(LC_ALL="C") if env is None else env, **kwargs)
+The updater of 1.3.0 offers a release only when its ZIP contains this file (it checked for it by name).
+External programs run through dk_process.py now; nothing imports this module.
+"""

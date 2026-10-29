@@ -31,7 +31,7 @@ trap 'rm -rf -- "$work_dir"' EXIT
 python3 - "$archive" "$work_dir" <<'PY'
 import pathlib, stat, sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as archive:
-    for name in ("bootstrap_installer.py", "lego_updater.py"):
+    for name in ("bootstrap_installer.py", "dk_update.py", "dk_net.py", "dk_fs.py", "dk_process.py"):
         key = "Ayaneo3Companion/" + name
         matches = [entry for entry in archive.infolist() if entry.filename == key]
         if len(matches) != 1:

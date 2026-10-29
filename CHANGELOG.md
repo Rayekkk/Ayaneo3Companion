@@ -2,6 +2,27 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
+## [Unreleased]
+
+### Changed
+
+- **Clearer errors:** when something fails unexpectedly, the panel shows a short
+  message and the details go to the Decky log, never file paths.
+- **Downloads that cannot hang:** RyzenAdj, the speaker calibration file and
+  plugin updates are downloaded by a separate helper with a time limit, so a
+  stalled connection can no longer hold up the plugin. RyzenAdj's download no
+  longer uses the RAM-backed `/tmp`.
+- **Updates:** a release ZIP is fetched only from GitHub's own download servers,
+  and an incomplete release names the file it is missing. A newer release that
+  cannot be offered now says why instead of only showing its version.
+
+### Fixed
+
+- **Settings:** an empty settings file no longer blocks every change as lost
+  settings; a damaged settings file is kept as `.corrupt-<time>` before it is
+  replaced; settings that could not be read back are never written; recovery
+  copies are as private as the settings themselves.
+
 ## [1.3.0] - 2026-10-24
 
 This release brings LegionGo2Companion's design and safety work to AYANEO 3

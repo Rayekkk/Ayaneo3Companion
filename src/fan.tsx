@@ -6,7 +6,8 @@ import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, Game
   DropdownItem, Dropdown, DialogHeader, DialogBody, DialogLabel,
   DialogFooter, DialogButton, ModalRoot, showModal, type GamepadEvent } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
-import { errorText, infoRow } from "./shared";
+import type { Result } from "./result";
+import { errorText, infoRow, unwrap } from "./shared";
 import { curveName as title, editPoint, fanStatus, nudgeSpeed, pctForRpm, pointText, saveLabel, speedText,
   type Curve, type FanLimits } from "./fan_model";
 
@@ -25,12 +26,12 @@ export interface FanState {
   telemetry?: { active: boolean; automatic: boolean; error?: string; rpm?: number; target?: number;
     override?: number | null; stop_verified?: boolean; temperatures?: Record<string, number> };
 }
-const readState = callable<[], FanState>("fan_get_state");
-const requestEnabled = callable<[boolean], FanState>("fan_set_enabled");
-const requestCurve = callable<[string, Curve | null, number], FanState>("fan_save_curve");
-const requestAssignments = callable<[boolean, number], FanState>("fan_save_assignment_mode");
-const timed = async (operation: () => Promise<FanState>) => {
-  const started = Date.now(), next = await operation(), receivedAt = Date.now();
+const readState = callable<[], Result<FanState>>("fan_get_state");
+const requestEnabled = callable<[boolean], Result<FanState>>("fan_set_enabled");
+const requestCurve = callable<[string, Curve | null, number], Result<FanState>>("fan_save_curve");
+const requestAssignments = callable<[boolean, number], Result<FanState>>("fan_save_assignment_mode");
+const timed = async (operation: () => Promise<Result<FanState>>) => {
+  const started = Date.now(), next = await unwrap(operation()), receivedAt = Date.now();
   return { ...next, receivedAt, readings: next.readings && { ...next.readings,
     age_seconds: (next.readings.age_seconds ?? 0) + Math.max(0, receivedAt-started)/1000 } };
 };

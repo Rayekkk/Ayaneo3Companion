@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""External programs never inherit Decky's frozen runtime libraries."""
+"""External programs never inherit Decky's frozen runtime libraries (dk_process's own guarantees: test_dk_process)."""
 import os
 import subprocess
-import sys
-import time
 import unittest
 from unittest.mock import patch
 
@@ -13,10 +11,8 @@ import audio_backend
 import ec_backend
 import fan_backend
 import tdp_backend
-import system_process
-from system_process import system_env
 
-CLEAN = {"PATH": "/usr/bin", "DISPLAY": ":1", "XDG_RUNTIME_DIR": "/run/user/1000", "LC_ALL": "C"}
+CLEAN = {"PATH": "/usr/bin", "DISPLAY": ":1", "XDG_RUNTIME_DIR": "/run/user/1000", "LC_ALL": "C.UTF-8"}
 
 
 class SystemProcessTests(unittest.TestCase):
@@ -41,26 +37,27 @@ class SystemProcessTests(unittest.TestCase):
     def test_ryzenadj_runs_with_system_libraries_only(self):
         """The pinned helper links only libpci and libudev: no bundled library path at all."""
         process = type("Process", (), {"returncode": 0, "communicate": lambda self, timeout: (b"", b"")})()
-        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/tmp/_MEI/bundled", "PATH": "/usr/bin"}, clear=True),              patch.object(subprocess, "Popen", return_value=process) as popen:
+        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/tmp/_MEI/bundled", "PATH": "/usr/bin"}, clear=True), \
+             patch.object(subprocess, "Popen", return_value=process) as popen:
             tdp_backend._spawn_ryzenadj(["--info"], 3)
         self.assertEqual(popen.call_args.kwargs["env"], {"PATH": "/usr/bin", "LC_ALL": "C"})
 
-    def test_run_closes_stdin_returns_failures_and_kills_at_the_timeout(self):
-        code = 'import os, sys; sys.stdout.write(sys.stdin.read() + os.environ["LC_ALL"]); sys.exit(3)'
-        result = system_process.run([sys.executable, "-c", code], 30, capture_output=True, text=True)
-        self.assertEqual((result.returncode, result.stdout), (3, "C"))
-        started = time.monotonic()
-        with self.assertRaises(subprocess.TimeoutExpired):
-            system_process.run([sys.executable, "-c", "import time; time.sleep(60)"], .5)
-        self.assertLess(time.monotonic() - started, 30, "the child was killed, not waited for")
+    def test_a_hung_ryzenadj_is_killed_and_reaped_within_a_bound(self):
+        """dk_process.run would wait for a child stuck in the kernel; ryzenadj keeps its own bounded reap."""
+        class Stuck:
+            returncode = None
+            killed = False
 
-    @unittest.skipUnless(os.name == "posix", "SteamOS interpreter")
-    def test_helpers_run_on_the_system_python(self):
-        self.assertEqual(system_process.PYTHON, "/usr/bin/python3")
+            def communicate(self, timeout):
+                raise subprocess.TimeoutExpired("ryzenadj", timeout)
 
-    def test_clean_runtime_and_fallback_path(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(system_env(), {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+            def kill(self):
+                self.killed = True
+
+        stuck = Stuck()
+        with patch.object(subprocess, "Popen", return_value=stuck):
+            self.assertEqual(tdp_backend._spawn_ryzenadj(["--info"], 1), (-1, "", "timeout"))
+        self.assertTrue(stuck.killed)
 
 
 if __name__ == "__main__":

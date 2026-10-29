@@ -355,7 +355,7 @@ class WriterTests(unittest.TestCase):
             logger.warning.assert_called_once();logger.info.assert_called_once()
 
     def test_sink_lives_in_its_own_root_directory_outside_the_decky_tree(self):
-        import _harness as support
+        import support
         self.assertEqual(support.DEFAULT_LOG_DIR,'/var/log/ayaneo3companion')
         with tempfile.TemporaryDirectory() as temporary:
             directory=Path(temporary)/'ayaneo3companion'

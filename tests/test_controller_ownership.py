@@ -109,16 +109,16 @@ class ControllerOwnershipTests(unittest.TestCase):
 
     def test_first_change_records_the_found_state_once_and_takes_ownership(self):
         main.Plugin._reconcile_current_controller(True)
-        asyncio.run(self.plugin.set_controller({"color": "ff0000"}))
+        self.assertIs(asyncio.run(self.plugin.set_controller({"color": "ff0000"}))["ok"], True)
         self.assertEqual(self.store.getSetting("controller_baseline"), FOUND)
         self.assertEqual(self.store.getSetting("controller")["color"], "ff0000")
         self.assertTrue(self.state["controller_owned"])
-        asyncio.run(self.plugin.set_vibration_gain(40))
+        self.assertIs(asyncio.run(self.plugin.set_vibration_gain(40))["ok"], True)
         self.assertEqual(self.store.getSetting("controller_baseline"), FOUND)
         self.assertEqual(self.store.getSetting("controller")["ff_gain"], 40)
 
     def test_unread_controller_records_no_baseline(self):
-        asyncio.run(self.plugin.set_vibration_gain(40))
+        self.assertIs(asyncio.run(self.plugin.set_vibration_gain(40))["ok"], True)
         self.assertIsNone(self.store.getSetting("controller_baseline", None))
         self.assertTrue(self.state["controller_owned"])
 
@@ -186,8 +186,9 @@ class DisplayConflictStateTests(unittest.TestCase):
                  patch.object(display_backend, "display_script_conflict", return_value=False), \
                  patch.object(display_backend, "patch_published_edid"):
                 result = asyncio.run(main.Plugin().set_screen_fix(True, True))
-        self.assertFalse(result["screen_conflict"])
-        self.assertTrue(result["screen_installed"])
+        self.assertIs(result["ok"], True)
+        self.assertFalse(result["state"]["screen_conflict"])
+        self.assertTrue(result["state"]["screen_installed"])
 
 
 if __name__ == "__main__":

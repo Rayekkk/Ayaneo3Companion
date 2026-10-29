@@ -2,6 +2,8 @@
 // TDP and CPU rules, texts and the Custom slider model of the TDP page, adapted from
 // LegionGo2Companion's desktop/native/tdp.mjs for the AYANEO 3 (RyzenAdj only, no Extras).
 
+import type { Result } from "./result";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface Tuning { spl: number; spptOff: number; fpptOff: number }
 export interface Caps { spl: number; sppt: number; fppt: number }
@@ -13,7 +15,7 @@ export interface CapsInfo {
 }
 export interface CapsState { tdpAvailable: boolean; helperRetryAvailable: boolean; tdpError: string; readback: boolean }
 export interface TdpValues { spl_limit?: number; sppt_limit?: number; fppt_limit?: number; package_draw?: number; source?: string }
-export interface TdpInfo { success: boolean; values: TdpValues; error?: string }
+export interface TdpInfo extends Result<never> { values?: TdpValues; sample_age_seconds?: number | null }
 export interface RunningLimits { spl: number; sppt: number; fppt: number; preset: PresetKey; game: boolean }
 export interface SettingsLimits {
   enabled?: boolean; running?: RunningLimits; spl?: number; sppt?: number; fppt?: number;
@@ -25,8 +27,8 @@ export interface EppControl {
   numeric_supported: boolean; numeric_value: number | null; min: number; max: number; error: string;
 }
 /** Shared payload for the CPU power controls getter and both setters. */
-export interface CpuPowerControls {
-  success: boolean; available: boolean; cpu_boost: CpuBoostControl; epp: EppControl; error: string;
+export interface CpuPowerControls extends Result<never> {
+  available: boolean; cpu_boost: CpuBoostControl; epp: EppControl; error: string;
   profile?: { app_id: string; ac_profile: boolean; active: boolean; cpu_boost_enabled: boolean | null; epp: string | null };
 }
 
@@ -175,11 +177,11 @@ export function tdpNotice(state: CapsState): [string, string] | null {
 
 const wattText = (value: number | undefined) => value == null ? "–" : Number(value).toFixed(0);
 /** The "Limits now" readout from get_tdp_info; the kernel blocks it on stock SteamOS. */
-export const limitsText = (info: TdpInfo | null | undefined) => info?.success && info.values?.spl_limit != null
+export const limitsText = (info: TdpInfo | null | undefined) => info?.ok && info.values?.spl_limit != null
   ? `SPL ${wattText(info.values.spl_limit)} · SPPT ${wattText(info.values.sppt_limit)} · FPPT ${wattText(info.values.fppt_limit)} W` : "—";
 /** The package draw readout from get_tdp_info. */
 export const drawText = (info: TdpInfo | null | undefined) =>
-  info?.success && info.values?.package_draw != null ? `${Number(info.values.package_draw).toFixed(1)} W` : "—";
+  info?.ok && info.values?.package_draw != null ? `${Number(info.values.package_draw).toFixed(1)} W` : "—";
 
 // ── CPU ───────────────────────────────────────────────────────────────────────
 export const EPP_NAMED_VALUES: Record<string, number> = { performance: 0, balance_performance: 128, balance_power: 191, power: 255 };

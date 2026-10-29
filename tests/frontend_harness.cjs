@@ -1,162 +1,217 @@
-// Shared harness: run a real src/*.tsx module in a vm with array-indexed fake
-// React hooks, a jsx factory producing {type, props} trees, a @decky/ui Proxy
-// (unknown names become strings), fake timers and recorded/deferred RPCs.
+// SPDX-License-Identifier: BSD-3-Clause
+// Shared from DeckyKit (shared/tests/frontend_harness.cjs): change it there, then `kit sync`.
+// Runs the real TSX in a Node `vm` with controlled hooks, RPC calls, toasts, timers and clock: no React, no jest.
+//
+// Sources: DeckyLS/FSR4Injector tests/frontend_panel.cjs (vm + transpile, manual RPC answers, keep), LegionGo2Companion
+// tests/frontend_harness.cjs (useRef/useMemo, toaster, fake clock, auto answers, strict RPCs, module stubs, props,
+// useQuickAccessVisible, Decky events, window, Object.is dependencies, build-time constants), DeckyReshade
+// tests/frontend_panel.cjs (hook state per component and key, elements inside descriptions, localStorage,
+// CustomEvent and recorded window events), FSR4Injector tests/frontend_panel.cjs (the entry's default export, so
+// the plugin's setup - Steam registrations, startup toasts - runs in the test; window changed between renders).
+// Guarantees: the component's own source runs (relative .ts/.tsx imports too, transpiled with their real file
+// names; `modules` stubs a module by name); nothing runs on a real timer or clock, and timers that keep
+// rescheduling themselves fail the test instead of hanging it; every RPC call is recorded with its arguments copied
+// out of the sandbox (structured clone: undefined and NaN survive), and an argument that cannot be sent (a function,
+// a promise) throws at the call instead of hiding in a rejected promise (DeckyVibranceHDR build-contract); with `strict`, an RPC without an answer in
+// `responses` fails the call instead of hanging; hook dependencies compare with Object.is like React's; hook state
+// belongs to each function component (its parent, type and key, else its turn among siblings of that type), so
+// pages that swap whole components keep their state apart and a new key starts afresh; `all`/`find`/`findText` also
+// walk elements passed as a description; an element keeps its key (a section that must keep focus across layouts,
+// DeckyVibranceHDR); `localStorage` (in memory) and `CustomEvent` exist, and every
+// window.dispatchEvent is recorded in `events`; `exports` are the entry's exports (`exports.default()` runs what
+// definePlugin was given) and `window` is the sandbox's window, so a test can change it between renders;
+// `writes` counts state setter calls (a late answer to an unmounted or hidden panel must write nothing,
+// Ayaneo3Companion); `timers`/`intervals` list every timeout/interval set ({ms, done}), and `tick(ms)` runs only
+// the intervals of that period (a page with several pollers, Ayaneo3Companion).
+// Deliberately not here: real React rendering (DeckyEQ keeps vitest), unmounting a component that leaves the tree
+// (its effects clean up on unmount()/remount()), DOM.
+//
+//   const { harness, all, find, settle } = require('./frontend_harness.cjs');
+//   const h = harness({ ui: { Router }, globals: { appStore }, keep: ['Note'] });
+//   h.render(); h.respond('get_state', { ok: true, state }); await settle(); find(h.render(), 'Field', 'Status');
+//
+// Test files are named tests/*.test.cjs; `node --test "tests/*.test.cjs"` finds them all.
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
-const ts = require(path.join(root, 'node_modules/typescript'));
-// Shared src modules always run for real, even where tests stub other pages.
-const REAL_MODULES = new Set(['./shared', './ui', './tdp_model', './fan_model']);
+const ts = require(require.resolve('typescript', { paths: [root, __dirname] }));
 
-// Fake timers leave no native event-loop handle, so a pending top-level promise
-// would let Node exit successfully; require explicit completion instead.
-function run(main) {
-  let completed = false;
-  process.once('beforeExit', () => {
-    if (!completed && !process.exitCode) {
-      console.error('Frontend test did not complete: an awaited operation is still pending.');
-      process.exitCode = 1;
+/** Lets every already settled promise chain run. */
+const settle = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); };
+
+/**
+ * entry: the TSX file; component: the function component it defines (exported for the test);
+ * ui: @decky/ui members the test controls (any other member is just its name, enough for an element type);
+ * globals: Steam globals (appStore, SteamClient...); keep: components left as elements, not rendered;
+ * responses: RPC name -> answer (or function of the arguments) given at once; strict: other RPCs fail;
+ * api: extra or replaced @decky/api members (e.g. a toaster that throws); modules: name -> exports for any other
+ * import (stubs for files the test does not want to run).
+ */
+function harness({ entry = 'src/index.tsx', component = 'Content', ui = {}, globals = {}, keep = [],
+  responses = {}, strict = false, api = {}, modules = {} } = {}) {
+  const slots = new Map(), effects = new Map(), pending = [], calls = [], timers = [], intervals = [], toasts = [];
+  const listeners = new Map(), frames = [], events = [], storage = new Map();
+  let clock = 0, visible = true, writes = 0;
+  const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+  const slot = () => {
+    const f = frames[frames.length - 1];
+    if (!f) throw new Error('frontend_harness: a hook ran outside render()');
+    return `${f.id}:${f.cursor++}`;
+  };
+  const hooks = {
+    useState(value) { const k = slot(); if (!slots.has(k)) slots.set(k, typeof value === 'function' ? value() : value);
+      return [slots.get(k), v => { writes++; slots.set(k, typeof v === 'function' ? v(slots.get(k)) : v); }]; },
+    useCallback(fn, deps) { const k = slot(), old = slots.get(k); if (!old || !same(old.deps, deps)) slots.set(k, { fn, deps });
+      return slots.get(k).fn; },
+    useMemo(fn, deps) { const k = slot(), old = slots.get(k); if (!old || !same(old.deps, deps)) slots.set(k, { value: fn(), deps });
+      return slots.get(k).value; },
+    useRef(value) { const k = slot(); if (!slots.has(k)) slots.set(k, { current: value }); return slots.get(k); },
+    useEffect(fn, deps) { const k = slot(), old = effects.get(k); if (!old || !same(old.deps, deps)) pending.push(() => {
+      old?.cleanup?.(); effects.set(k, { deps, cleanup: fn() });
+    }); },
+  };
+  // A function component runs where its element is created, in a frame of its own.
+  const enter = (id, run) => {
+    frames.push({ id, cursor: 0, children: {} });
+    try { return run(); } finally { frames.pop(); }
+  };
+  const call = (type, props, key) => {
+    const parent = frames[frames.length - 1], name = type.name || 'anonymous';
+    const turn = parent ? parent.children[name] = (parent.children[name] ?? 0) + 1 : 1;
+    return enter(`${parent?.id ?? ''}/${name}#${key == null ? turn : `key=${key}`}`, () => type(props ?? {}));
+  };
+  const el = (type, props, key) => (typeof type === 'function' && !keep.includes(type.name) ? call(type, props, key)
+    : key === undefined ? { type, props } : { type, props, key });
+  const jsx = { jsx: el, jsxs: el, Fragment: 'Fragment' };
+  const copy = value => structuredClone(value);
+  // Arguments are copied out of the sandbox, whose objects have their own Object prototype.
+  const callable = name => (...args) => {
+    let sent;
+    try {
+      sent = copy(args);
+    } catch (e) {  // e.g. a callable used as a .then() handler gets a value, an event handler gets the event
+      throw new Error(`RPC ${name}: an argument cannot be sent to the backend (${e.message})`);
+    }
+    return answer(name, sent);
+  };
+  const answer = (name, args) => new Promise((resolve, reject) => {
+    const call = { name, args, resolve, reject, settled: false };
+    calls.push(call);
+    if (name in responses) {
+      call.settled = true;
+      const answer = responses[name];
+      resolve(copy(typeof answer === 'function' ? answer(...call.args) : answer));
+    } else if (strict) {
+      call.settled = true;
+      reject(new Error(`unexpected RPC ${name}`));
     }
   });
-  Promise.resolve().then(main).then(() => { completed = true; })
-    .catch(error => { console.error(error); process.exitCode = 1; });
+  const defaults = { useQuickAccessVisible: () => visible };
+  const deckyUi = new Proxy(ui, { get: (o, k) => (k in o ? o[k] : k in defaults ? defaults[k] : k) });
+  class FakeDate extends Date {
+    constructor(...a) { super(...(a.length ? a : [clock])); }
+    static now() { return clock; }
+  }
+  const context = vm.createContext({
+    console, Date: FakeDate, performance: { now: () => clock }, structuredClone,
+    // What the build replaces (rollup.config.js), so the source runs as the bundle would.
+    process: { env: { NODE_ENV: 'test' } }, __PLUGIN_VERSION__: '0.0.0-test',
+    localStorage: { getItem: k => storage.get(String(k)) ?? null, setItem: (k, v) => { storage.set(String(k), String(v)); },
+      removeItem: k => { storage.delete(String(k)); } },
+    CustomEvent: class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
+    dispatchEvent: e => { events.push(copy({ type: e?.type, detail: e?.detail })); return true; },
+    ...globals,
+    setTimeout: (fn, ms = 0) => { const t = { fn, ms, at: clock + ms, done: false }; timers.push(t); return t; },
+    clearTimeout: t => { if (t) t.done = true; },
+    setInterval: (fn, ms = 0) => { const t = { fn, ms, at: clock + ms, done: false }; intervals.push(t); return t; },
+    clearInterval: t => { if (t) t.done = true; },
+  });
+  if (!('window' in globals)) vm.runInContext('globalThis.window = globalThis', context);
+  const cache = new Map();
+  function load(file, extra = '') {
+    if (cache.has(file)) return cache.get(file).exports;
+    const mod = { exports: {} };
+    cache.set(file, mod);
+    const output = ts.transpileModule(fs.readFileSync(file, 'utf8') + extra, { fileName: file, compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+    const require = name => {
+      if (name === 'react') return hooks;
+      if (name === 'react/jsx-runtime') return jsx;
+      if (name in modules) return modules[name];
+      if (name === '@decky/api') return { callable, definePlugin: fn => fn, toaster: { toast: t => toasts.push(copy(t)) },
+        useQuickAccessVisible: () => visible,  // @decky/api exports it too (Ayaneo3Companion imports it from there)
+        addEventListener: (event, fn) => { listeners.set(event, [...(listeners.get(event) ?? []), fn]); return fn; },
+        removeEventListener: (event, fn) => listeners.set(event, (listeners.get(event) ?? []).filter(f => f !== fn)),
+        ...api };
+      if (name === '@decky/ui') return deckyUi;
+      if (name === 'react-dom') return { createPortal: node => node };
+      if (name.startsWith('.')) {
+        const base = path.resolve(path.dirname(file), name);
+        const found = ['.ts', '.tsx', '/index.ts', '/index.tsx'].map(s => base + s).find(fs.existsSync);
+        if (found) return load(found);
+      }
+      throw Error(`frontend_harness: no module ${name}`);
+    };
+    vm.runInContext(`(function (module, exports, require) {${output}\n})`, context)(mod, mod.exports, require);
+    return mod.exports;
+  }
+  const exports = load(path.join(root, entry), `\nexport { ${component} };`);
+  const Component = exports[component];
+  assert.equal(typeof Component, 'function', `${entry} defines no component ${component}`);
+  const render = (props = {}) => {
+    frames.length = 0;
+    const tree = enter(component, () => Component(props));
+    pending.splice(0).forEach(fn => fn());
+    return tree;
+  };
+  const take = name => {
+    const call = calls.find(c => c.name === name && !c.settled); assert.ok(call, `pending ${name}`);
+    call.settled = true; return call;
+  };
+  return {
+    render, calls, timers, intervals, toasts, events, exports, window: vm.runInContext('window', context),
+    get now() { return clock; },
+    get writes() { return writes; },
+    /** One round of every interval, or with ms only of those set for exactly that period. */
+    tick(ms) { intervals.filter(t => !t.done && (ms === undefined || t.ms === ms)).forEach(t => t.fn()); },
+    /** A Decky event (decky.emit in the backend) to every listener added through @decky/api. */
+    emit(event, ...args) { (listeners.get(event) ?? []).forEach(fn => fn(...args)); },
+    hide() { visible = false; }, show() { visible = true; },  // the Quick Access Menu closes / opens
+    unmount() { for (const e of effects.values()) e.cleanup?.(); effects.clear(); },  // the menu closes
+    remount() { this.unmount(); slots.clear(); return render(); },  // closed and opened again
+    respond(name, value) { const call = take(name); call.resolve(value); return call; },
+    fail(name, error = new Error('backend gone')) { const call = take(name); call.reject(error); return call; },
+    /** Every pending timeout (with maxMs, only those set for at most that long), regardless of the clock. */
+    fire(maxMs = Infinity) { timers.filter(t => !t.done && t.ms <= maxMs).forEach(t => { t.done = true; t.fn(); }); },
+    /** Move the clock on by ms, running due timeouts and intervals in time order. */
+    advance(ms) {
+      const end = clock + ms;
+      for (let runs = 0; ; runs++) {
+        if (runs > 100000) throw new Error('timers keep rescheduling themselves: advance() would never end');
+        const due = [...timers, ...intervals].filter(t => !t.done && t.at <= end).sort((a, b) => a.at - b.at)[0];
+        if (!due) break;
+        clock = due.at;
+        if (timers.includes(due)) due.done = true; else due.at += Math.max(due.ms, 1);
+        due.fn();
+      }
+      clock = end;
+    },
+  };
 }
-const settle = async (turns = 30) => { for (let i = 0; i < turns; i++) await Promise.resolve(); };
-const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject }; };
-const transpile = (file, append = '') => ts.transpileModule(fs.readFileSync(path.join(root, 'src', file), 'utf8') + append, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 
-// Tree helpers. Nodes are {type, props}; children and descriptions may nest nodes.
-const childrenOf = node => Array.isArray(node) ? node : [node.props?.children, node.props?.description];
-function find(node, predicate) {
-  if (!node || typeof node !== 'object') return undefined;
-  if (!Array.isArray(node) && predicate(node)) return node;
-  for (const child of childrenOf(node)) { const found = find(child, predicate); if (found) return found; }
-}
-function nodes(node, out = []) {
-  if (!node || typeof node !== 'object') return out;
-  if (!Array.isArray(node)) out.push(node);
-  for (const child of childrenOf(node)) nodes(child, out);
+/** Every element of a rendered tree, depth first, also those passed as a description. */
+function all(node, out = []) {
+  if (Array.isArray(node)) node.forEach(n => all(n, out));
+  else if (node && typeof node === 'object') {
+    out.push(node);
+    all(node.props?.children, out);
+    all(node.props?.description, out);
+  }
   return out;
 }
-const label = (tree, name) => find(tree, n => n.props?.label === name);
-const buttonText = n => Array.isArray(n.props?.children) ? n.props.children.join('') : n.props?.children;
-const button = (tree, name) => find(tree, n => n.type === 'ButtonItem' && buttonText(n) === name);
-const component = (tree, name) => find(tree, n => typeof n.type === 'function' && n.type.name === name);
-const text = node => node == null || node === false ? '' : typeof node !== 'object' ? String(node)
-  : Array.isArray(node) ? node.map(text).join(' ')
-  : [node.props?.title, node.props?.label, node.props?.description, node.props?.children].map(text).join(' ');
+const find = (tree, type, label) => all(tree).find(n => n.type === type && (label === undefined || n.props.label === label));
+/** The first element whose label, description or text children contain text. */
+const findText = (tree, text) => all(tree).find(n => [n.props?.label, n.props?.description,
+  ...[].concat(n.props?.children ?? [])].some(v => typeof v === 'string' && v.includes(text)));
 
-// mount(file, options) → harness. Options:
-//   component: export rendered by render(); append: source appended (test-only exports)
-//   responses: {rpc: value | fn(...args)}; missing RPCs return `fallback` (default {success:true})
-//   strict: reject RPCs without a response; deferAll: every RPC stays pending until respond/reject; api/ui/window/globals: extra context
-//   modules: {'./x': value} or (name) => value for stubbed relative imports
-//   clock: initial Date.now()/performance.now() value (fake clock), visible: QAM visibility
-function mount(file, options = {}) {
-  const slots = [], effects = new Map(), pendingEffects = [], timers = new Map(), calls = [], deferCounts = new Map();
-  let cursor = 0, nextTimer = 0, writes = 0, changed = false, visible = options.visible !== false;
-  const clock = { now: options.clock ?? 0 };
-  const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
-  const hooks = {
-    useState(initial) {
-      const i = cursor++;
-      if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial;
-      return [slots[i], value => { writes++; const next = typeof value === 'function' ? value(slots[i]) : value;
-        if (!Object.is(next, slots[i])) changed = true; slots[i] = next; }];
-    },
-    useRef(value) { const i = cursor++; if (!(i in slots)) slots[i] = { current: value }; return slots[i]; },
-    useCallback(fn, deps) { const i = cursor++; if (!slots[i] || !same(slots[i].deps, deps)) slots[i] = { fn, deps }; return slots[i].fn; },
-    useMemo(fn, deps) { const i = cursor++; if (!slots[i] || !same(slots[i].deps, deps)) slots[i] = { value: fn(), deps }; return slots[i].value; },
-    useEffect(fn, deps) {
-      const i = cursor++, previous = effects.get(i);
-      if (!previous || !same(previous.deps, deps)) pendingEffects.push(() => {
-        previous?.cleanup?.(); effects.set(i, { deps, cleanup: fn() }); });
-    },
-  };
-  const responses = options.responses ?? {}; // by reference: tests may swap replies later
-  const fallback = 'fallback' in options ? options.fallback : { success: true };
-  const callable = name => (...args) => {
-    const call = { name, args, settled: false }; calls.push(call);
-    const deferredCount = deferCounts.get(name) ?? 0;
-    if (options.deferAll || deferredCount > 0) {
-      if (deferredCount > 0) deferCounts.set(name, deferredCount - 1);
-      return new Promise((resolve, reject) => Object.assign(call, { resolve, reject }));
-    }
-    call.settled = true;
-    if (options.strict && !(name in responses)) return Promise.reject(Error(`Unexpected RPC: ${name}`));
-    const response = name in responses ? responses[name] : fallback;
-    try { return Promise.resolve(typeof response === 'function' ? response(...args) : structuredClone(response)); }
-    catch (error) { return Promise.reject(error); }
-  };
-  const listeners = {};
-  const api = { callable, useQuickAccessVisible: () => visible, definePlugin: fn => fn, toaster: { toast() {} },
-    addEventListener: (name, fn) => { listeners[name] = fn; return fn; },
-    removeEventListener: (name, fn) => { if (!fn || listeners[name] === fn) delete listeners[name]; }, ...options.api };
-  const ui = new Proxy({ ...options.ui }, { get: (target, key) => key in target ? target[key] : key });
-  const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }), Fragment: 'Fragment' };
-  const timer = (kind, fn, delay) => { const id = ++nextTimer; timers.set(id, { kind, fn, delay }); return id; };
-  class FakeDate extends Date { static now() { return clock.now; } }
-  const context = vm.createContext({ console, window: {}, Error, __PLUGIN_VERSION__: require(path.join(root, 'package.json')).version,
-    setTimeout: (fn, delay) => timer('timeout', fn, delay), clearTimeout: id => timers.delete(id),
-    setInterval: (fn, delay) => timer('interval', fn, delay), clearInterval: id => timers.delete(id),
-    ...('clock' in options ? { Date: FakeDate, performance: { now: () => clock.now } } : {}),
-    ...(options.window ? { window: options.window } : {}), ...options.globals });
-  const loaded = new Map();
-  const load = (name, source = transpile(name)) => {
-    const mod = { exports: {} };
-    loaded.set(name, mod);
-    vm.runInContext(`(function (module, exports, require) {${source}\n})`, context)(mod, mod.exports, request => {
-      if (request === 'react') return hooks;
-      if (request === 'react/jsx-runtime') return jsx;
-      if (request === '@decky/api') return api;
-      if (request === '@decky/ui') return ui;
-      if (REAL_MODULES.has(request)) {
-        const base = request.slice(2), file = fs.existsSync(path.join(root, 'src', base + '.tsx')) ? base + '.tsx' : base + '.ts';
-        return (loaded.get(file) ?? load(file)).exports;
-      }
-      if (request.startsWith('../desktop/native/')) return (loaded.get(request) ?? load(request)).exports;
-      const stub = typeof options.modules === 'function' ? options.modules(request) : options.modules?.[request];
-      if (stub !== undefined) return stub;
-      throw Error(request);
-    });
-    return mod;
-  };
-  const exports = load(file, transpile(file, options.append ? `\n${options.append}` : '')).exports;
-  let props = options.props ?? {};
-  const pending = name => { const call = calls.find(c => c.name === name && c.resolve && !c.settled);
-    assert.ok(call, `pending RPC ${name}`); return call; };
-  const h = {
-    exports, calls, timers, listeners, responses, clock, callable,
-    get writes() { return writes; }, get changed() { return changed; }, set changed(value) { changed = value; },
-    render(nextProps = props, fn = exports[options.component]) {
-      props = nextProps; cursor = 0; const tree = fn(props);
-      options.onRender?.(tree); pendingEffects.splice(0).forEach(run => run()); return tree;
-    },
-    setVisible(value) { visible = value; return h.render(); },
-    hide() { return h.setVisible(false); }, show() { return h.setVisible(true); },
-    unmount() { for (const effect of effects.values()) effect.cleanup?.(); effects.clear(); },
-    reset() { h.unmount(); slots.length = 0; pendingEffects.length = 0; },
-    remount(nextProps) { slots.length = 0; pendingEffects.length = 0; return h.render(nextProps); },
-    count: name => calls.filter(c => c.name === name).length,
-    defer(name, count = 1) { deferCounts.set(name, count); },
-    pending,
-    settle(call, value, rejected = false) { call.settled = true; rejected ? call.reject(value) : call.resolve(value); },
-    respond(name, value) { h.settle(pending(name), value); },
-    reject(name, error = new Error('temporary RPC failure')) {
-      h.settle(pending(name), typeof error === 'string' ? new Error(error) : error, true); },
-    timeouts: () => [...timers.values()].filter(t => t.kind === 'timeout'),
-    intervals: () => [...timers.values()].filter(t => t.kind === 'interval'),
-    // Fire matching timers; fired timeouts are removed like real one-shot timers.
-    fire(kind = 'interval', delay) {
-      for (const [id, t] of [...timers]) if (t.kind === kind && (delay === undefined || t.delay === delay)) {
-        if (kind === 'timeout') timers.delete(id); t.fn(); }
-    },
-    flushTimeouts() { h.fire('timeout'); },
-    advance(ms) { clock.now += ms; },
-  };
-  return h;
-}
-
-module.exports = { assert, run, settle, deferred, mount, find, nodes, label, button, component, text };
+module.exports = { harness, all, find, findText, settle };

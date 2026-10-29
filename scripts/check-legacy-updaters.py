@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Check that a release ZIP is accepted by the in-plugin updaters users already run.
 
-Usage: python3 scripts/check-legacy-updaters.py Ayaneo3Companion-X.Y.Z.zip
+Usage: python scripts/check-legacy-updaters.py artifacts/Ayaneo3Companion-X.Y.Z.zip
 
-Loads lego_updater.py from the 1.1.0 and 1.2.0 tags (needs the tags fetched)
+Loads lego_updater.py from the 1.1.0, 1.2.0 and 1.3.0 tags (needs the tags fetched)
 and runs the same checks those versions run on a downloaded release: the asset
 size limit and Updater._validate_archive. Earlier releases did not validate.
 """
@@ -15,7 +15,7 @@ import sys
 import types
 import zipfile
 
-TAGS = ("1.1.0", "1.2.0")
+TAGS = ("1.1.0", "1.2.0", "1.3.0")
 ROOT = Path(__file__).resolve().parent.parent
 
 

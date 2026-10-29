@@ -66,8 +66,9 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             responses = await asyncio.wait_for(asyncio.gather(*tasks), 3)
         self.assertEqual(acknowledged, 2, "charge and the next RGB write must complete during TDP recovery")
-        self.assertTrue(responses[1]["charge_bypass"])
-        self.assertEqual(responses[2]["controller"]["brightness"], 40)
+        self.assertTrue(all(response["ok"] for response in responses[1:]), responses)
+        self.assertTrue(responses[1]["state"]["charge_bypass"])
+        self.assertEqual(responses[2]["state"]["controller"]["brightness"], 40)
         self.assertTrue(self.store.getSetting("charge_bypass"))
 
     async def test_charge_drift_recovery_does_not_wait_for_tdp_transaction(self):
@@ -104,7 +105,9 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
                 acknowledged = len(done)
             finally:
                 release.set()
-                await asyncio.wait_for(asyncio.gather(*tasks), 3)
+                responses = await asyncio.wait_for(asyncio.gather(*tasks), 3)
+        self.assertEqual(responses, [responses[0], {"ok": True}])
+        self.assertIs(responses[0]["ok"], True)
         self.assertEqual(acknowledged, 1, "TDP's foreground-game lease never queues behind main's writes")
         self.assertEqual(tdp_backend._frontend_appid, "222")
 
@@ -126,7 +129,8 @@ class IndependentChargeTests(unittest.IsolatedAsyncioTestCase):
                 raced = bool(done)
             finally:
                 release.set()
-                await asyncio.wait_for(asyncio.gather(*tasks), 3)
+                responses = await asyncio.wait_for(asyncio.gather(*tasks), 3)
+        self.assertIs(responses[0]["ok"], True)
         self.assertFalse(raced, "the charge monitor must wait for the public transaction's commit")
         self.assertEqual(self.charge_writes, [True])
         self.assertTrue(self.hardware_charge)
@@ -148,7 +152,7 @@ class ChargeMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(controller_backend, "apply_controller"))
         self.stack.enter_context(patch.object(controller_backend, "set_vibration_gain"))
         self.stack.enter_context(patch.object(ec_backend, "both_modules_connected", return_value=False))
-        self.stack.enter_context(patch.object(companion_common, "updater", types.SimpleNamespace(close=Mock())))
+        self.stack.enter_context(patch.object(main, "_updates", return_value=types.SimpleNamespace(close=Mock())))
         for name in ("_restore_task", "_edid_task", "_charge_task", "_module_task",
                      "_tm_guard_task", "_vibration_gain_task", "_audio_task"):
             self.stack.enter_context(patch.object(main.Plugin, name, None))

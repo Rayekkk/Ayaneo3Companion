@@ -11,13 +11,14 @@ import struct
 import subprocess
 import threading
 import time
-import urllib.request
 from pathlib import Path
 
 import decky
 
 import companion_common
-import system_process
+import dk_fs
+import dk_net
+import dk_process
 from companion_common import LOG
 
 
@@ -66,10 +67,12 @@ AUDIO_USER_START_UNITS = (
     "pipewire.socket", "pipewire.service", "wireplumber.service",
     "pipewire-pulse.socket", "pipewire-pulse.service",
 )
+# Firmware folders of the manual tuning tests in the Decky user's home, accepted as ours so the fix can take over.
+_AUDIO_USER_HOME = companion_common.DECKY_ACCOUNT.get("user_home", "")
 AUDIO_LEGACY_TEST_PATHS = frozenset({
-    "/home/deck/ayaneo3-audio-cal-test",
-    "/home/deck/ayaneo3-audio-fix",
-})
+    f"{_AUDIO_USER_HOME}/ayaneo3-audio-cal-test",
+    f"{_AUDIO_USER_HOME}/ayaneo3-audio-fix",
+}) if _AUDIO_USER_HOME else frozenset()
 _audio_apply_lock = threading.Lock()
 
 
@@ -117,15 +120,15 @@ def _prepare_audio_aliases() -> tuple[Path, Path]:
     for target in targets:
         if _same_file(source, target):
             continue
-        companion_common.atomic_write_bytes(target, source.read_bytes())
+        dk_fs.write_atomic(target, source.read_bytes(), 0o644)
     return targets
 
 
 def _audio_card_index() -> int | None:
     for card in range(8):
         try:
-            result = system_process.run(["amixer", "-c", str(card), "controls"], 5,
-                                        capture_output=True, text=True)
+            result = dk_process.run(["amixer", "-c", str(card), "controls"], 5,
+                                    capture_output=True, text=True)
         except (OSError, subprocess.TimeoutExpired):
             return None
         if result.returncode == 0 and all(name in result.stdout for name in AUDIO_FIRMWARE_CONTROLS):
@@ -134,7 +137,7 @@ def _audio_card_index() -> int | None:
 
 
 def _set_audio_control(card: int, control: str, value, action: str = "set") -> None:
-    result = system_process.run([
+    result = dk_process.run([
         "amixer", "-q", "-c", str(card), "cset",
         f"iface=CARD,name={control}", str(value),
     ], 15, capture_output=True, text=True)
@@ -146,7 +149,7 @@ def _set_audio_control(card: int, control: str, value, action: str = "set") -> N
 
 
 def _audio_control_value(card: int, control: str) -> str | None:
-    result = system_process.run([
+    result = dk_process.run([
         "amixer", "-c", str(card), "cget", f"iface=CARD,name={control}",
     ], 10, capture_output=True, text=True)
     if result.returncode:
@@ -191,7 +194,7 @@ def _deck_audio_command(arguments: list[str], timeout: float = 8.0):
     except (ImportError, KeyError) as error:
         raise RuntimeError("the Decky user account is unavailable for audio control") from error
     runtime = f"/run/user/{uid}"
-    return system_process.run([
+    return dk_process.run([
         "/usr/bin/runuser", "-u", name, "--", "/usr/bin/env",
         f"XDG_RUNTIME_DIR={runtime}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus",
@@ -431,20 +434,15 @@ def remove_audio_fix(reload_dsp: bool = True) -> None:
 
 
 def _download_audio_calibration() -> bytes:
-    deadline = time.monotonic() + companion_common.HARDWARE_DOWNLOAD_SECONDS
-    request = urllib.request.Request(
-        companion_common.checked_download_url(AUDIO_CALIBRATION_URL),
-        headers={"User-Agent": f"Ayaneo3Companion/{companion_common.updater.plugin_version()}"},
-    )
-    with companion_common.open_hardware_download(request) as response:
-        companion_common.checked_download_url(response.geturl())
-        declared = response.headers.get("Content-Length")
-        if declared and int(declared) > 64 * 1024:
-            raise RuntimeError("audio calibration file is unexpectedly large")
-        data = b"".join(companion_common.hardware_download_chunks(response, 64 * 1024, deadline))
-    if hashlib.sha256(data).hexdigest() != AUDIO_CALIBRATION_SHA256:
-        raise RuntimeError("audio calibration file checksum mismatch")
-    return data
+    try:
+        return dk_net.get(AUDIO_CALIBRATION_URL, 64 * 1024, AUDIO_CALIBRATION_SHA256,
+                          hosts={"raw.githubusercontent.com"}, deadline=companion_common.HARDWARE_DOWNLOAD_SECONDS)
+    except dk_net.TooLarge as error:
+        raise RuntimeError("audio calibration file is unexpectedly large") from error
+    except dk_net.Mismatch as error:
+        raise RuntimeError("audio calibration file checksum mismatch") from error
+    except dk_net.NetError as error:
+        raise RuntimeError(f"audio calibration download failed: {error}") from error
 
 
 def _prepare_audio_calibration_firmware() -> tuple[Path, Path]:
@@ -457,7 +455,7 @@ def _prepare_audio_calibration_firmware() -> tuple[Path, Path]:
     wmfw_suffix = wmfw_source.name[len(AUDIO_FIRMWARE_WMFW_STEM):]
     wmfw_target = target_dir / f"{AUDIO_CALIBRATION_WMFW}{wmfw_suffix}"
     if not _same_file(wmfw_source, wmfw_target):
-        companion_common.atomic_write_bytes(wmfw_target, wmfw_source.read_bytes())
+        dk_fs.write_atomic(wmfw_target, wmfw_source.read_bytes(), 0o644)
 
     bin_target = target_dir / AUDIO_CALIBRATION_BIN
     try:
@@ -466,7 +464,7 @@ def _prepare_audio_calibration_firmware() -> tuple[Path, Path]:
         valid_bin = False
     if not valid_bin:
         data = _download_audio_calibration()
-        companion_common.atomic_write_bytes(bin_target, data)
+        dk_fs.write_atomic(bin_target, data, 0o644)
     return wmfw_target, bin_target
 
 
@@ -517,7 +515,7 @@ def _i2c_register_arguments(address: str, register: int) -> list[str]:
 
 
 def _read_audio_dsp_register(address: str, register: int) -> int:
-    result = system_process.run([
+    result = dk_process.run([
         "/usr/bin/i2ctransfer", "-f", "-y", _audio_i2c_bus(), f"w4@{address}",
         *_i2c_register_arguments(address, register), "r4",
     ], 5, capture_output=True, text=True)
@@ -535,7 +533,7 @@ def _read_audio_dsp_register(address: str, register: int) -> int:
 
 def _write_audio_dsp_register(address: str, register: int, value: int) -> None:
     data = [f"0x{byte:02x}" for byte in int(value).to_bytes(4, "big")]
-    result = system_process.run([
+    result = dk_process.run([
         "/usr/bin/i2ctransfer", "-f", "-y", _audio_i2c_bus(), f"w8@{address}",
         *_i2c_register_arguments(address, register), *data,
     ], 5, capture_output=True, text=True)
@@ -610,7 +608,7 @@ def _write_audio_efi(path: Path, candidate: bytes, original: bytes) -> None:
         finally:
             os.close(descriptor)
 
-    unlocked = system_process.run(["/usr/bin/chattr", "-i", str(path)], 10, capture_output=True, text=True)
+    unlocked = dk_process.run(["/usr/bin/chattr", "-i", str(path)], 10, capture_output=True, text=True)
     if unlocked.returncode:
         raise RuntimeError(unlocked.stderr.strip() or "could not unlock audio calibration EFI")
     write_error = None
@@ -636,8 +634,8 @@ def _write_audio_efi(path: Path, candidate: bytes, original: bytes) -> None:
                 rollback_error = recovery
     finally:
         try:
-            locked = system_process.run(["/usr/bin/chattr", "+i", str(path)], 10,
-                                        capture_output=True, text=True)
+            locked = dk_process.run(["/usr/bin/chattr", "+i", str(path)], 10,
+                                    capture_output=True, text=True)
             if locked.returncode:
                 lock_error = RuntimeError(locked.stderr.strip() or "chattr failed")
         except Exception as error:
@@ -666,7 +664,7 @@ def _measure_audio_calibration(card: int) -> tuple[int, int]:
         "/usr/bin/aplay", "-q", "-D", f"hw:{card},0", "-f", "S16_LE",
         "-c", "2", "-r", "48000", "/dev/zero",
     ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-       env=system_process.system_env())
+       env=dk_process.system_env())
     values = None
     try:
         deadline = started + 4.0

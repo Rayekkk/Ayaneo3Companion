@@ -1,7 +1,6 @@
 import asyncio, json, os, sys
 sys.path.insert(0, os.path.dirname(__file__))
-from _harness import install
-install()
+import support  # noqa: F401  (the Decky harness before any backend import)
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
 import controller_backend

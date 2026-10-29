@@ -18,9 +18,8 @@ verifies its pinned SHA-256 digest. The file is not included in this package:
   HHD hardware firmware
   https://github.com/hhd-dev/hwfirm
 
-The compiled frontend includes the following third-party components. Their
-license texts are distributed in THIRD_PARTY_LICENSES, and the complete source
-for the LGPL component is distributed in THIRD_PARTY_SOURCES:
+The compiled frontend includes the following third-party component. Its license
+text and complete source are distributed in third_party/decky-api:
 
   Decky Loader API 1.1.3
   Copyright its contributors

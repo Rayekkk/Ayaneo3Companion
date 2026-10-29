@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 import time
 import support  # noqa: F401  (the Decky harness before any backend import)
-from _harness import owner
+from support import owner
 import main
 import display_backend
 import controller_backend
@@ -16,6 +16,12 @@ import ec_backend
 import companion_common
 from safe_settings import SettingsManager
 import safe_settings
+
+
+def state_of(test, response):
+    """The state a successful D2 answer carries."""
+    test.assertIs(response["ok"], True, response)
+    return response["state"]
 
 
 class ResponseTests(unittest.IsolatedAsyncioTestCase):
@@ -45,7 +51,7 @@ class ResponseTests(unittest.IsolatedAsyncioTestCase):
     async def test_controller_ack_does_not_probe_unrelated_services(self):
         wanted = {**self.controller, "color": "00ff00"}
         with patch.object(ec_backend, "read_charge_bypass", side_effect=AssertionError("unrelated EC read")),              patch.object(ec_backend, "module_presence", side_effect=AssertionError("unrelated EC read")):
-            response = await self.plugin.set_controller(wanted)
+            response = state_of(self, await self.plugin.set_controller(wanted))
         self.assertEqual(response["controller"], wanted)
         self.assertEqual(self.store.getSetting("controller"), wanted)
         response["controller"]["color"] = "ffffff"
@@ -73,15 +79,16 @@ class ResponseTests(unittest.IsolatedAsyncioTestCase):
                 responses = await asyncio.wait_for(asyncio.gather(*tasks), 3)
         self.assertEqual(acknowledged_before_read, 2,
                          "both writes must finish while the unrelated read is still blocked")
-        self.assertEqual(responses[-1]["controller"]["brightness"], 40)
-        self.assertEqual(responses[-1]["controller"]["ff_gain"], 20)
+        last = [state_of(self, response) for response in responses][-1]
+        self.assertEqual(last["controller"]["brightness"], 40)
+        self.assertEqual(last["controller"]["ff_gain"], 20)
 
     async def test_fast_ack_preserves_last_observed_capabilities(self):
         with patch.object(ec_backend, "read_charge_bypass", side_effect=OSError("EC busy")):
-            observed = await self.plugin.get_state()
+            observed = state_of(self, await self.plugin.get_state())
         self.assertFalse(observed["charge_bypass_supported"])
         with patch.object(ec_backend, "read_charge_bypass", side_effect=AssertionError("redundant probe")):
-            response = await self.plugin.set_vibration_gain(20)
+            response = state_of(self, await self.plugin.set_vibration_gain(20))
         self.assertFalse(response["charge_bypass_supported"])
         self.assertEqual(response["controller"]["ff_gain"], 20)
 
@@ -113,16 +120,16 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
 
     async def assert_loop_responsive(self, action, finishes_during_commit):
         entered, release = threading.Event(), threading.Event()
-        write = safe_settings.atomic_write_json
-        def stalled_write(path, payload):
+        write = safe_settings.dk_fs.write_json
+        def stalled_write(path, payload, *args, **kwargs):
             if path == self.store.path:
                 entered.set()
                 if not release.wait(3):
                     raise TimeoutError("test did not release the settings write")
-            return write(path, payload)
+            return write(path, payload, *args, **kwargs)
 
         tasks = []
-        with patch.object(safe_settings, "atomic_write_json", side_effect=stalled_write):
+        with patch.object(safe_settings.dk_fs, "write_json", side_effect=stalled_write):
             tasks.append(asyncio.create_task(self.plugin._offload(self.store.commit)))
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
@@ -157,5 +164,5 @@ class SettingsResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         off = dict(success=True, settings=dict(enabled=False))
         with patch.object(self.plugin._fan, "set_enabled", return_value=off) as set_enabled:
             result = await self.assert_loop_responsive(lambda: self.plugin.fan_set_enabled(False), True)
-        self.assertFalse(result["settings"]["enabled"])
+        self.assertEqual(result, {"ok": True, "state": {"settings": {"enabled": False}}})
         set_enabled.assert_awaited_once_with(False)

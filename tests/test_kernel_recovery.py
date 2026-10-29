@@ -11,9 +11,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _harness import install, owner
-if "main" not in sys.modules:
-    install()
+import support
+from support import owner
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
 import input_backend
@@ -63,7 +62,7 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(mock.patch.object(input_backend, "button_fix_installed",
                                                   side_effect=lambda: self.mapping.exists() and
                                                   self.mapping.read_bytes() == self.map_bytes))
-        self.stack.enter_context(mock.patch.object(companion_common.updater, "ssl_context"))
+        self.stack.enter_context(mock.patch.object(main.dk_net, "tls_context"))
         self.systemctl = self.stack.enter_context(mock.patch.object(main, "_systemctl"))
         self.stack.enter_context(mock.patch.object(controller_backend, "program_rear_buttons"))
         self.stack.enter_context(mock.patch.object(display_backend, "patch_published_edid", return_value=True))
@@ -177,8 +176,8 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
                               "screen_installed": False, "button_fix_installed": False}
         with mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})), \
              mock.patch.object(input_backend, "button_map_owned", side_effect=lambda path: path.exists()):
-            await self.plugin.set_screen_fix(True)
-            await self.plugin.set_button_fix(True)
+            self.assertIs((await self.plugin.set_screen_fix(True))["ok"], True)
+            self.assertIs((await self.plugin.set_button_fix(True))["ok"], True)
         reopened = SettingsManager("settings", str(self.store_dir))
         reopened.read()
         self.assertTrue(reopened.getSetting("screen_fix_enabled"))
@@ -187,19 +186,21 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.Plugin._state["screen_fix_enabled"])
 
         with mock.patch.object(main.Plugin, "get_state", new=mock.AsyncMock(return_value={})):
-            await self.plugin.set_screen_fix(False)
-            await self.plugin.set_button_fix(False)
+            self.assertIs((await self.plugin.set_screen_fix(False))["ok"], True)
+            self.assertIs((await self.plugin.set_button_fix(False))["ok"], True)
         reopened.read()
         self.assertFalse(main.Plugin._state["screen_fix_enabled"])
         self.assertFalse(reopened.getSetting("screen_fix_enabled"))
         self.assertFalse(reopened.getSetting("button_fix_enabled"))
 
+    def assert_refused(self, result, pattern="."):
+        support.assert_refused(self, result, pattern)
+
     async def test_display_file_is_restored_when_settings_commit_fails(self):
         self.plugin._closing = False
         main.Plugin._state = {"supported": True, "screen_installed": False}
         with mock.patch.object(self.store, "commit", side_effect=OSError("disk full")):
-            with self.assertRaisesRegex(RuntimeError, "previous hardware settings restored"):
-                await self.plugin.set_screen_fix(True)
+            self.assert_refused(await self.plugin.set_screen_fix(True), "previous hardware settings restored")
         self.assertFalse(self.lua.exists())
         self.assertIsNone(self.store.getSetting("screen_fix_enabled", None))
         self.assertFalse(main.Plugin._state["screen_installed"])
@@ -209,8 +210,7 @@ class BootRecoveryTests(unittest.IsolatedAsyncioTestCase):
         main.Plugin._state = {"supported": True, "controller": dict(controller_backend.DEFAULT_CONTROLLER),
                               "button_fix_installed": False}
         with mock.patch.object(self.store, "commit", side_effect=OSError("disk full")):
-            with self.assertRaisesRegex(RuntimeError, "previous bindings restored"):
-                await self.plugin.set_button_fix(True)
+            self.assert_refused(await self.plugin.set_button_fix(True), "previous bindings restored")
         self.assertFalse(self.mapping.exists())
         self.assertIsNone(self.store.getSetting("button_fix_enabled", None))
         self.assertFalse(main.Plugin._state["button_fix_installed"])

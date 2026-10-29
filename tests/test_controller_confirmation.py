@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import support  # noqa: F401  (the Decky harness before any backend import)
-from _harness import owner
+from support import owner
 import main
 import controller_backend
 from safe_settings import SettingsManager
@@ -103,8 +103,10 @@ class ControllerConfirmationTests(unittest.TestCase):
         self.exchange((controller_report(self.previous), b"", b"",
                        controller_report(self.previous), controller_report(self.previous)))
         before = Path(store.path).read_bytes()
-        with self.assertRaisesRegex(RuntimeError, "previous hardware settings restored"):
-            asyncio.run(main.Plugin().set_controller(self.wanted))
+        response = asyncio.run(main.Plugin().set_controller(self.wanted))
+        self.assertEqual(set(response), {"ok", "error"})
+        self.assertIs(response["ok"], False)
+        self.assertRegex(response["error"], "previous hardware settings restored")
         self.assertEqual(Path(store.path).read_bytes(), before)
         self.assertEqual(store.getSetting("controller"), self.previous)
         self.assertEqual(state["controller"], self.previous)

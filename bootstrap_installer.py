@@ -3,17 +3,33 @@
 import argparse
 from contextlib import contextmanager
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import shlex
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
 
-from lego_updater import ARCHIVE_ROOT, MAX_DOWNLOAD, Updater, _version
+ARCHIVE_ROOT = "Ayaneo3Companion"
+MAX_DOWNLOAD = 32 * 1024 * 1024
+# The ZIP check is the plugin updater's (dk_update) and the modules it imports.
+VALIDATOR = ("dk_update.py", "dk_net.py", "dk_fs.py", "dk_process.py")
+# Every file the plugin needs to start, so neither the installer nor the updater installs a broken release.
+REQUIRED = (
+    "main.py", "plugin.json", "package.json", "dist/index.js", *VALIDATOR, "dk_rpc.py",
+    "safe_settings.py", "quality_runtime.py", "lego_updater.py", "fan_backend.py", "fan_sleep.py", "fan_guardian.py",
+    "fan_hwmon.py", "fan_policy.py", "active_app.py", "tdp_backend.py", "display_script_io.py", "module_runtime.py",
+    "diagnostics.py", "system_process.py", "input_backend.py", "display_backend.py", "audio_backend.py",
+    "controller_backend.py", "ec_backend.py", "companion_common.py",
+    "assets/ayaneo.ayaneo3.oled.lua", "assets/ayaneo3-companion.yaml",
+)
+_VERSION = re.compile(r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})")
 
 LOADER = "plugin_loader.service"
 INPUT = "inputplumber.service"
@@ -175,17 +191,47 @@ def _deployment_lock(root, timeout=LOCK_TIMEOUT_SECONDS):
         raise RuntimeError("Safe deployment locking is unavailable on this platform")
 
 
+def _validator(archive):
+    """dk_update, from beside this file or else from the same ZIP: a bootstrap.sh of 1.2/1.3 extracts only this
+    installer and lego_updater.py into its private folder."""
+    here = Path(__file__).resolve().parent
+    if not all((here / name).is_file() for name in VALIDATOR):
+        with zipfile.ZipFile(archive) as payload:
+            for name in VALIDATOR:
+                entry = payload.getinfo(f"{ARCHIVE_ROOT}/{name}")
+                if entry.is_dir() or not 0 < entry.file_size <= 1024 * 1024:
+                    raise ValueError(f"Invalid installer file: {name}")
+                (here / name).write_bytes(payload.read(entry))
+    if str(here) not in sys.path:
+        sys.path.insert(0, str(here))
+    import dk_update
+    return dk_update
+
+
+def _check(archive, data, version):
+    """ValueError unless data (the bytes about to be installed) is a complete Companion package at version."""
+    dk_update = _validator(archive)
+    updates = dk_update.Updates(repo="Rayekkk/Ayaneo3Companion", folder=ARCHIVE_ROOT,
+                                plugin_name="AYANEO 3 Companion", package_name="ayaneo3companion",
+                                flags=["root"], current="0.0.0", home="/nonexistent", required=REQUIRED)
+    try:
+        updates.validate(data, version)
+    except dk_update.UpdateError as error:
+        raise ValueError(str(error)) from error
+
+
 def validate_archive(archive):
     if not 0 < Path(archive).stat().st_size <= MAX_DOWNLOAD:
         raise ValueError("The plugin ZIP exceeds the download size limit")
-    with Path(archive).open("rb") as stream:
-        with zipfile.ZipFile(stream) as payload:
-            if payload.getinfo(f"{ARCHIVE_ROOT}/plugin.json").file_size > 65536:
-                raise ValueError("The release manifest is too large")
-            manifest = json.loads(payload.read(f"{ARCHIVE_ROOT}/plugin.json"))
-        version = manifest.get("version")
-        _version(version)
-        Updater._validate_archive(stream, version)
+    data = Path(archive).read_bytes()
+    with zipfile.ZipFile(io.BytesIO(data)) as payload:
+        if payload.getinfo(f"{ARCHIVE_ROOT}/plugin.json").file_size > 65536:
+            raise ValueError("The release manifest is too large")
+        manifest = json.loads(payload.read(f"{ARCHIVE_ROOT}/plugin.json"))
+    version = manifest.get("version")
+    if not isinstance(version, str) or not _VERSION.fullmatch(version):
+        raise ValueError("The release version must use stable X.Y.Z numbering.")
+    _check(archive, data, version)
     return version
 
 
@@ -248,10 +294,10 @@ def _install_locked(archive, version, root, input_root, services):
     recoverable = True
     try:
         # Validate/extract from the same file before stopping any service.
-        with Path(archive).open("rb") as stream:
-            Updater._validate_archive(stream, version)
-            with zipfile.ZipFile(stream) as payload:
-                payload.extractall(transaction)
+        data = Path(archive).read_bytes()  # checked and extracted from the same bytes
+        _check(archive, data, version)
+        with zipfile.ZipFile(io.BytesIO(data)) as payload:
+            payload.extractall(transaction)
         for path in stage.rglob("*"):
             path.chmod(0o755 if path.is_dir() else 0o644)
         stage.chmod(0o755)

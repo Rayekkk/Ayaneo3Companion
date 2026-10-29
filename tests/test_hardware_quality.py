@@ -1,7 +1,6 @@
 """Failure-path tests; every device, sysfs path and command is isolated."""
 import subprocess
 import select
-import urllib.request
 import hashlib
 import io
 import os
@@ -15,10 +14,9 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _harness import install, owner
-if "main" not in sys.modules:
-    install()
+from support import owner
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import dk_fs
 import main
 import display_backend
 import audio_backend
@@ -52,7 +50,7 @@ class HardwareQualityTests(unittest.TestCase):
         old_temporary.write_bytes(b"unrelated")
         with mock.patch.object(os, "replace", side_effect=OSError("disk failure")):
             with self.assertRaisesRegex(OSError, "disk failure"):
-                companion_common.atomic_write_bytes(target, b"replacement")
+                dk_fs.write_atomic(target, b"replacement", 0o644)
         self.assertEqual(target.read_bytes(), b"original")
         self.assertEqual(old_temporary.read_bytes(), b"unrelated")
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), [".config.yaml.tmp", "config.yaml"])
@@ -66,7 +64,7 @@ class HardwareQualityTests(unittest.TestCase):
             link.symlink_to(victim)
         except (OSError, NotImplementedError):
             self.skipTest("symlink creation is unavailable")
-        companion_common.atomic_write_bytes(target, b"replacement")
+        dk_fs.write_atomic(target, b"replacement", 0o644)
         self.assertEqual(target.read_bytes(), b"replacement")
         self.assertEqual(victim.read_bytes(), b"unrelated")
         self.assertTrue(link.is_symlink())
@@ -266,16 +264,6 @@ class HardwareQualityTests(unittest.TestCase):
              mock.patch.object(ec_backend, "read_charge_bypass", side_effect=AssertionError("unlocked second read")):
             ec_backend.write_charge_bypass(True)
         self.assertEqual(path.read_bytes()[ec_backend.EC_CHARGE_REGISTER], ec_backend.EC_CHARGE_INHIBIT)
-
-    def test_download_redirect_is_rejected_before_redirect_request_is_created(self):
-        handler = companion_common._HardwareDownloadRedirect()
-        request = urllib.request.Request(tdp_backend.RYZENADJ_URL)
-        with mock.patch.object(urllib.request.HTTPRedirectHandler, "redirect_request") as redirect:
-            for url in ("http://github.com/file", "https://127.0.0.1/file", "https://github.com:8443/file",
-                        "https://user:secret@github.com/file", "https://github.com.attacker.invalid/file"):
-                with self.subTest(url=url), self.assertRaises(RuntimeError):
-                    handler.redirect_request(request, None, 302, "Found", {}, url)
-            redirect.assert_not_called()
 
     def test_hid_does_not_accept_matching_opcode_in_truncated_report(self):
         complete = bytearray(64)

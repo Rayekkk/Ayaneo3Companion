@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import support  # noqa: F401  (the Decky harness before any backend import)
-from _harness import owner
+from support import owner
 import main
 import display_backend
 import controller_backend
@@ -43,6 +43,9 @@ class ControllerFeedbackTests(unittest.TestCase):
     def apply_gain(self, value):
         self.hardware["gain"] = value
 
+    def assert_refused(self, result, pattern="."):
+        support.assert_refused(self, result, pattern)
+
     def assert_controller_restored(self):
         self.assertEqual(main.Plugin._state["controller"], self.previous)
         self.assertEqual(self.store.getSetting("controller"), self.previous)
@@ -58,7 +61,7 @@ class ControllerFeedbackTests(unittest.TestCase):
             self.assertEqual(main.Plugin._state["controller"], self.previous)
             commit()
         with patch.object(self.store, "commit", side_effect=verify) as saved:
-            asyncio.run(self.plugin.set_controller(self.wanted))
+            self.assertIs(asyncio.run(self.plugin.set_controller(self.wanted))["ok"], True)
         saved.assert_called_once()
         self.gain.assert_called_once_with(60)
         self.assertEqual(main.Plugin._state["controller"], self.wanted)
@@ -71,33 +74,32 @@ class ControllerFeedbackTests(unittest.TestCase):
             if len(calls) == 1:
                 raise OSError("evdev write failed after applying")
         self.gain.side_effect = fail
-        with patch.object(self.store, "commit") as saved, self.assertRaisesRegex(RuntimeError, "restored"):
-            asyncio.run(self.plugin.set_controller(self.wanted))
+        with patch.object(self.store, "commit") as saved:
+            self.assert_refused(asyncio.run(self.plugin.set_controller(self.wanted)), "restored")
         saved.assert_not_called()
         self.assertEqual(calls, [60, 100])
         self.assert_controller_restored()
 
     def test_commit_failure_restores_firmware_and_gain(self):
-        with patch.object(self.store, "commit", side_effect=OSError("disk full")), self.assertRaisesRegex(RuntimeError, "restored"):
-            asyncio.run(self.plugin.set_controller(self.wanted))
+        with patch.object(self.store, "commit", side_effect=OSError("disk full")):
+            self.assert_refused(asyncio.run(self.plugin.set_controller(self.wanted)), "restored")
         self.assertEqual([call.args[0] for call in self.gain.call_args_list], [60, 100])
         self.assert_controller_restored()
 
     def test_firmware_rollback_failure_still_attempts_old_gain(self):
         self.firmware.side_effect = OSError("HID unavailable")
-        with self.assertRaisesRegex(RuntimeError, "hardware rollback failed"):
-            asyncio.run(self.plugin.set_controller(self.wanted))
+        self.assert_refused(asyncio.run(self.plugin.set_controller(self.wanted)), "hardware rollback failed")
         self.gain.assert_called_once_with(100)
         self.assertEqual(self.store.getSetting("controller"), self.previous)
 
     def test_feedback_rpc_uses_same_combined_transaction(self):
-        asyncio.run(self.plugin.set_controller_with_vibration_feedback(self.wanted))
+        self.assertIs(asyncio.run(self.plugin.set_controller_with_vibration_feedback(self.wanted))["ok"], True)
         self.firmware.assert_called_once_with(self.wanted, True, self.previous["vibration"], False)
         self.gain.assert_called_once_with(60)
         self.assertEqual(self.store.getSetting("controller"), self.wanted)
 
     def test_unchanged_gain_does_not_require_an_evdev_device(self):
-        asyncio.run(self.plugin.set_controller({**self.previous, "color": "00ff00"}))
+        self.assertIs(asyncio.run(self.plugin.set_controller({**self.previous, "color": "00ff00"}))["ok"], True)
         self.gain.assert_not_called()
 
     def snapshot_fixture(self):
@@ -153,12 +155,11 @@ class ControllerFeedbackTests(unittest.TestCase):
         power.assert_not_called()
 
     def test_update_rpc_passes_selected_version_and_rejects_no_selection(self):
-        updater = Mock()
-        updater.download.return_value = {"success": False, "error": "latest release changed"}
-        with patch.object(companion_common, "updater", updater):
-            result = asyncio.run(self.plugin.perform_update("1.2.1"))
-            self.assertFalse(result["success"])
-            updater.download.assert_called_once_with("1.2.1")
-            with self.assertRaises(ValueError):
-                asyncio.run(self.plugin.perform_update(None))
-            updater.download.assert_called_once_with("1.2.1")
+        updates = Mock()
+        updates.download.return_value = {"ok": False, "error": "latest release changed"}
+        self.plugin._updates = updates
+        result = asyncio.run(self.plugin.perform_update("1.2.1"))
+        self.assertEqual(result, {"ok": False, "error": "latest release changed"})
+        updates.download.assert_called_once_with("1.2.1")
+        self.assert_refused(asyncio.run(self.plugin.perform_update(None)), "Select a release version")
+        updates.download.assert_called_once_with("1.2.1")
