@@ -6,8 +6,8 @@ import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, Game
   DropdownItem, Dropdown, DialogHeader, DialogBody, DialogLabel,
   DialogFooter, DialogButton, ModalRoot, showModal, type GamepadEvent } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
-import type { Result } from "./result";
-import { errorText, infoRow, unwrap } from "./shared";
+import { errorText, type Result } from "./result";
+import { infoRow, unwrap } from "./shared";
 import { curveName as title, editPoint, fanStatus, nudgeSpeed, pctForRpm, pointText, saveLabel, speedText,
   type Curve, type FanLimits } from "./fan_model";
 

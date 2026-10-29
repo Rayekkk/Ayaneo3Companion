@@ -5,7 +5,7 @@
 import { useQuickAccessVisible } from "@decky/api";
 import { ButtonItem, PanelSection, PanelSectionRow, SliderField, Spinner, ToggleField } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { errorText } from "./shared";
+import { errorText } from "./result";
 import {
   boostNote, boostUsable, editorControls, EPP_NAMED_VALUES, EPP_PREFERENCE, eppLabel, eppNote, eppPercent, eppTitle,
   eppUnavailable, eppValue, type CpuPowerControls,

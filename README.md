@@ -80,6 +80,20 @@ in one folder and double-click the launcher.
 Companion keeps its settings across updates. Only stable releases are offered, and the ZIP's
 version, size, SHA-256 digest and contents are checked before it is saved.
 
+### Uninstalling
+
+Uninstall **AYANEO 3 Companion** in **Decky Settings → Plugins**. Before it stops, Companion
+hands the hardware back: the fan returns to the console's automatic curve, charge bypass is
+turned off, CPU Boost and EPP return to the values they had before Companion changed them,
+lighting and vibration return to what Companion found when it first ran, LC1/RC1 are cleared,
+and its key-binding map, speaker tuning path and OLED display definition are removed. Decky
+handles an update as uninstall plus install, so Companion never deletes your settings on its
+own: they stay in `~/homebrew/settings/Ayaneo3Companion/`, its root-only files in
+`/var/lib/ayaneo3companion-tdp/`, `/var/lib/ayaneo3-companion/` and
+`/var/log/ayaneo3companion/`, and its backups in `/home/.ayaneo3companion-backups/`. Delete
+those folders after uninstalling for a full cleanup. A speaker calibration stays in the
+console's firmware; keep the backups folder if you may want the original values back.
+
 ## Quick start
 
 Open Companion in Decky. **Hardware Controls** shows a short status for each module. Select a

@@ -28,39 +28,60 @@ All notable changes to AYANEO 3 Companion, newest first.
 This release brings LegionGo2Companion's design and safety work to AYANEO 3
 Companion, including its TDP Control and Fan Control.
 
-### TDP Control
+### Added
 
-- **New presets measured on the console:** Silent 10/15/20, Balanced 15/25/30
-  and Performance 30/43/45 W (SPL/SPPT/FPPT). Performance uses the ceilings the
-  SMU actually keeps; Custom goes from 5 W up to them. Minimum, Low power and Max
-  are gone: Low power becomes Silent, the others keep their limits as Custom.
-- **Game profiles like on the Legion:** per game, optionally with separate
-  battery and charger values, and Global keeps a game's profile unused instead
-  of deleting it.
-- **CPU energy preference (EPP)** next to CPU Boost, globally or per game and
-  charger state. Uninstall restores both.
-- **Limits that stay put:** the firmware lowers SPL to 28 W whenever the charger
-  is plugged in or unplugged; Companion now writes the limits again after every
-  change and after sleep.
-- RyzenAdj is kept outside the plugin folder, so updates no longer download it
-  again. **Show details** shows the package power draw.
+- **TDP Control:**
+  - **Game profiles like on the Legion:** per game, optionally with separate
+    battery and charger values, and Global keeps a game's profile unused instead
+    of deleting it.
+  - **CPU energy preference (EPP)** next to CPU Boost, globally or per game and
+    charger state. Uninstall restores both.
+- **Fan Control:**
+  - **Your own fan curve:** eight points from 0 to 100°C in the fan's own percent,
+    three starting curves (Silent, Balanced, Aggressive) and a full-screen editor.
+    The graph shows the live temperature and measured RPM. Below 10% the fan
+    stops; the 100°C point never goes below 40%.
+  - **A curve per TDP preset**, if you want: Silent, Balanced, Performance and
+    Custom can each use their own curve, others use the global one.
+  - **Safety from the Legion:** a separate watchdog returns the fan to the
+    console's automatic curve if Companion stops, crashes or the console goes to
+    sleep, and at 100°C sets full speed even if Companion is frozen. A fan that
+    does not spin up or stop as asked turns Fan Control off with the reason.
 
-### Fan Control
+### Changed
 
-- **Your own fan curve:** eight points from 0 to 100°C in the fan's own percent,
-  three starting curves (Silent, Balanced, Aggressive) and a full-screen editor.
-  The graph shows the live temperature and measured RPM. Below 10% the fan
-  stops; the 100°C point never goes below 40%.
-- **A curve per TDP preset**, if you want: Silent, Balanced, Performance and
-  Custom can each use their own curve, others use the global one.
-- **Safety from the Legion:** a separate watchdog returns the fan to the
-  console's automatic curve if Companion stops, crashes or the console goes to
-  sleep, and at 100°C sets full speed even if Companion is frozen. A fan that
-  does not spin up or stop as asked turns Fan Control off with the reason.
-- The fixed 60–100% manual speed and its systemd timer are gone. A manual speed
-  left by an earlier version is returned to automatic.
+- **TDP Control:**
+  - **New presets measured on the console:** Silent 10/15/20, Balanced 15/25/30
+    and Performance 30/43/45 W (SPL/SPPT/FPPT). Performance uses the ceilings the
+    SMU actually keeps; Custom goes from 5 W up to them. Minimum, Low power and Max
+    are gone: Low power becomes Silent, the others keep their limits as Custom.
+  - **Limits that stay put:** the firmware lowers SPL to 28 W whenever the charger
+    is plugged in or unplugged; Companion now writes the limits again after every
+    change and after sleep.
+  - RyzenAdj is kept outside the plugin folder, so updates no longer download it
+    again. **Show details** shows the package power draw.
+- **Restart Gaming Mode** from the OLED Display page when gamescope has not
+  loaded the current definition yet.
+- **Navigation like LegionGo2Companion:** icons on every row, the row you came
+  from is selected again, and a page stays open when Quick Access closes or a
+  menu opens. Status reads pause while the Companion tab is hidden.
+- **Clearer stale data:** each row says how old its values are while a refresh
+  is retried. RGB is now called Lighting.
+- **Private diagnostic log** in `/var/log/ayaneo3companion`, with repeated
+  messages limited to one a minute; Decky's own plugin logs are pruned to the
+  newest ten.
+- Helper programs no longer inherit Decky's bundled libraries, and Decky 3.2's
+  stop hang no longer delays restoring the hardware.
+- **Lighter background checks:** the monitors no longer rescan every device
+  twice a second, and the controller's memory is written once per change.
 
-### Fixes
+### Removed
+
+- **Fan Control:**
+  - The fixed 60–100% manual speed and its systemd timer are gone. A manual speed
+    left by an earlier version is returned to automatic.
+
+### Fixed
 
 - **TM button pressed by accident.** TM Guard now recognises the mode the TM
   button switches to and brings the controller back on its own in about ten
@@ -103,29 +124,12 @@ Companion, including its TDP Control and Fan Control.
 - **Reset Magic Modules** works again after a module was pushed back in after
   Eject.
 
-### Improvements
-
-- **Restart Gaming Mode** from the OLED Display page when gamescope has not
-  loaded the current definition yet.
-- **Navigation like LegionGo2Companion:** icons on every row, the row you came
-  from is selected again, and a page stays open when Quick Access closes or a
-  menu opens. Status reads pause while the Companion tab is hidden.
-- **Clearer stale data:** each row says how old its values are while a refresh
-  is retried. RGB is now called Lighting.
-- **Private diagnostic log** in `/var/log/ayaneo3companion`, with repeated
-  messages limited to one a minute; Decky's own plugin logs are pruned to the
-  newest ten.
-- Helper programs no longer inherit Decky's bundled libraries, and Decky 3.2's
-  stop hang no longer delays restoring the hardware.
-- **Lighter background checks:** the monitors no longer rescan every device
-  twice a second, and the controller's memory is written once per change.
-
 ## [1.2.0] - 2026-10-10
 
 This update adds fan control and improves how Companion handles everyday
 adjustments, game changes, and temporary hardware problems.
 
-### New features
+### Added
 
 - **Fan Control:** see the fan's speed in RPM, keep the console's automatic
   fan curve, or choose a manual speed from 60% to 100%. Available when supported
@@ -134,7 +138,7 @@ adjustments, game changes, and temporary hardware problems.
   if Companion stops responding. Stopping the plugin or resuming the console
   also returns the fan to Auto.
 
-### Improvements
+### Changed
 
 - **Faster startup and smoother menus.** Speaker checks, slow settings saves,
   and other background work are less likely to hold up unrelated controls.
@@ -148,81 +152,70 @@ adjustments, game changes, and temporary hardware problems.
   limits, and an update installs the exact version shown in the menu.
 - **Broader kernel compatibility.** Companion uses newer AYANEO system controls
   when available and keeps the fallback needed by older SteamOS kernels.
+- **Quality checks:**
+  - Expanded regression tests cover rapid adjustments, navigation, game changes,
+    temporary hardware failures, fan recovery, and failed installations.
+  - Automated checks cover Linux and Windows, frontend builds, dependencies, and
+    install-package contents. Unused frontend dependencies were removed.
 
-### Fixes
+### Fixed
 
-#### TDP and game profiles
-
-- Changing games quickly no longer lets the previous game's response replace
-  the current game's preset or power limits.
-- Saving or deleting a profile while reopening the menu no longer brings back
-  the old preset or incorrectly re-enables Per Game Profile.
-- Custom TDP values and the selected preset survive closing and reopening the
-  menu for the same game. Failed preset changes also preserve unsaved edits.
-- Rapid slider changes followed by Apply use the latest values, including the
-  extra power allowed for short boosts.
-- When PowerStation controls TDP, Companion explains why its own TDP controls
-  are unavailable. Pending game profiles are retried when PowerStation releases
-  control, and other hardware controls remain usable.
-- A temporary profile lookup failure retries automatically. Its error clears
-  after recovery without hiding an unrelated failed action.
-
-#### Fan and battery
-
-- Auto remains available during slow TDP or audio operations and after a
-  temporary fan status failure. Auto status can also be read on kernels that
-  do not allow reading manual speed while automatic control is active.
-- Rapid manual fan changes and delayed responses no longer interfere with
-  monitoring the latest setting. The safety timer can still restore Auto if
-  Companion gets stuck, and retries when the fan interface is unavailable.
-- Moving the manual fan slider and immediately pressing Apply uses the latest
-  speed rather than the previous value.
-- Battery read failures no longer leave a spinner running indefinitely or
-  silently present old readings as current. Automatic refresh clears the error
-  once readings are available again.
-- Charging bypass is checked independently of TDP, including after plugging in
-  a charger or resuming the console.
-
-#### Controller, RGB, and vibration
-
-- Fast changes to color, brightness, vibration strength, and vibration gain
-  (FF Gain) no longer overwrite one another. The latest choices are kept when
-  leaving the page.
-- Failed controller changes restore the previous settings. Vibration tests
-  wait for pending adjustments and do not run with unconfirmed values.
-- Saved FF Gain is restored after startup, resume, or controller reconnection.
-  Recovery waits for the built-in controller instead of using an external pad.
-- Magic Modules recover their power, RGB, and vibration settings more reliably
-  after removal, reinsertion, or startup with the controller powered off.
-- Unavailable controller features are clearly marked and recover when the
-  required interface returns.
-
-#### Audio, display, and buttons
-
-- Speaker setup no longer delays unrelated controls. Recalibration becomes
-  available after both speakers are confirmed ready.
-- The OLED fix and key-binding switches remember your choice and restore their
-  system files when a SteamOS update replaces them.
-- InputPlumber is reloaded only when its button mapping needs to change.
-
-#### Installation, updates, and reliability
-
-- The desktop installer handles folders with spaces and special characters.
-- Installation finds the correct Decky folder, checks the full update package,
-  and verifies that the required services start successfully.
-- Failed installations restore the previous plugin and button mappings. If
-  recovery cannot finish safely, the backup files are kept for repair.
-- Incomplete update packages are rejected, and concurrent installations cannot
-  replace each other's files.
-- Settings and calibration tools better protect existing files from accidental
-  replacement. Plugin shutdown also handles unfinished work more reliably.
-
-### Quality checks
-
-- Expanded regression tests cover rapid adjustments, navigation, game changes,
-  temporary hardware failures, fan recovery, and failed installations.
-- Automated checks cover Linux and Windows, frontend builds, dependencies, and
-  install-package contents. Unused frontend dependencies were removed.
+- **TDP and game profiles:**
+  - Changing games quickly no longer lets the previous game's response replace
+    the current game's preset or power limits.
+  - Saving or deleting a profile while reopening the menu no longer brings back
+    the old preset or incorrectly re-enables Per Game Profile.
+  - Custom TDP values and the selected preset survive closing and reopening the
+    menu for the same game. Failed preset changes also preserve unsaved edits.
+  - Rapid slider changes followed by Apply use the latest values, including the
+    extra power allowed for short boosts.
+  - When PowerStation controls TDP, Companion explains why its own TDP controls
+    are unavailable. Pending game profiles are retried when PowerStation releases
+    control, and other hardware controls remain usable.
+  - A temporary profile lookup failure retries automatically. Its error clears
+    after recovery without hiding an unrelated failed action.
+- **Fan and battery:**
+  - Auto remains available during slow TDP or audio operations and after a
+    temporary fan status failure. Auto status can also be read on kernels that
+    do not allow reading manual speed while automatic control is active.
+  - Rapid manual fan changes and delayed responses no longer interfere with
+    monitoring the latest setting. The safety timer can still restore Auto if
+    Companion gets stuck, and retries when the fan interface is unavailable.
+  - Moving the manual fan slider and immediately pressing Apply uses the latest
+    speed rather than the previous value.
+  - Battery read failures no longer leave a spinner running indefinitely or
+    silently present old readings as current. Automatic refresh clears the error
+    once readings are available again.
+  - Charging bypass is checked independently of TDP, including after plugging in
+    a charger or resuming the console.
+- **Controller, RGB, and vibration:**
+  - Fast changes to color, brightness, vibration strength, and vibration gain
+    (FF Gain) no longer overwrite one another. The latest choices are kept when
+    leaving the page.
+  - Failed controller changes restore the previous settings. Vibration tests
+    wait for pending adjustments and do not run with unconfirmed values.
+  - Saved FF Gain is restored after startup, resume, or controller reconnection.
+    Recovery waits for the built-in controller instead of using an external pad.
+  - Magic Modules recover their power, RGB, and vibration settings more reliably
+    after removal, reinsertion, or startup with the controller powered off.
+  - Unavailable controller features are clearly marked and recover when the
+    required interface returns.
+- **Audio, display, and buttons:**
+  - Speaker setup no longer delays unrelated controls. Recalibration becomes
+    available after both speakers are confirmed ready.
+  - The OLED fix and key-binding switches remember your choice and restore their
+    system files when a SteamOS update replaces them.
+  - InputPlumber is reloaded only when its button mapping needs to change.
+- **Installation, updates, and reliability:**
+  - The desktop installer handles folders with spaces and special characters.
+  - Installation finds the correct Decky folder, checks the full update package,
+    and verifies that the required services start successfully.
+  - Failed installations restore the previous plugin and button mappings. If
+    recovery cannot finish safely, the backup files are kept for repair.
+  - Incomplete update packages are rejected, and concurrent installations cannot
+    replace each other's files.
+  - Settings and calibration tools better protect existing files from accidental
+    replacement. Plugin shutdown also handles unfinished work more reliably.
 
 ## [1.1.0] - 2026-09-06
 
@@ -248,13 +241,14 @@ adjustments, game changes, and temporary hardware problems.
 - Verify hardware write readbacks, recover partial button-map changes and back
   off repeated interface failures while retaining resume and drift recovery.
 
-### Internal
+### Changed
 
-- Add frontend lifecycle regression tests and isolated backend failure tests.
-- Check Python 3.10 on Linux, Python 3.13 on Windows, frontend types, the production
-  build and package contents in GitHub Actions using pinned action revisions.
-- Synchronize release metadata and add package payload validation. Existing
-  functions, defaults, button mappings and the 35/37 W Custom limits are unchanged.
+- **Internal:**
+  - Add frontend lifecycle regression tests and isolated backend failure tests.
+  - Check Python 3.10 on Linux, Python 3.13 on Windows, frontend types, the production
+    build and package contents in GitHub Actions using pinned action revisions.
+  - Synchronize release metadata and add package payload validation. Existing
+    functions, defaults, button mappings and the 35/37 W Custom limits are unchanged.
 
 ## [1.0.2] - 2026-08-25
 
@@ -274,11 +268,12 @@ adjustments, game changes, and temporary hardware problems.
   Unknown existing definitions now require explicit replacement confirmation and
   are backed up and verified before the Companion definition is installed.
 
-### Internal
+### Changed
 
-- Backend tests up to 73 from 55, covering controller report parsing, drift and
-  resume recovery, physical rumble-device selection, concurrent setting writes,
-  Magic Module eject races and safe OLED definition replacement.
+- **Internal:**
+  - Backend tests up to 73 from 55, covering controller report parsing, drift and
+    resume recovery, physical rumble-device selection, concurrent setting writes,
+    Magic Module eject races and safe OLED definition replacement.
 
 ## [1.0.1] - 2026-08-24
 
@@ -301,13 +296,14 @@ adjustments, game changes, and temporary hardware problems.
 - Move display-definition removal off Decky's event loop and refuse to remove
   definitions not owned by AYANEO 3 Companion.
 
-### Internal
+### Changed
 
-- Backend tests up to 55 from 48, covering CPU Boost persistence, complete HID
-  transaction retries, kernel-driver arbitration, safe Magic Module eject
-  timeouts and OLED display-definition ownership.
+- **Internal:**
+  - Backend tests up to 55 from 48, covering CPU Boost persistence, complete HID
+    transaction retries, kernel-driver arbitration, safe Magic Module eject
+    timeouts and OLED display-definition ownership.
 
-## 1.0.0 - 2026-08-23
+## [1.0.0] - 2026-08-23
 
 ### Added
 

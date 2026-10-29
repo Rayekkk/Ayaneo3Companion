@@ -41,7 +41,7 @@ NETWORK_CALLS = frozenset({'check_for_updates', 'perform_update'})
 # TDP Control serialises its own changes (tdp_backend._mutation_lock): never queue its
 # foreground-game heartbeat or panel lease behind a slow controller or audio write.
 TDP_READS = frozenset({'is_ready', 'get_settings', 'get_cpu_power_controls', 'get_power_source',
-                       'get_game_profile', 'list_game_profiles', 'get_caps', 'get_tdp_info'})
+                       'get_game_profile', 'get_caps', 'get_tdp_info'})
 TDP_CALLS = TDP_READS | {'set_cpu_boost', 'set_epp', 'retry_helper', 'set_advanced_tdp_control',
                          'set_game_ac_profile', 'delete_game_profile', 'set_game_profile_active',
                          'set_plugin_enabled', 'set_panel_active', 'reapply', 'set_active_app', 'apply_tdp'}

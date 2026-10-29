@@ -155,7 +155,7 @@ def _fallback(text, level):
             logger = decky.logger
         getattr(logger, level if level != 'critical' else 'error')(text)
     except Exception:
-        pass
+        pass  # The last-resort logger itself failed: there is nowhere left to report it.
 
 
 def event(component, action, /, *, level='info', error=None, repeat=0, **fields):
@@ -214,7 +214,7 @@ def _record(component, action, level, error, repeat, fields):
             # hardware/asyncio transaction; configure() writes these later.
             _early.append((text, level))
     except Exception:
-        pass
+        pass  # Diagnostics never raise into the hardware transaction that records them.
 
 
 def transition(component, action, state, /, *, level='info', error=None, initial=True, **fields):
@@ -249,7 +249,7 @@ def transition(component, action, state, /, *, level='info', error=None, initial
             fields = {**fields, 'repeated': repeated}
         event(component, action, level=level, error=error, **{**fields, 'status': str(state)})
     except Exception:
-        pass
+        pass  # Diagnostics never raise into the hardware transaction that records them.
 
 
 @contextlib.contextmanager
@@ -453,7 +453,7 @@ def _flush_early():
         try:
             _sink(text, level)
         except Exception:
-            pass
+            pass  # One early record is lost; the sink that failed is the only place to report it.
 
 
 def close():
@@ -464,7 +464,7 @@ def close():
         try:
             writer.close()
         except Exception:
-            pass
+            pass  # Shutting down: the sink is already detached, so the failure cannot be recorded.
     if _asyncio_filter is not None:
         logging.getLogger('asyncio').removeFilter(_asyncio_filter)
         _asyncio_filter = None

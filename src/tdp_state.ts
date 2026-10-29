@@ -4,7 +4,8 @@
 
 import { addEventListener, removeEventListener, useQuickAccessVisible } from "@decky/api";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { errorText, unwrap } from "./shared";
+import { errorText } from "./result";
+import { unwrap } from "./shared";
 import {
   absolute, capsState, FALLBACK_MAX, FALLBACK_MIN, fromAbsolute, PRESETS, resolvedPreset, runningNow, simpleTuning,
   type Caps, type CapsInfo, type PresetKey, type PresetTable, type RunningLimits, type Tuning,

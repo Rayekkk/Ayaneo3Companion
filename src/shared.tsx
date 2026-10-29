@@ -28,10 +28,6 @@ export const detailsRows = (shown: boolean, toggle: () => void, rows: Array<[Rea
   {shown && rows.map(([label, description], index) => <Fragment key={index}>{infoRow(label, description)}</Fragment>)}
 </>;
 
-/** An Error's message; anything else as the fallback, or as text when there is none. */
-export const errorText = (error: unknown, fallback?: string) =>
-  error instanceof Error ? error.message : fallback ?? String(error);
-
 /** The state of a D2 answer; a refusal throws its message, as the call rejected before the D2 contract. */
 export const unwrap = <T,>(call: Promise<Result<T>>): Promise<T> => call.then(r => {
   if (!r?.ok) throw new Error(r?.error || "Unknown error");
@@ -86,10 +82,10 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
     if (typeof reg?.unregister === "function") return () => reg.unregister();
     return null;
   };
-  const isSleepManager = (e: any) =>
+  const isSleepManager = (e: unknown) =>
     !!e && typeof e === "object" &&
-    (typeof e.RegisterForNotifyResumeFromSuspend === "function" ||
-      typeof e.NotifyResumeFromSuspend === "function");
+    (typeof (e as SteamSleepManager).RegisterForNotifyResumeFromSuspend === "function" ||
+      typeof (e as SteamSleepManager).NotifyResumeFromSuspend === "function");
 
   try {
     const mgr: SteamSleepManager | undefined = (window as { SleepManager?: SteamSleepManager }).SleepManager

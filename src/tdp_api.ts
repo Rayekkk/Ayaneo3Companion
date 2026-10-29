@@ -4,8 +4,7 @@
 
 import { addEventListener, callable, removeEventListener, toaster, useQuickAccessVisible } from "@decky/api";
 import { useEffect, useState } from "react";
-import { settle, type Result } from "./result";
-import { errorText } from "./shared";
+import { errorText, settle, type Result } from "./result";
 import {
   fromAbsolute, resolvedPreset, simpleTuning,
   type Caps, type CapsInfo, type CpuPowerControls, type PresetTable, type RunningLimits, type TdpInfo,
@@ -74,7 +73,7 @@ export const notify = (title: string, body: string) => {
 };
 
 export const notifyFailure = (title: string, err: unknown) => {
-  const body = errorText(err ?? "Unknown error");
+  const body = errorText(err);
   console.error("[ayaneo3companion] tdp.operation_failed");
   notify(title, body);
 };

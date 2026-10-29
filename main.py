@@ -518,9 +518,6 @@ class Plugin:
     async def get_game_profile(self, app_id):
         return dk_rpc.ok(await self._tdp.get_game_profile(app_id))
 
-    async def list_game_profiles(self):
-        return dk_rpc.ok(await self._tdp.list_game_profiles())
-
     async def set_game_ac_profile(self, app_id, spl, sppt, fppt, ac_separate, preset_name="", stored=False):
         return _result(await self._tdp.set_game_ac_profile(app_id, spl, sppt, fppt, ac_separate, preset_name, stored))
 
@@ -823,8 +820,9 @@ class Plugin:
                 presence = await self._offload(ec_backend.module_presence)
                 left, right = controller_backend.module_states_from_presence(presence)
                 connected = all(presence.values())
-            except Exception:
-                pass
+            except Exception as error:
+                # The reset error is raised below; this read only refines what the panel shows.
+                diagnostics.event('controller', 'module_presence_failed', level='warning', error=error)
             with _lock:
                 Plugin._state["modules_reconnecting"] = False
                 Plugin._state["modules_connected"] = connected
