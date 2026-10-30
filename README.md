@@ -28,12 +28,12 @@ menu is closed.
 | [TDP](#tdp) | Choose a power preset or your own limits, set CPU Boost and CPU energy preference, and give games their own settings, also separately on battery and charger |
 | [Fan Control](#fan-control) | Draw your own fan curve with touch or controller and see the APU temperature and fan speed |
 | [Vibration](#vibration) | Set the controller's vibration strength and scale how strongly games vibrate |
-| [Lighting](#lighting) | Set the stick-light effect, colour and brightness |
-| [Key Binding](#key-binding) | Use LC, RC, LC1 and RC1 as four separate buttons, and undo an accidental TM press |
+| [Lighting](#lighting) | Set the stick-light effect, color and brightness |
+| [Key binding](#key-binding) | Use LC, RC, LC1 and RC1 as four separate buttons, and undo an accidental TM press |
 | [Magic Modules](#magic-modules) | See which modules are attached, eject either side and reset the controller |
 | [Battery](#battery) | Power the console from the charger without charging the battery |
 | [Audio](#audio) | Load AYANEO's own speaker tuning and recalibrate the speakers |
-| [OLED Display](#oled-display) | Install the OLED colour and refresh-rate definition and fix the HDR brightness games read |
+| [OLED display](#oled-display) | Install the OLED color and refresh-rate definition and fix the HDR brightness games read |
 
 ## Requirements
 
@@ -51,7 +51,7 @@ look similar to the system. Each page explains when a control is unavailable on 
 1. Install [Decky Loader](https://decky.xyz) if you do not already have it.
 2. Download `Ayaneo3Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/Ayaneo3Companion/releases).
 3. In Gaming Mode, open **Quick Access Menu → Decky → Settings → Developer**.
-4. Choose **Install Plugin from ZIP**, select the archive, then open **AYANEO 3 Companion** in Decky.
+4. Choose **Install plugin from ZIP**, select the archive, then open **AYANEO 3 Companion** in Decky.
 
 <details>
 <summary><b>Installing without the Quick Access button</b></summary>
@@ -75,7 +75,7 @@ in one folder and double-click the launcher.
 
 1. Open **About → Check for updates**.
 2. Download the new version; the ZIP appears in your Downloads folder.
-3. Install it through **Decky Settings → Developer → Install Plugin from ZIP**.
+3. Install it through **Decky Settings → Developer → Install plugin from ZIP**.
 
 Companion keeps its settings across updates. Only stable releases are offered, and the ZIP's
 version, size, SHA-256 digest and contents are checked before it is saved.
@@ -96,15 +96,15 @@ console's firmware; keep the backups folder if you may want the original values 
 
 ## Quick start
 
-Open Companion in Decky. **Hardware Controls** shows a short status for each module. Select a
+Open Companion in Decky. **Hardware controls** shows a short status for each module. Select a
 row to open its page and use **‹ All Controls** to go back.
 
-<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware Controls overview with module status summaries" width="360"></a>
+<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware controls overview with module status summaries" width="360"></a>
 
-1. Turn on **Fix Key Binding** on **Key Binding** so LC1/RC1 and the QAM button work.
-2. Turn on **Install Display Definition** on **OLED Display** and restart Gaming Mode when asked.
+1. Turn on **Fix key binding** on **Key binding** so LC1/RC1 and the QAM button work.
+2. Turn on **Install display definition** on **OLED display** and restart Gaming Mode when asked.
 3. For game-specific power, start the game first and choose **This game** on **TDP**.
-4. For custom cooling, open **Fan Control**, check the curve, save any edits, then turn on **Enable Fan Control**.
+4. For custom cooling, open **Fan Control**, check the curve, save any edits, then turn on **Enable fan control**.
 
 The screenshots in this guide show the Quick Access panel at full size: click one to open it.
 
@@ -152,7 +152,7 @@ Fan Control starts with the **Balanced** curve and stays off until you turn it o
 <a href="docs/screenshots/fan-control.png"><img src="docs/screenshots/fan-control.png" alt="Fan Control readings, enable switch and fan curve" width="360"></a>
 
 1. Check the curve, adjust it if you like and press **Save global curve**.
-2. Turn on **Enable Fan Control**. Turn it off at any time to return the fan to the console's automatic curve.
+2. Turn on **Enable fan control**. Turn it off at any time to return the fan to the console's automatic curve.
 
 The graph has **8 points from 0 to 100°C** in percent of full speed. Drag a point, or focus
 the graph and use the controller:
@@ -187,23 +187,23 @@ Control instead of competing with it.
 ### Vibration
 
 Choose the controller's **Vibration** strength (Off, Low, Medium, High). **FF Gain** scales
-the vibration games send, in 10% steps, without changing the strength. **Test Vibration**
+the vibration games send, in 10% steps, without changing the strength. **Test vibration**
 plays a short buzz.
 
 <a href="docs/screenshots/vibration.png"><img src="docs/screenshots/vibration.png" alt="Vibration strength, FF Gain and test" width="360"></a>
 
 ### Lighting
 
-Turn on **Enable LED Control** and choose an **LED Mode** (Solid, Pulse or Rainbow), then
+Turn on **Enable LED control** and choose an **LED mode** (Solid, Pulse or Rainbow), then
 set **Hue**, **Saturation** and **Brightness**. Changes save automatically.
 
 <a href="docs/screenshots/lighting.png"><img src="docs/screenshots/lighting.png" alt="LED mode, hue, saturation and brightness" width="360"></a>
 
 Until you change something here, Companion leaves the controller's own lighting and vibration alone.
 
-### Key Binding
+### Key binding
 
-**Fix Key Binding** makes LC, RC, LC1 and RC1 four separate buttons; Steam shows them under
+**Fix key binding** makes LC, RC, LC1 and RC1 four separate buttons; Steam shows them under
 those names. Both QAM button variants of the firmware are recognised.
 
 **TM Guard** (on by default) undoes an accidental press of the TM button: it switches the
@@ -211,7 +211,7 @@ controller back to the gamepad mode and restores your lighting, vibration and bu
 controller is off for about two seconds while it does. Turn TM Guard off when you want to use
 a TM mode on purpose.
 
-<a href="docs/screenshots/key-binding.png"><img src="docs/screenshots/key-binding.png" alt="Fix Key Binding and TM Guard switches" width="360"></a>
+<a href="docs/screenshots/key-binding.png"><img src="docs/screenshots/key-binding.png" alt="Fix key binding and TM Guard switches" width="360"></a>
 
 ### Magic Modules
 
@@ -225,20 +225,20 @@ without releasing a module.
 ### Battery
 
 The first row shows the battery level, charging power and the time to full while charging.
-**Bypass Charging** powers the console from the charger without charging the battery.
+**Bypass charging** powers the console from the charger without charging the battery.
 
-<a href="docs/screenshots/battery.png"><img src="docs/screenshots/battery.png" alt="Battery status and Bypass Charging" width="360"></a>
+<a href="docs/screenshots/battery.png"><img src="docs/screenshots/battery.png" alt="Battery status and Bypass charging" width="360"></a>
 
 Each change is read back from the hardware. Uninstalling Companion turns bypass off.
 
 ### Audio
 
-**AYANEO Speaker Tuning** loads AYANEO's own profile for both speaker amplifiers instead of the
-generic one SteamOS uses. **Reapply Audio Fix** loads it again if the system reset the audio.
+**AYANEO speaker tuning** loads AYANEO's own profile for both speaker amplifiers instead of the
+generic one SteamOS uses. **Reapply audio fix** loads it again if the system reset the audio.
 
 <a href="docs/screenshots/audio.png"><img src="docs/screenshots/audio.png" alt="Speaker tuning and calibration" width="360"></a>
 
-**Recalibrate Audio** measures both speakers again. Put the console on a clear surface in a
+**Recalibrate audio** measures both speakers again. Put the console on a clear surface in a
 quiet room, press **Start** and confirm. Restart the console afterwards so the driver uses the
 new values.
 
@@ -253,10 +253,10 @@ against a pinned SHA-256 digest.
 
 </details>
 
-### OLED Display
+### OLED display
 
-**Install Display Definition** installs a gamescope definition for the AYANEO 3 OLED: Gamma 2.2
-colours, HDR and 60/90/120/144 Hz. It is stored in your home folder, so SteamOS updates keep it.
+**Install display definition** installs a gamescope definition for the AYANEO 3 OLED: Gamma 2.2
+colors, HDR and 60/90/120/144 Hz. It is stored in your home folder, so SteamOS updates keep it.
 The HDR fix makes games read AYANEO's advertised 800-nit maximum.
 
 <a href="docs/screenshots/oled-display.png"><img src="docs/screenshots/oled-display.png" alt="Display definition and HDR metadata" width="360"></a>
@@ -276,7 +276,7 @@ only the HDR fix. Turning the switch off puts back a definition that Companion r
 
 | What you see | What to do |
 |---|---|
-| LC1/RC1 or the QAM button do nothing | Turn on **Fix Key Binding**. After a SteamOS update Companion reinstalls it at startup. |
+| LC1/RC1 or the QAM button do nothing | Turn on **Fix key binding**. After a SteamOS update Companion reinstalls it at startup. |
 | The controller changed mode after a TM press | Keep **TM Guard** on; it switches back within a few seconds. |
 | "Could not leave TM mode; press TM until the light is white" | TM Guard stopped after three attempts. Press TM until the light is white. |
 | An arrow key stays pressed after TM mode | TM Guard clears it by restarting the controller. With TM Guard off, turn it on or restart the console. |
@@ -284,9 +284,9 @@ only the HDR fix. Turning the switch off puts back a definition that Companion r
 | TDP changes are refused | PowerStation controls TDP; stop it to use Companion's TDP. |
 | Fan Control is blocked | Stop the other fan program (jupiter-fan-control, HHD, fancontrol). |
 | Fan Control is not available | Your kernel has no `ayaneo-ec` fan interface yet; see [Requirements](#requirements). |
-| My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable Fan Control**. |
-| The battery does not charge | Turn off **Bypass Charging**. Disabling the plugin keeps bypass on; uninstalling turns it off. |
-| Colours did not change | Restart Gaming Mode when the OLED Display page asks. |
+| My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable fan control**. |
+| The battery does not charge | Turn off **Bypass charging**. Disabling the plugin keeps bypass on; uninstalling turns it off. |
+| Colors did not change | Restart Gaming Mode when the OLED display page asks. |
 | Calibration made no difference | Restart the console; the driver reads the new values at boot. |
 | The controller stays off after Eject | Insert both modules fully, or use **Reset Magic Modules**. |
 | Update check or download failed | Read the error and retry, or download the ZIP from Releases. |
@@ -343,7 +343,7 @@ npm run build          # compile the frontend
 npm run package        # create artifacts/Ayaneo3Companion-<version>.zip
 ```
 
-Install the result through Decky's **Install Plugin from ZIP**. `npm run check` runs all of it. GitHub Actions runs the backend
+Install the result through Decky's **Install plugin from ZIP**. `npm run check` runs all of it. GitHub Actions runs the backend
 tests on Linux and Windows and checks the frontend and the built ZIP. Hardware calls are
 mocked, so startup, sleep, charger changes, module swaps and the controller still need testing
 on an AYANEO 3.

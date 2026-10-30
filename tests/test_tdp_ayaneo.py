@@ -233,6 +233,18 @@ class AyaneoTdpTests(unittest.TestCase):
             self.assertIn("Could not verify", tdp._apply_limits(15000, 25000, 30000)["stderr"])
         self.assertEqual(self.writes, [])
 
+    def test_tdp_errors_name_the_reason_without_a_path(self):
+        tdp._ryzenadj_available = True
+        missing = FileNotFoundError(2, "No such file or directory", "/usr/bin/busctl")
+        with patch.object(tdp, "_powerstation_active", side_effect=missing):
+            self.assertEqual(tdp._apply_limits(15000, 25000, 30000)["stderr"],
+                             "Could not verify whether PowerStation owns TDP control: No such file or directory")
+        denied = PermissionError(13, "Permission denied", "/home/deck/homebrew/settings/tdp_settings.json")
+        with patch.object(tdp, "_save_settings", side_effect=denied):
+            result = tdp._save_inactive_global_tdp_locked(tdp._defaults(), 15000, 25000, 30000, "")
+        self.assertEqual(result["stderr"], "Could not save global TDP settings: Permission denied")
+        self.assertEqual(self.writes, [])
+
     def test_writes_are_clamped_and_need_the_verified_helper(self):
         self.assertIn("unavailable", tdp._apply_limits(15000, 25000, 30000)["stderr"])
         tdp._ensure_ryzenadj()

@@ -314,6 +314,22 @@ class BatteryAndChargeTests(unittest.TestCase):
                 ec_backend.ensure_charge_bypass_control = old_ensure
                 companion_common.supported_device = old_supported
 
+    def test_failed_charge_rollback_names_the_reason_without_the_sysfs_path(self):
+        behaviour = mock.Mock()
+        behaviour.write_text.side_effect = PermissionError(
+            13, "Permission denied", "/sys/class/power_supply/BAT0/charge_behaviour")
+        with mock.patch.object(companion_common, "supported_device", return_value=True),              mock.patch.object(ec_backend, "ensure_charge_bypass_control", return_value=behaviour),              mock.patch.object(ec_backend, "_charge_behaviour_path", return_value=behaviour),              mock.patch.object(ec_backend, "_read_charge_behaviour", return_value=False):
+            with self.assertRaises(RuntimeError) as raised:
+                ec_backend.write_charge_bypass(True)
+        self.assertEqual(str(raised.exception), "Permission denied; charge recovery failed: Permission denied")
+
+    def test_apply_and_save_names_the_reason_without_the_settings_path(self):
+        def apply():
+            raise PermissionError(13, "Permission denied", "/home/deck/homebrew/settings/x.json")
+        with self.assertRaises(RuntimeError) as raised:
+            main.Plugin._apply_and_save(apply, lambda: None, {})
+        self.assertEqual(str(raised.exception), "Permission denied; previous hardware settings restored")
+
     def test_charge_bypass_prefers_kernel_charge_behaviour(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

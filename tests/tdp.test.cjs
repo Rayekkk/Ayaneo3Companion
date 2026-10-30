@@ -63,6 +63,8 @@ const find = (tree, predicate) => all(tree).find(predicate);
 const field = (tree, label) => find(tree, n => n.props?.label === label);
 const buttonText = n => Array.isArray(n.props?.children) ? n.props.children.join('') : n.props?.children;
 const button = (tree, name) => find(tree, n => n.type === 'ButtonItem' && buttonText(n) === name);
+// The first read's error (ui.tsx statusPlaceholder: the text in an alert under "TDP status unavailable").
+const failure = tree => field(tree, 'TDP status unavailable')?.props.description.props.children;
 const cpu = tree => find(tree, n => typeof n.type === 'function' && n.type.name === 'CpuPowerControlsSection');
 const scopeMenu = tree => find(tree, n => n.type === 'DropdownItem' && /^Settings for /.test(n.props?.label));
 const chooseScope = (h, value) => scopeMenu(h.render()).props.onChange({ data: value });
@@ -131,26 +133,26 @@ test('a refused helper retry shows its reason on the button', async () => {
 });
 test('first readiness failure is actionable and double retry is coalesced', async () => {
   const h = mount(); h.defer('is_ready'); h.render(); h.reject(h.pending('is_ready'), 'Decky offline'); await settle();
-  const view = h.render(); assert.match(field(view, 'Error').props.description, /Decky offline/);
-  const retry = button(view, 'Retry status'); assert.ok(retry);
+  const view = h.render(); assert.match(failure(view), /Decky offline/);
+  const retry = button(view, 'Try again'); assert.ok(retry);
   h.defer('is_ready'); retry.props.onClick(); retry.props.onClick(); await settle();
   assert.equal(count(h, 'is_ready'), 2);
   h.resolve(h.pending('is_ready'), ok({ ready: true, error: '' })); await settle();
-  assert.ok(field(h.render(), 'Enable TDP control')); assert.equal(button(h.render(), 'Retry status'), undefined);
+  assert.ok(field(h.render(), 'Enable TDP control')); assert.equal(button(h.render(), 'Try again'), undefined);
   h.unmount();
 });
 test('a refused readiness check shows the backend error', async () => {
   const h = mount({ responses: { is_ready: { ok: false, error: 'This device is not an AYANEO 3' } } }); await ready(h);
-  assert.match(field(h.render(), 'Error').props.description, /not an AYANEO 3/); h.unmount();
+  assert.match(failure(h.render()), /not an AYANEO 3/); h.unmount();
 });
 test('failed initial settings are shown before sibling reads finish', async () => {
   const h = mount(); h.defer('get_settings'); h.defer('get_power_source'); h.render(); await settle();
   h.refuse(h.pending('get_settings'), 'settings unreadable'); await settle();
-  assert.match(field(h.render(), 'Error').props.description, /settings unreadable/);
-  button(h.render(), 'Retry status').props.onClick(); await settle();
+  assert.match(failure(h.render()), /settings unreadable/);
+  button(h.render(), 'Try again').props.onClick(); await settle();
   assert.equal(count(h, 'get_power_source'), 1, 'a still-running sibling read is not duplicated');
   h.resolve(h.pending('get_power_source'), ok({ ac: false })); await settle();
-  button(h.render(), 'Retry status').props.onClick(); await settle(); assert.ok(field(h.render(), 'Enable TDP control')); h.unmount();
+  button(h.render(), 'Try again').props.onClick(); await settle(); assert.ok(field(h.render(), 'Enable TDP control')); h.unmount();
 });
 test('automatic initialization retry is bounded and stops when hidden or unmounted', async () => {
   const h = mount({ responses: { is_ready: () => { throw Error('offline'); } } }); await ready(h);

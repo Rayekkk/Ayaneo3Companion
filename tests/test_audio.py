@@ -32,6 +32,16 @@ class AudioTests(unittest.TestCase):
                 audio_backend.apply_audio_fix()  # the Audio page's Apply may stop it
                 reload.assert_called_once()
 
+    def test_tuning_error_names_the_reason_without_the_kernel_path(self):
+        firmware = mock.Mock()
+        firmware.read_text.side_effect = PermissionError(13, "Permission denied",
+                                                         "/sys/module/firmware_class/parameters/path")
+        with mock.patch.object(main.companion_common, "supported_device", return_value=True),              mock.patch.object(audio_backend, "_prepare_audio_aliases"),              mock.patch.object(audio_backend, "AUDIO_FIRMWARE_PATH", firmware):
+            with self.assertRaises(RuntimeError) as raised:
+                audio_backend.apply_audio_fix()
+        self.assertEqual(str(raised.exception), "kernel firmware path is unavailable: Permission denied")
+        self.assertIsInstance(raised.exception.__cause__, PermissionError, "the log keeps the whole error")
+
     def test_background_tuning_stops_retrying_once_an_apply_did_not_take(self):
         plugin = main.Plugin()
         state = {"audio_fix_enabled": True}

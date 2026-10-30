@@ -300,8 +300,8 @@ class Plugin:
             try:
                 restore()
             except Exception as rollback_error:
-                raise RuntimeError(f"{error}; hardware rollback failed: {rollback_error}") from error
-            raise RuntimeError(f"{error}; previous hardware settings restored") from error
+                raise RuntimeError(f"{diagnostics.shown(error)}; hardware rollback failed: {diagnostics.shown(rollback_error)}") from error
+            raise RuntimeError(f"{diagnostics.shown(error)}; previous hardware settings restored") from error
 
     @staticmethod
     def _save(key, value):
@@ -446,7 +446,7 @@ class Plugin:
             state["controller_error"] = ""
         except (OSError, RuntimeError) as error:
             state["controller_supported"] = False
-            state["controller_error"] = str(error)
+            state["controller_error"] = diagnostics.shown(error)
             state["module_left"] = controller_backend.module_info("left", status="unavailable")
             state["module_right"] = controller_backend.module_info("right", status="unavailable")
         state["screen_installed"] = display_backend.is_our_display_script(display_backend.LUA_TARGET)
@@ -568,7 +568,8 @@ class Plugin:
         return dk_rpc.ok(await self._offload(ec_backend.battery_status))
 
     async def get_version(self):
-        return dk_rpc.ok(version=companion_common.plugin_version())
+        # home: the panel shows a downloaded update as ~/… (the full path names the user).
+        return dk_rpc.ok(version=companion_common.plugin_version(), home=decky.DECKY_USER_HOME)
 
     async def check_for_updates(self):
         return await self._offload(self._updates.check, True)
@@ -613,12 +614,12 @@ class Plugin:
                 try:
                     controller_backend.apply_controller(previous)
                 except Exception as error:
-                    failures.append(f"firmware: {error}")
+                    failures.append(f"firmware: {diagnostics.shown(error)}")
                 if gain_changed:
                     try:
                         controller_backend.set_vibration_gain(previous["ff_gain"])
                     except Exception as error:
-                        failures.append(f"FF Gain: {error}")
+                        failures.append(f"FF Gain: {diagnostics.shown(error)}")
                 if failures:
                     raise RuntimeError("; ".join(failures))
 
@@ -663,7 +664,7 @@ class Plugin:
             return dk_rpc.ok()
         except Exception as error:
             decky.logger.error(f"{LOG} vibration test failed: {error}")
-            return dk_rpc.fail(str(error))
+            return dk_rpc.fail(diagnostics.shown(error))
 
     async def set_charge_bypass(self, enabled):
         value = self._boolean(enabled)
@@ -696,7 +697,7 @@ class Plugin:
                     ready = audio_backend.audio_fix_ready() if installed else False
                     with _lock:
                         Plugin._state.update(audio_fix_enabled=previous,
-                            audio_fix_error=str(error), audio_fix_installed=installed,
+                            audio_fix_error=diagnostics.shown(error), audio_fix_installed=installed,
                             audio_calibration_available=previous and ready,
                             audio_profile="AYANEO v0.65" if ready else
                                 "Installed, not active" if installed else "Generic fallback")
@@ -733,7 +734,7 @@ class Plugin:
                 await self._offload(self._save, "audio_calibration_last", summary)
             except Exception as error:
                 raise RuntimeError(
-                    f"Speaker calibration was applied, but its summary could not be saved: {error}. "
+                    f"Speaker calibration was applied, but its summary could not be saved: {diagnostics.shown(error)}. "
                     f"Previous calibration backup: {result['backup']}") from error
             with _lock:
                 Plugin._state["audio_calibration_available"] = True
@@ -743,7 +744,7 @@ class Plugin:
             ready = await self._offload(audio_backend.audio_fix_ready)
             with _lock:
                 Plugin._state["audio_calibration_available"] = ready
-                Plugin._state["audio_fix_error"] = str(error)
+                Plugin._state["audio_fix_error"] = diagnostics.shown(error)
             raise
         return dk_rpc.ok(self._copy_state())
 
@@ -952,7 +953,7 @@ class Plugin:
                         controller_backend.program_rear_buttons(
                             previous_enabled, controller if previous_enabled else None)
                     except Exception as recovery:
-                        failures.append(f"controller: {recovery}")
+                        failures.append(f"controller: {diagnostics.shown(recovery)}")
                     for path in paths:
                         try:
                             if path in before:
@@ -962,13 +963,13 @@ class Plugin:
                             elif input_backend.button_map_owned(path):
                                 path.unlink()
                         except Exception as recovery:
-                            failures.append(f"map: {recovery}")
+                            failures.append(f"map: {diagnostics.shown(recovery)}")
                     try:
                         _systemctl("restart", "inputplumber", check=True)
                     except Exception as recovery:
-                        failures.append(f"InputPlumber: {recovery}")
+                        failures.append(f"InputPlumber: {diagnostics.shown(recovery)}")
                     detail = "; rollback failed: " + "; ".join(failures) if failures else "; previous bindings restored"
-                    raise RuntimeError(f"{error}{detail}") from error
+                    raise RuntimeError(f"{diagnostics.shown(error)}{detail}") from error
                 with _lock:
                     Plugin._state["button_fix_installed"] = value
         await self._offload(mutate)
@@ -1040,7 +1041,7 @@ class Plugin:
             except Exception as error:
                 with _lock:
                     Plugin._state["audio_calibration_available"] = False
-                    Plugin._state["audio_fix_error"] = str(error)
+                    Plugin._state["audio_fix_error"] = diagnostics.shown(error)
                 decky.logger.warning(f"{LOG} audio tuning attempt failed: {error}")
 
     def _restore_audio_once(self):
@@ -1173,7 +1174,7 @@ class Plugin:
                 except (OSError, RuntimeError) as error:
                     with _lock:
                         Plugin._state["controller_supported"] = False
-                        Plugin._state["controller_error"] = str(error)
+                        Plugin._state["controller_error"] = diagnostics.shown(error)
                         Plugin._state["module_left"] = controller_backend.module_info("left", status="unavailable")
                         Plugin._state["module_right"] = controller_backend.module_info("right", status="unavailable")
                     retry_delay = 2.0
@@ -1232,7 +1233,7 @@ class Plugin:
                             Plugin._state["module_left"] = controller_backend.module_info("left", status="unavailable")
                             Plugin._state["module_right"] = controller_backend.module_info(
                                 "right", status="unavailable")
-                            Plugin._state["controller_error"] = str(error)
+                            Plugin._state["controller_error"] = diagnostics.shown(error)
                         identify_delay = min(30.0, identify_delay * 2)
                         identify_at = time.monotonic() + identify_delay
                         decky.logger.debug(f"{LOG} module identification pending: {error}")
@@ -1393,7 +1394,7 @@ class Plugin:
             raise
         except Exception as error:
             with _lock:
-                Plugin._state["startup_error"] = str(error)
+                Plugin._state["startup_error"] = diagnostics.shown(error)
             decky.logger.error(f"{LOG} startup failed: {error}")
         finally:
             self._initializing = False

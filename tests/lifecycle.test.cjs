@@ -1,11 +1,11 @@
-// The overview and device pages (index.tsx) and the Updates section with controlled RPC completion and timers:
-// polling, mutations, the RGB queue, native dropdowns, updates, the Fan overview row and error UI.
+// The overview and device pages (index.tsx) with controlled RPC completion and timers: polling, mutations, the RGB
+// queue (controller_queue.ts), native dropdowns, About with the shared updater, the Fan overview row and error UI.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { harness: panel, all, settle } = require('./frontend_harness.cjs');
 
 // Pages are kept as elements: a test reads their props or renders them itself (page.type(page.props)).
-const KEEP = ['SectionLink', 'SectionHeader', 'StackedAction', 'SlowSliderField', 'TdpPage', 'FanPage', 'AboutPage',
+const KEEP = ['SectionLink', 'PageHeader', 'StackedAction', 'SlowSliderField', 'TdpPage', 'FanPage', 'AboutPage',
   'VibrationPage', 'BatteryPage', 'MagicModulesPage', 'AudioPage', 'ButtonsPage', 'DisplayPage'];
 const harness = ({ visible = true } = {}) => {
   const h = panel({ keep: KEEP, ui: { Router: { MainRunningApp: null }, showModal() {} },
@@ -13,7 +13,6 @@ const harness = ({ visible = true } = {}) => {
   if (!visible) h.hide();
   return h;
 };
-const updates = () => panel({ entry: 'src/updates.tsx', component: 'UpdateSection', keep: ['StackedAction'] });
 /** QAM opens or closes, and the panel renders again. */
 const setVisible = (h, value, props) => { if (value) h.show(); else h.hide(); return h.render(props); };
 const find = (node, key, value) => all(node).find(n => n.props?.[key] === value);
@@ -29,8 +28,8 @@ const withController = controller => ok({ ...state, controller: { ...state.contr
 const count = (h, name) => h.calls.filter(c => c.name === name).length;
 // A page stays open across QAM visibility changes; return to the overview explicitly, like the user.
 const open = (h, title) => {
-  findComponent(h.render(), 'SectionHeader')?.props.onBack();
-  const field = find(h.render(), 'title', title); assert.ok(field?.props.onClick, title); field.props.onClick(); return h.render();
+  findComponent(h.render(), 'PageHeader')?.props.onBack();
+  const field = find(h.render(), 'title', title); assert.ok(field?.props.onOpen, title); field.props.onOpen(); return h.render();
 };
 const ready = async () => { const h = harness(); h.render(); h.respond('get_state', ok(state)); await settle(); h.render(); return h; };
 const page = (h, name) => { const element = findComponent(h.render(), name); return element.type(element.props); };
@@ -91,9 +90,9 @@ test('a failed status poll marks cached values; an obsolete failure is ignored',
   const failedStatus = await ready();
   failedStatus.tick(1500);
   failedStatus.respond('get_state', refused()); await settle();
-  assert.match(find(failedStatus.render(), 'title', 'Vibration').props.statusNote, /^Older data · Last read \d+s ago · Retrying…$/,
+  assert.match(find(failedStatus.render(), 'title', 'Vibration').props.note, /^Older data · Last read \d+s ago · Retrying…$/,
     'a failed poll must identify cached values as unverified on every overview row');
-  assert.ok(find(failedStatus.render(), 'title', 'Vibration').props.onClick, 'cached controls remain reachable during a transient status failure');
+  assert.ok(find(failedStatus.render(), 'title', 'Vibration').props.onOpen, 'cached controls remain reachable during a transient status failure');
   open(failedStatus, 'Vibration');
   assert.ok(find(failedStatus.render(), 'label', 'Status refresh failed'), 'status failure remains visible on control pages');
   failedStatus.tick(1500);
@@ -129,7 +128,7 @@ test('vibration edits: the last choice wins and audio waits for its readback', a
     audio_fix_supported: false, audio_calibration_available: false, audio_profile: 'Pending' })); await settle(); open(checkingAudio, 'Audio');
   const checkingTree = page(checkingAudio, 'AudioPage');
   assert.ok(find(checkingTree, 'description', 'Waiting to verify the speaker profile.'), 'installed files alone do not confirm the actual speaker profile');
-  assert.equal(find(checkingTree, 'title', 'Speaker Calibration'), undefined, 'calibration remains unavailable until DSP readback');
+  assert.equal(find(checkingTree, 'title', 'Speaker calibration'), undefined, 'calibration remains unavailable until DSP readback');
   checkingAudio.unmount();
 });
 
@@ -229,8 +228,8 @@ test('RGB edits are debounced, merged, queued and survive unmount and native dro
   rgb.unmount(); let writes = rgb.writes; rgb.respond('set_controller', withController(rgbCall.args[0])); await settle();
   assert.equal(rgb.writes, writes, 'pending controller save completes without touching an unmounted view'); plugin.onDismount();
 
-  const queue = await ready(); open(queue, 'Lighting'); find(queue.render(), 'label', 'LED Mode').props.onChange({ data: 'pulse' }); queue.fire();
-  find(queue.render(), 'label', 'LED Mode').props.onChange({ data: 'rainbow' }); queue.unmount();
+  const queue = await ready(); open(queue, 'Lighting'); find(queue.render(), 'label', 'LED mode').props.onChange({ data: 'pulse' }); queue.fire();
+  find(queue.render(), 'label', 'LED mode').props.onChange({ data: 'rainbow' }); queue.unmount();
   assert.equal(count(queue, 'set_controller'), 1, 'controller writes do not overlap');
   writes = queue.writes; queue.respond('set_controller', withController({ rgb_mode: 'pulse' })); await settle();
   assert.equal(count(queue, 'set_controller'), 2, 'queued latest edit survives unmount during an earlier write');
@@ -262,15 +261,15 @@ test('RGB edits are debounced, merged, queued and survive unmount and native dro
   assert.deepEqual(Object.keys(saturationEdit.args[0]), ['color'], 'saturation cannot replace a newer brightness or gain');
   saturation.respond('set_controller', withController(saturationEdit.args[0])); await settle(); saturation.unmount();
 
-  const dropdown = await ready(); open(dropdown, 'Lighting'); const menu = find(dropdown.render(), 'label', 'LED Mode');
+  const dropdown = await ready(); open(dropdown, 'Lighting'); const menu = find(dropdown.render(), 'label', 'LED mode');
   // The native menu hides Quick Access while it is open.
   setVisible(dropdown, false); menu.props.onChange({ data: 'pulse' }); dropdown.fire();
-  setVisible(dropdown, true); assert.ok(find(dropdown.render(), 'label', 'LED Mode'), 'native dropdown returns to the same section'); dropdown.unmount();
+  setVisible(dropdown, true); assert.ok(find(dropdown.render(), 'label', 'LED mode'), 'native dropdown returns to the same section'); dropdown.unmount();
 
   const combined = await ready(); open(combined, 'Lighting');
   find(combined.render(), 'label', 'Hue').props.onChange(120);
   find(combined.render(), 'label', 'Hue').props.onChangeEnd(120);
-  findComponent(combined.render(), 'SectionHeader').props.onBack(); open(combined, 'Vibration');
+  findComponent(combined.render(), 'PageHeader').props.onBack(); open(combined, 'Vibration');
   findComponent(combined.render(), 'VibrationPage').props.onGain(20); combined.fire();
   const controllerCommit = combined.calls.find(call => call.name === 'set_controller');
   assert.ok(controllerCommit); assert.equal(controllerCommit.args[0].ff_gain, 20);
@@ -290,29 +289,32 @@ test('backend diagnostics, missing capabilities and an unavailable backend repla
   ]) {
     const h = harness(); h.render();
     h.respond('get_state', ok({ ...state, ...diagnostic.extra })); await settle();
+    const plugin = h.exports.default();  // its updater; its own Content element is not rendered here
     assert.ok(find(h.render(), diagnostic.label ? 'label' : 'title', diagnostic.label ?? diagnostic.title), 'backend diagnostics replace the controls');
-    h.unmount();
+    assert.equal(Boolean(find(h.render(), 'title', 'Updates')), Boolean(diagnostic.extra.settings_error || diagnostic.extra.startup_error),
+      'a plugin that did not start keeps its updater');
+    h.unmount(); plugin.onDismount();
   }
 
   const capabilities = harness(); capabilities.render();
   capabilities.respond('get_state', ok({ ...state, controller_supported: false, controller_error: 'kernel hid-ayaneo is active',
     module_eject_supported: false, module_reset_supported: false })); await settle();
   open(capabilities, 'Lighting');
-  assert.equal(find(capabilities.render(), 'label', 'Enable LED Control').props.disabled, true);
+  assert.equal(find(capabilities.render(), 'label', 'Enable LED control').props.disabled, true);
   assert.equal(find(capabilities.render(), 'label', 'Hue').props.disabled, true);
   assert.ok(find(capabilities.render(), 'label', 'Controller control unavailable'));
-  findComponent(capabilities.render(), 'SectionHeader').props.onBack(); open(capabilities, 'Magic Modules');
+  findComponent(capabilities.render(), 'PageHeader').props.onBack(); open(capabilities, 'Magic Modules');
   const modulesTree = page(capabilities, 'MagicModulesPage');
-  assert.equal(find(modulesTree, 'title', 'Eject Left').props.disabled, true);
+  assert.equal(find(modulesTree, 'title', 'Eject left').props.disabled, true);
   assert.equal(find(modulesTree, 'title', 'Reset Magic Modules').props.disabled, true);
   assert.ok(find(modulesTree, 'description', 'kernel hid-ayaneo is active'));
-  findComponent(capabilities.render(), 'SectionHeader').props.onBack(); open(capabilities, 'Vibration');
+  findComponent(capabilities.render(), 'PageHeader').props.onBack(); open(capabilities, 'Vibration');
   const vibrationTree = page(capabilities, 'VibrationPage');
-  assert.equal(find(vibrationTree, 'label', 'Firmware Strength · Medium').props.disabled, true);
+  assert.equal(find(vibrationTree, 'label', 'Firmware strength · Medium').props.disabled, true);
   assert.ok(!find(vibrationTree, 'label', 'FF Gain').props.disabled, 'evdev gain remains independent of vendor HID');
-  findComponent(capabilities.render(), 'SectionHeader').props.onBack(); open(capabilities, 'Key Binding');
+  findComponent(capabilities.render(), 'PageHeader').props.onBack(); open(capabilities, 'Key binding');
   const buttonsTree = page(capabilities, 'ButtonsPage');
-  assert.equal(find(buttonsTree, 'label', 'Fix Key Binding').props.disabled, true);
+  assert.equal(find(buttonsTree, 'label', 'Fix key binding').props.disabled, true);
   assert.equal(find(buttonsTree, 'label', 'TM Guard').props.disabled, false, 'saved policy can still be disabled while HID is unavailable');
   capabilities.unmount();
 
@@ -321,65 +323,31 @@ test('backend diagnostics, missing capabilities and an unavailable backend repla
     if (failure === 'rejected') errors.fail('get_state'); else errors.respond('get_state', refused('Backend is not ready'));
     await settle(); assert.ok(find(errors.render(), 'label', 'Backend unavailable'), `a ${failure} first read says why`);
     errors.tick(); errors.respond('get_state', ok({ ...state, settings_error: 'Invalid settings JSON; restore backup.' })); await settle();
-    assert.ok(find(errors.render(), 'label', 'Settings require attention')); assert.equal(find(errors.render(), 'title', 'Hardware Controls'), undefined); errors.unmount();
+    assert.ok(find(errors.render(), 'label', 'Settings require attention')); assert.equal(find(errors.render(), 'title', 'Hardware controls'), undefined); errors.unmount();
   }
 });
 
-test('updates: single-flight check and download bound to the shown version, results outlive the panel', async () => {
-  const props = { initialVersion: '1.0.2' };
-  const release = version => ({ ok: true, current_version: '1.0.2', update_available: true, download_available: true,
-    latest_version: version, asset_name: 'plugin.zip', size: 1000, checked_at: 0 });
-  const update = updates(); update.render(props);
-  const check = find(update.render(props), 'title', 'Check for Updates'); check.props.onClick(); check.props.onClick();
-  assert.equal(count(update, 'check_for_updates'), 1, 'same-frame double click makes one update request');
-  update.unmount(); let writes = update.writes; update.respond('check_for_updates', release('1.0.3')); await settle();
-  assert.equal(update.writes, writes, 'unmounted update panel ignores state writes'); update.remount();
-  const download = find(update.render(props), 'title', 'Version 1.0.3 is available'); assert.ok(download, 'completed update check survives panel remount');
-  download.props.onClick(); download.props.onClick(); assert.equal(count(update, 'perform_update'), 1, 'download is single flight');
-  assert.equal(update.calls.find(call => call.name === 'perform_update').args[0], '1.0.3', 'download is bound to the displayed version');
-  update.respond('perform_update', refused('The latest release changed.')); await settle();
-  assert.ok(find(update.render(props), 'title', 'Updates')); assert.equal(update.toasts.length, 1);
-  assert.ok(all(update.render(props)).some(n => n.props?.children === 'The latest release changed.'), 'the refusal is shown');
-  update.unmount();
-
-  const changedRelease = updates(); changedRelease.render({ initialVersion: '1.2.0' });
-  find(changedRelease.render(), 'title', 'Check for Updates').props.onClick();
-  changedRelease.respond('check_for_updates', release('1.2.1')); await settle();
-  find(changedRelease.render(), 'title', 'Version 1.2.1 is available').props.onClick();
-  changedRelease.respond('perform_update', { ok: true, version: '1.3.0', path: '/mock/wrong.zip', sha256: 'a' }); await settle();
-  assert.equal(find(changedRelease.render(), 'label', 'Update downloaded'), undefined, 'a different release cannot be reported as the selected download');
-  assert.equal(changedRelease.toasts.length, 1);
-  find(changedRelease.render(), 'title', 'Check for Updates').props.onClick();
-  changedRelease.respond('check_for_updates', release('1.2.1')); await settle();
-  find(changedRelease.render(), 'title', 'Version 1.2.1 is available').props.onClick();
-  changedRelease.respond('perform_update', { ok: true, version: '1.2.1', path: '/mock/selected.zip', sha256: 'b' }); await settle();
-  assert.ok(find(changedRelease.render(), 'label', 'Update downloaded')); changedRelease.unmount();
-
-  const expired = updates(); expired.render(props);
-  find(expired.render(props), 'title', 'Check for Updates').props.onClick(); expired.unmount(); expired.exports.resetUpdates();
-  expired.remount(); expired.respond('check_for_updates', release('9.9.9')); await settle();
-  assert.equal(find(expired.render(props), 'title', 'Version 9.9.9 is available'), undefined, 'old plugin lifecycle cannot publish update results'); expired.unmount();
-});
-
-test('updates: a release that cannot be offered says why; no release at all is up to date', async () => {
-  const text = (h, value) => all(h.render()).some(n => n.props?.children === value);
-  const h = updates(); h.render();
-  find(h.render(), 'title', 'Check for Updates').props.onClick();
-  h.respond('check_for_updates', { ok: true, current_version: '1.0.2', update_available: true, download_available: false,
-    latest_version: '1.0.3', message: 'The release has no single plugin.zip yet.', checked_at: 0 }); await settle();
-  assert.ok(text(h, 'The release has no single plugin.zip yet.'), 'the reason is shown where errors are');
-  assert.equal(find(h.render(), 'title', 'Version 1.0.3 is available'), undefined, 'nothing to download');
-  assert.equal(h.toasts.length, 0);
-  find(h.render(), 'title', 'Check for Updates').props.onClick();
-  h.respond('check_for_updates', { ok: true, current_version: '1.0.2', update_available: false, download_available: false,
-    no_release: true, message: 'No release has been published yet (or the repository is private).', checked_at: 0 }); await settle();
-  assert.ok(text(h, 'Up to date'));
-  find(h.render(), 'title', 'Check for Updates').props.onClick();
-  h.respond('check_for_updates', { ok: false, current_version: '1.0.2', update_available: false, download_available: false,
-    error: "GitHub's request limit was reached. Try again later.", checked_at: 0 }); await settle();
-  assert.ok(text(h, "GitHub's request limit was reached. Try again later."));
-  assert.equal(text(h, 'Up to date'), false);
-  h.unmount();
+test('About: the shared page with Updates last, on the plugin update RPCs, a ~/ path and its install text', async () => {
+  const h = await ready(); const plugin = h.exports.default();
+  open(h, 'About');
+  assert.equal(count(h, 'get_version'), 1, 'About reads the home folder once');
+  h.respond('get_version', { ok: true, version: '1.0.2', home: '/home/deck' }); await settle();
+  const about = findComponent(h.render(), 'AboutPage').props;
+  assert.equal(about.name, 'AYANEO 3 Companion'); assert.equal(about.version, '1.0.2'); assert.equal(about.home, '/home/deck');
+  assert.match(about.install, /Install plugin from ZIP\. Your settings and per-game profiles are kept\.$/);
+  void about.updates.run('check'); void about.updates.run('check');
+  assert.equal(count(h, 'check_for_updates'), 1, 'one check at a time');
+  h.respond('check_for_updates', { ok: true, current_version: '1.0.2', update_available: true, download_available: true,
+    latest_version: '1.0.3', size: 1048576 }); await settle();
+  void about.updates.run('download', '1.0.3');
+  assert.deepEqual(h.calls.find(call => call.name === 'perform_update').args, ['1.0.3'], 'the download is bound to the shown version');
+  h.respond('perform_update', { ok: true, version: '1.0.3', path: '/home/deck/Downloads/Ayaneo3Companion-1.0.3.zip', sha256: 'a' }); await settle();
+  const tree = all(page(h, 'AboutPage'));
+  assert.ok(tree.some(n => [].concat(n.props?.children ?? []).includes('~/Downloads/Ayaneo3Companion-1.0.3.zip')), 'the saved ZIP shows as ~/…');
+  const sections = tree.filter(n => n.type === 'PanelSection').map(n => n.props.title);
+  assert.equal(sections.at(-1), 'Updates', 'Updates is the last section of About');
+  h.unmount(); plugin.onDismount();
+  assert.equal(about.updates.getSnapshot().busy, null);
 });
 
 test('the Fan overview row reads Fan Control every second while shown', async () => {

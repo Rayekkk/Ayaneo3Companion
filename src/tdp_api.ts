@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Rayekkk
 // Backend calls, toasts, shared helpers and live readings of the TDP page (tdp.tsx).
 
-import { addEventListener, callable, removeEventListener, toaster, useQuickAccessVisible } from "@decky/api";
+import { addEventListener, callable, removeEventListener, useQuickAccessVisible } from "@decky/api";
 import { useEffect, useState } from "react";
 import { errorText, settle, type Result } from "./result";
+import { notify } from "./ui";
 import {
   fromAbsolute, resolvedPreset, simpleTuning,
   type Caps, type CapsInfo, type CpuPowerControls, type PresetTable, type RunningLimits, type TdpInfo,
@@ -64,13 +65,7 @@ export const setEpp            = callable<[string, string, boolean, string], Cpu
 
 // ── Toasts ─────────────────────────────────────────────────────────────────────
 
-export const notify = (title: string, body: string) => {
-  try {
-    toaster.toast({ title, body, duration: 4000 });
-  } catch {
-    console.error("[ayaneo3companion] tdp.notification_failed");
-  }
-};
+export { notify };
 
 export const notifyFailure = (title: string, err: unknown) => {
   const body = errorText(err);

@@ -17,7 +17,7 @@ import socket
 import stat
 import time
 import tempfile
-from diagnostics import configure_worker, event as diagnostic_event
+from diagnostics import configure_worker, event as diagnostic_event, shown
 from fan_hwmon import EC, platform_check, same_target
 from fan_sleep import Pause, Retry, SleepSafety
 from fan_policy import (CurveControl, LEASE_S, SAMPLE_S, HARD_MAX_C, MAX_PCT, validate_curve, stop_timed_out)
@@ -241,7 +241,7 @@ def stop_release(ec, root, reason, outcome, sole_writer=False):
                 pass
             return dict(result, outcome=first['outcome'])
         except Exception as exc:
-            errors.append(str(exc)); time.sleep(0.1)
+            errors.append(shown(exc)); time.sleep(0.1)
     raise RuntimeError('Fan recovery is pending: ' + '; '.join(errors))
 
 
@@ -272,7 +272,7 @@ def backup(root, parent, ready_fd, inherited_ec, ipc, owner_fd):
     os.setsid()
     ipc.close(); inherited_ec.close()
     port, sensors, pidfd, sleep = None, None, None, None
-    recovered = False
+    recovered, failure = False, None
     reason, outcome = 'Fan owner exited', 'pause'
     stage = 'backup_startup'
     try:
@@ -310,7 +310,7 @@ def backup(root, parent, ready_fd, inherited_ec, ipc, owner_fd):
             if select.select([pidfd], [], [], min(0.5, max(0, pulse['monotonic']+LEASE_S-time.monotonic())))[0]:
                 reason, outcome, stage = 'Fan owner died', 'retry', 'backup_owner_exit'; break
     except Exception as exc:
-        reason, outcome = str(exc), outcome_of(exc)
+        reason, outcome, failure = shown(exc), outcome_of(exc), exc
     finally:
         # After the owner's own release, the owner already recorded the first cause.
         failed = outcome != 'pause' and not (root/'stop').exists()
@@ -343,13 +343,13 @@ def backup(root, parent, ready_fd, inherited_ec, ipc, owner_fd):
                 recovered = True
             except Exception as exc:
                 try:
-                    atomic(RUNTIME/'last.json', dict(active=False, automatic=False, reason=str(exc),
+                    atomic(RUNTIME/'last.json', dict(active=False, automatic=False, reason=shown(exc),
                                                     outcome='fault', monotonic=time.monotonic()))
                 except OSError:
                     pass  # os._exit below must still run: this is a forked child.
             port.close()
         if failed or not recovered:
-            diagnostic_event('fan', 'worker_recovery', level='warning' if recovered else 'error',
+            diagnostic_event('fan', 'worker_recovery', level='warning' if recovered else 'error', error=failure,
                              stage=stage, source='backup', restored=recovered, worker_id=root.name,
                              outcome=outcome, reason=reason)
         if sensors is not None:
@@ -377,7 +377,7 @@ def serve(ipc):
     root = pathlib.Path(tempfile.mkdtemp(prefix='session-', dir=RUNTIME))
     port, sensors, child, sleep = None, None, None, None
     state = dict(active=False, automatic=False, error='', target=0, writes=0, samples=0, stop_verified=False, session=root.name)
-    reason, outcome = 'Controller disconnected', 'pause'
+    reason, outcome, failure = 'Controller disconnected', 'pause', None
     stage = 'startup'
     ec_sample = {}
     try:
@@ -409,7 +409,7 @@ def serve(ipc):
             except OSError as exc:
                 if exc.errno == errno.EINPROGRESS:  # logind refuses inhibitors while a sleep is already under way.
                     raise Pause('Sleep is preparing; fan control remains off.') from exc
-                raise Retry(str(exc)) from exc
+                raise Retry(shown(exc)) from exc
             if not select.select([rfd], [], [], 1)[0] or os.read(rfd, 1) != b'1':
                 raise Retry('Independent backup watchdog did not become ready.')
         finally:
@@ -533,7 +533,7 @@ def serve(ipc):
                     except BlockingIOError:
                         pass  # A backed-up frontend never blocks fan recovery.
     except Exception as exc:
-        reason, outcome = str(exc), outcome_of(exc)
+        reason, outcome, failure = shown(exc), outcome_of(exc), exc
         state['error'] = reason
     finally:
         state['outcome'] = outcome
@@ -541,7 +541,7 @@ def serve(ipc):
             try:
                 state.update(stop_release(ec, root, reason, outcome, sole_writer=True), active=False, automatic=True, target=0, stop_verified=False)
             except Exception as exc:
-                state.update(error=str(exc), active=False, automatic=False, outcome='fault')
+                state.update(error=shown(exc), active=False, automatic=False, outcome='fault')
         if state['outcome'] != 'pause':
             record_fault(root.name, state['error'] or reason, stage, state['outcome'], sensors, ec_sample)
         if child is not None:
@@ -559,7 +559,7 @@ def serve(ipc):
             sensors.close()
         if port is not None:
             port.close()
-        diagnostic_event('fan', 'worker_closed', level='info' if state['outcome'] == 'pause' else 'warning',
+        diagnostic_event('fan', 'worker_closed', level='info' if state['outcome'] == 'pause' else 'warning', error=failure,
                          source='owner', stage=stage, worker_id=root.name, outcome=state['outcome'], reason=reason,
                          restored=state.get('automatic') is True, pending=state.get('automatic') is not True)
         if sleep is not None:
@@ -577,6 +577,6 @@ if __name__ == '__main__':
         serve(sock)
     except Exception as exc:
         diagnostic_event('fan', 'worker_start_failed', level='error', error=exc, stage='bootstrap', outcome=outcome_of(exc))
-        sock.send(json.dumps(dict(kind='closed', active=False, automatic=False, error=str(exc), outcome=outcome_of(exc))).encode())
+        sock.send(json.dumps(dict(kind='closed', active=False, automatic=False, error=shown(exc), outcome=outcome_of(exc))).encode())
     finally:
         sock.close()

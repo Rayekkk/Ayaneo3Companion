@@ -22,6 +22,7 @@ from pathlib import Path
 import decky
 
 import companion_common
+import diagnostics
 import dk_fs
 import dk_process
 from companion_common import LOG
@@ -126,7 +127,7 @@ def write_script(data: bytes) -> None:
         LUA_TARGET.parent.mkdir(parents=True, exist_ok=True)
         dk_fs.write_atomic(LUA_TARGET, data, 0o644)
     elif _script_io("write", data) != 0:
-        raise RuntimeError(f"could not write {LUA_TARGET}")
+        raise RuntimeError("could not write the display definition")  # LUA_TARGET names the user: not in the panel.
 
 
 def unlink_script() -> None:
@@ -300,7 +301,7 @@ def restart_session() -> tuple[bool, str]:
         try:
             result = dk_process.run(command, 20, capture_output=True, text=True)
         except (OSError, dk_process.subprocess.SubprocessError) as error:
-            failures.append(f"{label}: {error}")
+            failures.append(f"{label}: {diagnostics.shown(error)}")
             continue
         if result.returncode == 0:
             return True, f"restarting via {label}"
@@ -419,7 +420,7 @@ def patch_published_edid() -> bool:
                     if os.read(fd, len(data)) != data:
                         raise RuntimeError("published EDID rollback readback mismatch")
                 except Exception as recovery:
-                    raise RuntimeError(f"{error}; EDID recovery failed: {recovery}") from error
+                    raise RuntimeError(f"{diagnostics.shown(error)}; EDID recovery failed: {diagnostics.shown(recovery)}") from error
                 raise
             decky.logger.info(f"{LOG} normalized published EDID MaxCLL to {EDID_TARGET_NITS} nits")
         return True

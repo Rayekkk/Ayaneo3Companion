@@ -74,6 +74,13 @@ def safe_text(value, limit=256):
     return re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', value)[:limit]
 
 
+def shown(error):
+    """Error text for the panel: an OSError's description without the path it names (event() logs the rest)."""
+    if isinstance(error, OSError) and (error.strerror or error.filename is not None):
+        return error.strerror or type(error).__name__
+    return str(error)
+
+
 def _name(value):
     return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', value) else 'unknown'
 

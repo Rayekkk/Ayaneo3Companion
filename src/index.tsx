@@ -2,25 +2,22 @@
 // Copyright (c) 2026 Rayekkk
 // https://github.com/Rayekkk/Ayaneo3Companion
 
-import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, definePlugin, useQuickAccessVisible } from "@decky/api";
 import { DropdownItem, Field, gamepadSliderClasses, PanelSection, PanelSectionRow, Spinner, staticClasses, ToggleField } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { PageShell, SectionHeader, SectionLink, StackedAction, type SectionKey } from "./ui";
-import { confirmAction, infoRow, unwrap } from "./shared";
-import type { Result } from "./result";
-import { resetUpdates } from "./updates";
-import { AboutPage } from "./about";
+import { confirmAction, infoRow, notify, PageHeader, PageShell, SectionLink } from "./ui";
+import { unwrap } from "./shared";
+import { settle, type Result } from "./result";
+import { AboutPage, INSTALL_HINT, UpdateController, UpdateSection, type UpdateCheck, type UpdateDownload } from "./about";
+import { SECTION_TITLES, sectionIcons, type SectionKey } from "./sections";
+import { useControllerQueue } from "./controller_queue";
 import { AudioPage, BatteryPage, ButtonsPage, DisplayPage, MagicModulesPage, VibrationPage } from "./device_pages";
 import { FanPage, fanSummary, getFanState, type FanState } from "./fan";
 import { clamp, hexToHsv, hsvToHex, SlowSliderField } from "./lighting";
 import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
 import { overviewSummary, type SettingsLimits } from "./tdp_model";
-import type { BatteryStatus, Controller, Hsv, RgbMode, State, Vibration } from "./model";
+import type { BatteryStatus, Hsv, RgbMode, State, Vibration } from "./model";
 
-const SECTION_TITLES: Record<SectionKey, string> = {
-  tdp: "TDP", fan: "Fan Control", vibration: "Vibration", rgb: "Lighting", buttons: "Key Binding",
-  modules: "Magic Modules", battery: "Battery", audio: "Audio", screen: "OLED Display", about: "About",
-};
 const readAge = (milliseconds: number) => {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
@@ -40,11 +37,11 @@ const ACTION_FIELDS: Record<ActionKey, ReadonlyArray<keyof State>> = {
 
 const getState = callable<[], Result<State>>("get_state");
 const getBatteryStatus = callable<[], Result<BatteryStatus>>("get_battery_status");
+const getVersion = callable<[], Result<never> & { version?: string; home?: string }>("get_version");
+const checkForUpdates = callable<[], UpdateCheck>("check_for_updates");
+const performUpdate = callable<[string], UpdateDownload>("perform_update");
 // TDP Control has its own page and RPCs (tdp.tsx); the overview row reads its settings.
 const getTdpSettings = callable<[], Result<SettingsLimits>>("get_settings");
-const setController = callable<[Partial<Controller>], Result<State>>("set_controller");
-const setControllerWithVibrationFeedback = callable<[Partial<Controller>], Result<State>>("set_controller_with_vibration_feedback");
-const setVibrationGain = callable<[number], Result<State>>("set_vibration_gain");
 const testVibration = callable<[number], Result<never>>("test_vibration");
 const setChargeBypass = callable<[boolean], Result<State>>("set_charge_bypass");
 const ejectModules = callable<["left" | "right" | "both"], Result<State>>("eject_modules");
@@ -61,7 +58,11 @@ const VIBRATION_TEST_MS = 500;
 const VIBRATION_APPLY_DELAY_MS = 150;
 const rgbOptions = ["off", "solid", "pulse", "rainbow"].map(data => ({ data, label: data[0].toUpperCase() + data.slice(1) }));
 const titleCase = (value: string) => value ? value[0].toUpperCase() + value.slice(1) : value;
+const INSTALL = `${INSTALL_HINT} Your settings and per-game profiles are kept.`;
 let confirmedState: State | null = null;
+let updates: UpdateController | null = null;
+/** The console user's home folder (get_version), read once About opens: a saved ZIP shows as ~/… */
+let home = "";
 
 const Content: FC = () => {
   const visible = useQuickAccessVisible();
@@ -70,26 +71,16 @@ const Content: FC = () => {
   visibleRef.current = visible;
   const revision = useRef(0);
   const reading = useRef(false);
-  const flushPendingController = useRef<() => void>(() => {});
-  const desiredController = useRef<Controller | null>(null);
   const desiredRgb = useRef<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; ++revision.current; flushPendingController.current(); };
-  }, []);
   // QAM open and the Companion tab actually shown: Steam can hide the tab with display:none.
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [onScreen, setOnScreen] = useState(true);
   const panelOnScreen = () => !panelRef.current || panelRef.current.getClientRects().length > 0;
   const lastOpenedSection = useRef<SectionKey | null>(null);
+  // An open page with unsaved edits (Fan curve, TDP Custom limits) says what leaving it drops; null when nothing would.
+  const unsaved = useRef<(() => string | null) | null>(null);
+  const guardLeave = (check: (() => string | null) | null) => { unsaved.current = check; };
   const lastReadAt = useRef<number | null>(null);
-  const controllerDirty = useRef(false);
-  const controllerPending = useRef<Controller | null>(null);
-  const controllerPatch = useRef<Partial<Controller>>({});
-  const controllerWriting = useRef(false);
-  const controllerDrain = useRef<Promise<boolean> | null>(null);
-  const controllerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastRgbMode = useRef<RgbMode>("solid");
   const [state, setState] = useState<State | null>(confirmedState);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
   const [fanState, setFanState] = useState<FanState | undefined>(undefined);
@@ -101,14 +92,13 @@ const Content: FC = () => {
   const [rgbEdit, setRgbEdit] = useState<Hsv>({ hue: 0, saturation: 100, brightness: 100 });
   const [battery, setBattery] = useState<BatteryStatus | null>(null);
   const [batteryReadError, setBatteryReadError] = useState("");
+  const [homeDir, setHomeDir] = useState(home);
   const readingBattery = useRef(false);
   const refreshBattery = useRef<(() => Promise<void>) | null>(null);
   const busy = pendingAction !== null || Boolean(state?.settings_error || state?.initializing);
   const controllerBusy = busy || state?.controller_supported === false;
-  const notifyFailure = (title: string, error: unknown) => {
-    const body = error instanceof Error ? error.message : String(error);
-    try { toaster.toast({ title, body }); } catch { console.error(`[ayaneo3companion] ${title}: ${body}`); }
-  };
+  const notifyFailure = (title: string, error: unknown) =>
+    notify(title, error instanceof Error ? error.message : String(error));
   const acceptState = (response: State, fields?: ReadonlyArray<keyof State>) => {
     if (!mounted.current) return;
     const next = fields && confirmedState
@@ -116,26 +106,42 @@ const Content: FC = () => {
       : response;
     confirmedState = next;
     setState(current => current ? { ...next,
-      controller: controllerDirty.current ? current.controller : next.controller,
+      controller: queue.dirty.current ? current.controller : next.controller,
     } : next);
   };
+  const queue = useControllerQueue({
+    mounted, revision,
+    blocked: () => Boolean(pendingActionRef.current || state?.settings_error || state?.initializing),
+    shown: () => state!.controller,
+    show: controller => setState(current => current ? { ...current, controller } : current),
+    applied: applied => {
+      confirmedState = confirmedState ? { ...confirmedState, controller: applied.controller } : applied;
+      setState(current => current ? { ...current, controller: applied.controller } : applied);
+    },
+    failed: message => notifyFailure("Controller setting failed", message),
+    refresh: () => void refresh(),
+  });
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; ++revision.current; queue.flushPending(); };
+  }, []);
 
   useEffect(() => {
-    if (!state || controllerDirty.current) return;
+    if (!state || queue.dirty.current) return;
     const hsv = hexToHsv(state.controller.color);
     desiredRgb.current = { ...hsv, brightness: state.controller.brightness };
     setRgbEdit(desiredRgb.current);
   }, [state?.controller.color, state?.controller.brightness]);
 
   useEffect(() => {
-    if (state && !controllerDirty.current) {
-      desiredController.current = state.controller;
-      if (state.controller.rgb_mode !== "off") lastRgbMode.current = state.controller.rgb_mode;
+    if (state && !queue.dirty.current) {
+      queue.desired.current = state.controller;
+      if (state.controller.rgb_mode !== "off") queue.lastRgbMode.current = state.controller.rgb_mode;
     }
   }, [state?.controller]);
 
   const refresh = useCallback(async () => {
-    if (!mounted.current || !visibleRef.current || reading.current || pendingActionRef.current || controllerWriting.current || controllerPending.current) return;
+    if (!mounted.current || !visibleRef.current || reading.current || pendingActionRef.current || queue.busy()) return;
     reading.current = true;
     const request = revision.current;
     try {
@@ -172,7 +178,7 @@ const Content: FC = () => {
     // Overlays such as a native dropdown or a confirmation hide Quick Access briefly.
     // Visibility controls polling only; the open page belongs to the links and back button.
     ++revision.current;
-    if (!visible) { flushPendingController.current(); return; }
+    if (!visible) { queue.flushPending(); return; }
     if (!onScreen) return;
     void refresh();
     const timer = setInterval(refresh, 1500);
@@ -238,6 +244,16 @@ const Content: FC = () => {
     };
   }, [activeSection, visible]);
 
+  // A saved update shows as ~/…: the home folder is read once, when About first opens.
+  useEffect(() => {
+    if (activeSection !== "about" || home) return;
+    let active = true;
+    void settle(getVersion()).then(result => {
+      if (result.ok && result.home) { home = result.home; if (active) setHomeDir(home); }
+    });
+    return () => { active = false; };
+  }, [activeSection]);
+
   const finishAction = () => {
     ++revision.current;
     pendingActionRef.current = null;
@@ -247,7 +263,8 @@ const Content: FC = () => {
     }
   };
 
-  const run = async (action: ActionKey, work: () => Promise<Result<State>>, title: string, success?: string) => {
+  /** `announce`: the action ran from a dialog that hid the panel, so its success is a toast too (UI.md §5). */
+  const run = async (action: ActionKey, work: () => Promise<Result<State>>, title: string, success?: string, announce?: string) => {
     if (pendingActionRef.current || state?.settings_error || state?.initializing) return;
     const canAccept = () => mounted.current;
     ++revision.current;
@@ -256,6 +273,7 @@ const Content: FC = () => {
     try {
       const next = await unwrap(work());
       if (canAccept()) { acceptState(next, ACTION_FIELDS[action]); if (success) setStatus(success); }
+      if (announce && success) notify(announce, success);
     } catch (error) {
       notifyFailure(title, error);
       if (canAccept()) setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
@@ -264,8 +282,10 @@ const Content: FC = () => {
     }
   };
 
-  if (!state) return <PageShell rootRef={panelRef}><PanelSection><PanelSectionRow>{status ? <Field label="Backend unavailable" description={status.replace(/^Error:\s*/, "")} /> : <Spinner />}</PanelSectionRow></PanelSection></PageShell>;
-  if (state.settings_error || state.startup_error || state.initializing) return <PageShell rootRef={panelRef}><PanelSection title="Plugin unavailable">{infoRow(state.initializing ? "Starting hardware controls" : "Settings require attention", state.settings_error || state.startup_error || "Waiting for the backend to finish initialising.")}</PanelSection></PageShell>;
+  // A plugin that did not start keeps its updater (UI.md §3).
+  const updateSection = updates && <UpdateSection controller={updates} version={state?.version || __PLUGIN_VERSION__} home={homeDir} install={INSTALL} />;
+  if (!state) return <PageShell rootRef={panelRef}><PanelSection><PanelSectionRow>{status ? <Field focusable label="Backend unavailable" description={status.replace(/^Error:\s*/, "")} /> : <Spinner />}</PanelSectionRow></PanelSection>{status && updateSection}</PageShell>;
+  if (state.settings_error || state.startup_error || state.initializing) return <PageShell rootRef={panelRef}><PanelSection title="Plugin unavailable">{infoRow(state.initializing ? "Starting hardware controls" : "Settings require attention", state.settings_error || state.startup_error || "Waiting for the backend to finish initializing.")}</PanelSection>{!state.initializing && updateSection}</PageShell>;
   if (!state.supported) return <PageShell rootRef={panelRef}><PanelSection title="Unsupported device">{infoRow(state.device, "AYANEO 3 is required.")}</PanelSection></PageShell>;
 
   const changeScreenFix = (enabled: boolean) => {
@@ -273,10 +293,11 @@ const Content: FC = () => {
       "screen",
       () => setScreenFix(enabled, replaceExisting),
       "Display fix failed",
-      enabled ? "Display definition installed. Restart Game Mode." : "Display definition removed. Restart Game Mode.",
+      enabled ? "Display definition installed. Restart Gaming Mode." : "Display definition removed. Restart Gaming Mode.",
+      replaceExisting ? SECTION_TITLES.screen : undefined,
     );
     if (enabled && state.screen_conflict) {
-      confirmAction("Replace Display Definition?",
+      confirmAction("Replace display definition?",
         "Another AYANEO 3 gamescope display definition is already installed. OLED Fix must replace it to manage the display. The existing file will be backed up before any change.",
         "Replace", () => apply(true));
       return;
@@ -284,125 +305,35 @@ const Content: FC = () => {
     apply();
   };
 
-  const flushController = (): Promise<boolean> => {
-    if (controllerDrain.current) return controllerDrain.current;
-    if (!controllerPending.current) return Promise.resolve(true);
-    controllerWriting.current = true;
-    let needsRefresh = false;
-    const unconfirmed = new Set<keyof Controller>();
-    let resolveDrain!: (value: boolean) => void;
-    let rejectDrain!: (error: unknown) => void;
-    const drain = new Promise<boolean>((resolve, reject) => { resolveDrain = resolve; rejectDrain = reject; });
-    controllerDrain.current = drain;
-    ++revision.current;
-    // Share completion of the entire queue, including its in-flight write,
-    // while still starting the first RPC immediately when QAM is closed.
-    const processQueue = async () => {
-      try {
-        while (controllerPending.current) {
-          controllerPending.current = null;
-          const patch = controllerPatch.current;
-          controllerPatch.current = {};
-          const firmwareChanged = patch.vibration !== undefined || patch.rgb_mode !== undefined
-            || patch.color !== undefined || patch.brightness !== undefined;
-          try {
-            let applied: State | null = null;
-            if (firmwareChanged) {
-              applied = await unwrap(patch.vibration !== undefined
-                ? setControllerWithVibrationFeedback(patch)
-                : setController(patch));
-            }
-            // Mixed edits commit firmware and FF_GAIN in one transaction;
-            // gain alone still avoids an unnecessary HID write.
-            if (patch.ff_gain !== undefined && !firmwareChanged) applied = await unwrap(setVibrationGain(patch.ff_gain));
-            // A later independent patch does not confirm fields that failed
-            // earlier in this drain. An explicit newer edit of that same field
-            // can still supersede the failure and become confirmed.
-            for (const field of Object.keys(patch) as Array<keyof Controller>) unconfirmed.delete(field);
-            if (!controllerPending.current) {
-              controllerDirty.current = false;
-              if (applied && mounted.current) {
-                confirmedState = confirmedState ? { ...confirmedState, controller: applied.controller } : applied;
-                setState(current => current
-                  ? { ...current, controller: applied.controller }
-                  : applied);
-              }
-            }
-          } catch (error) {
-            for (const field of Object.keys(patch) as Array<keyof Controller>) unconfirmed.add(field);
-            const message = error instanceof Error ? error.message : String(error);
-            notifyFailure("Controller setting failed", message);
-            if (!controllerPending.current) {
-              controllerDirty.current = false;
-              desiredController.current = null;
-              needsRefresh = true;
-            }
-          }
-        }
-      } finally {
-        ++revision.current;
-        controllerWriting.current = false;
-        controllerDrain.current = null;
-        if (controllerPending.current) void flushController();
-        else if (needsRefresh && mounted.current) void refresh();
-      }
-      return unconfirmed.size === 0;
-    };
-    void processQueue().then(resolveDrain, rejectDrain);
-    return drain;
-  };
-  const applyController = (part: Partial<Controller>, delay = 0) => {
-    if (pendingActionRef.current || state.settings_error || state.initializing) return;
-    ++revision.current;
-    const base = controllerPending.current ?? desiredController.current ?? state.controller;
-    const controller = { ...base, ...part };
-    if (controller.rgb_mode !== "off") lastRgbMode.current = controller.rgb_mode;
-    controllerDirty.current = true;
-    controllerPending.current = controller;
-    controllerPatch.current = { ...controllerPatch.current, ...part };
-    desiredController.current = controller;
-    if (mounted.current) setState(current => current ? { ...current, controller } : current);
-    if (controllerTimer.current) clearTimeout(controllerTimer.current);
-    if (!mounted.current) { controllerTimer.current = null; void flushController(); }
-    else controllerTimer.current = setTimeout(() => { controllerTimer.current = null; void flushController(); }, delay);
-  };
-  flushPendingController.current = () => {
-    if (controllerTimer.current) clearTimeout(controllerTimer.current);
-    controllerTimer.current = null;
-    if (controllerPending.current) void flushController();
-  };
   const setVibrationLevel = (value: number) => {
     if (!Number.isFinite(value)) return;
     const vibration = VIBRATION_LEVELS[Math.round(clamp(value, 0, VIBRATION_LEVELS.length - 1))];
-    const current = controllerPending.current ?? desiredController.current ?? state.controller;
-    if (vibration !== current.vibration) applyController({ vibration }, VIBRATION_APPLY_DELAY_MS);
+    if (vibration !== queue.current().vibration) queue.apply({ vibration }, VIBRATION_APPLY_DELAY_MS);
   };
   const setFfGain = (raw: number) => {
     if (!Number.isFinite(raw)) return;
     const value = Math.round(clamp(raw, 0, 100) / 10) * 10;
-    const current = controllerPending.current ?? desiredController.current ?? state.controller;
-    if (value !== current.ff_gain) applyController({ ff_gain: value }, 150);
+    if (value !== queue.current().ff_gain) queue.apply({ ff_gain: value }, 150);
   };
   const previewRgb = (next: Hsv) => {
-    controllerDirty.current = true;
+    queue.dirty.current = true;
     desiredRgb.current = next;
     setRgbEdit(next);
   };
   const commitRgb = (next: Hsv, field: "color" | "brightness") => {
     desiredRgb.current = next;
     setRgbEdit(next);
-    applyController(field === "color" ? { color: hsvToHex(next.hue, next.saturation) } : { brightness: next.brightness }, 500);
+    queue.apply(field === "color" ? { color: hsvToHex(next.hue, next.saturation) } : { brightness: next.brightness }, 500);
   };
   const runVibrationTest = async () => {
     if (pendingActionRef.current || state.settings_error || state.initializing) return;
     ++revision.current;
     pendingActionRef.current = "vibration";
     setPendingAction("vibration");
-    if (controllerTimer.current) clearTimeout(controllerTimer.current);
-    controllerTimer.current = null;
+    queue.cancelTimer();
     let controllerConfirmed = false;
     try {
-      controllerConfirmed = await flushController();
+      controllerConfirmed = await queue.flush();
       if (!controllerConfirmed || !mounted.current) return;
       const result = await testVibration(VIBRATION_TEST_MS);
       if (!result.ok) notifyFailure("Vibration test failed", result.error ?? "Unknown error");
@@ -421,14 +352,21 @@ const Content: FC = () => {
     lastOpenedSection.current = section;
     setStatus(null); setActiveSection(section);
   };
-  const backToControls = () => { setStatus(null); setActiveSection(null); };
+  const leave = () => { setStatus(null); setActiveSection(null); };
+  // B and ‹ All Controls: unsaved edits are dropped only after "Discard changes?"; Cancel stays on the page.
+  const backToControls = () => {
+    const lost = unsaved.current?.();
+    if (!lost) { leave(); return; }
+    confirmAction("Discard changes?", lost, "Discard", leave, { destructive: true });
+  };
   const focusSection = lastOpenedSection.current;
   // One status read serves every row: an older confirmed state says how old it is.
   const staleNote = stateReadError && lastReadAt.current !== null
     ? `Older data · Last read ${readAge(Date.now() - lastReadAt.current)} ago · Retrying…` : undefined;
+  // Coming back from a page focuses its row once, and only while the menu is shown (SectionLink reads it on mount).
   const link = (section: SectionKey, description: string, note = staleNote) =>
-    <SectionLink section={section} title={SECTION_TITLES[section]} description={description} statusNote={note}
-      restoreFocus={focusSection === section} onClick={() => openSection(section)} />;
+    <SectionLink icon={sectionIcons[section]} title={SECTION_TITLES[section]} description={description} note={note}
+      focus={visible && focusSection === section} onOpen={() => openSection(section)} />;
   const moduleSummary = state.modules_reconnecting
     ? "Waiting for both modules"
     : state.modules_connected
@@ -437,13 +375,13 @@ const Content: FC = () => {
   const audioSummary = state.audio_fix_enabled
     ? state.audio_fix_installed ? state.audio_profile : "Tuning pending"
     : "Generic SteamOS profile";
-  const readFailure = stateReadError && <PanelSection title="Device Status">
+  const readFailure = stateReadError && <PanelSection title="Device status">
     <PanelSectionRow><Field focusable label="Status refresh failed"
       description={`Showing last confirmed values. Retrying automatically. ${stateReadError}`} /></PanelSectionRow>
   </PanelSection>;
 
   if (!activeSection) return <PageShell rootRef={panelRef}>
-    <PanelSection title="Hardware Controls">
+    <PanelSection title="Hardware controls">
       {link("tdp", tdpSettings ? overviewSummary(tdpSettings) : "Power limits and CPU settings", undefined)}
       {link("fan", fanSummary(fanState), undefined)}
       {link("vibration", `${titleCase(state.controller.vibration)} · FF Gain ${state.controller.ff_gain}%`)}
@@ -461,25 +399,25 @@ const Content: FC = () => {
       {infoRow(state.device, "SteamOS")}
     </PanelSection>
     <PanelSection title="Plugin">
-      {link("about", `AYANEO 3 Companion · v${state.version}`, undefined)}
+      {link("about", `Version ${state.version} · updates`, undefined)}
     </PanelSection>
   </PageShell>;
 
-  return <PageShell rootRef={panelRef}>
-    <SectionHeader title={SECTION_TITLES[activeSection]} onBack={backToControls} />
+  return <PageShell rootRef={panelRef} onBack={backToControls}>
+    <PageHeader title={SECTION_TITLES[activeSection]} back="All Controls" onBack={backToControls} focus={visible} />
     {readFailure}
 
-    {activeSection === "tdp" && <TdpPage visible={onScreen} />}
+    {activeSection === "tdp" && <TdpPage visible={onScreen} guardLeave={guardLeave} />}
 
     {activeSection === "vibration" && <VibrationPage state={state} busy={busy} testing={pendingAction === "vibration"} onLevel={setVibrationLevel} onGain={setFfGain} onTest={() => void runVibrationTest()} />}
 
-    {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} />}
+    {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} guardLeave={guardLeave} />}
 
-    {activeSection === "rgb" && <PanelSection title="LED Settings">
+    {activeSection === "rgb" && <PanelSection title="LED settings">
       {state.controller_error && <PanelSectionRow><Field label="Controller control unavailable" description={state.controller_error} /></PanelSectionRow>}
-      <PanelSectionRow><ToggleField label="Enable LED Control" disabled={controllerBusy} checked={state.controller.rgb_mode !== "off"} onChange={enabled => applyController({ rgb_mode: enabled ? lastRgbMode.current : "off" })} /></PanelSectionRow>
+      <PanelSectionRow><ToggleField label="Enable LED control" disabled={controllerBusy} checked={state.controller.rgb_mode !== "off"} onChange={enabled => queue.apply({ rgb_mode: enabled ? queue.lastRgbMode.current : "off" })} /></PanelSectionRow>
       {state.controller.rgb_mode !== "off" && <>
-        <PanelSectionRow><DropdownItem label="LED Mode" disabled={controllerBusy} selectedOption={state.controller.rgb_mode} rgOptions={rgbOptions.filter(option => option.data !== "off")} onChange={option => applyController({ rgb_mode: option.data as RgbMode })} /></PanelSectionRow>
+        <PanelSectionRow><DropdownItem label="LED mode" disabled={controllerBusy} selectedOption={state.controller.rgb_mode} rgOptions={rgbOptions.filter(option => option.data !== "off")} onChange={option => queue.apply({ rgb_mode: option.data as RgbMode })} /></PanelSectionRow>
         <PanelSectionRow><Field label={`#${state.controller.color.toUpperCase()}`} description={`${titleCase(state.controller.rgb_mode)} · ${rgbEdit.brightness}% brightness`}><span style={{ display: "block", width: "28px", height: "28px", borderRadius: "50%", background: `#${state.controller.color}`, border: "2px solid rgba(255,255,255,.55)" }} /></Field></PanelSectionRow>
         <PanelSectionRow><SlowSliderField label="Hue" disabled={controllerBusy} value={rgbEdit.hue} min={0} max={359} valueSuffix="°" className="AyaneoRgbHue" onChange={hue => previewRgb({ ...desiredRgb.current, hue })} onChangeEnd={hue => commitRgb({ ...desiredRgb.current, hue }, "color")} /></PanelSectionRow>
         <PanelSectionRow><SlowSliderField label="Saturation" disabled={controllerBusy} value={rgbEdit.saturation} min={0} max={100} valueSuffix="%" className="AyaneoRgbSaturation" onChange={saturation => previewRgb({ ...desiredRgb.current, saturation })} onChangeEnd={saturation => commitRgb({ ...desiredRgb.current, saturation }, "color")} /></PanelSectionRow>
@@ -499,22 +437,22 @@ const Content: FC = () => {
 
     {activeSection === "modules" && <MagicModulesPage
       state={state} busy={busy} pending={pendingAction === "modules"}
-      onEject={side => confirmAction(`Eject ${titleCase(side)}`,
-        `Release ${side === "both" ? "both controller modules" : `the ${side} controller module`}?`, "Eject",
-        () => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`))}
-      onReset={() => confirmAction("Reset Magic Modules",
-        "The controller will briefly disconnect while both modules are reinitialised.", "Reset",
-        () => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected."))}
+      onEject={side => confirmAction(side === "both" ? "Eject both modules?" : `Eject the ${side} module?`,
+        `${side === "both" ? "Both controller modules are" : `The ${side} controller module is`} released. Insert ${side === "both" ? "them" : "it"} again to use the controller.`, "Eject",
+        () => void run("modules", () => ejectModules(side), "Module eject failed", `${titleCase(side)} module${side === "both" ? "s" : ""} released.`, SECTION_TITLES.modules))}
+      onReset={() => confirmAction("Reset Magic Modules?",
+        "The controller will briefly disconnect while both modules are reinitialized.", "Reset",
+        () => void run("modules", () => resetModules(), "Magic Module reset failed", "Both modules reset and detected.", SECTION_TITLES.modules))}
     />}
 
     {activeSection === "audio" && <AudioPage
       state={state} busy={busy} pending={pendingAction === "audio"}
       onEnabled={enabled => void run("audio", () => setAudioFix(enabled), "Audio fix failed", enabled ? "AYANEO speaker tuning enabled." : "Generic audio profile restored.")}
       onReapply={() => void run("audio", () => reapplyAudioFix(), "Audio fix failed", "AYANEO speaker tuning reapplied.")}
-      onRecalibrate={() => confirmAction("Recalibrate Speakers",
+      onRecalibrate={() => confirmAction("Recalibrate speakers?",
         "Place the console on a clear surface in a quiet room. A calibration signal will play and the result will be written to EFI.",
         "Recalibrate",
-        () => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it."))}
+        () => void run("audio", () => recalibrateAudio(), "Audio recalibration failed", "Calibration saved. Restart the console to apply it.", SECTION_TITLES.audio))}
     />}
 
     {activeSection === "buttons" && <ButtonsPage
@@ -525,11 +463,15 @@ const Content: FC = () => {
 
     {activeSection === "screen" && <DisplayPage state={state} busy={busy} onChange={changeScreenFix}
       onRestart={() => confirmAction("Restart Gaming Mode?", "Steam and any running game will close and reopen. Save your game first.",
-        "Restart", () => void run("screen", () => restartGameMode(), "Gaming Mode restart failed", "Gaming Mode is restarting."))} />}
+        "Restart", () => void run("screen", () => restartGameMode(), "Gaming Mode restart failed", "Gaming Mode is restarting.", SECTION_TITLES.screen),
+        { destructive: true })} />}
 
-    {activeSection === "about" && <AboutPage version={state.version} />}
+    {activeSection === "about" && <AboutPage name="AYANEO 3 Companion" version={state.version}
+      description="All-in-one AYANEO 3 hardware controls for Decky Loader." license="BSD-3-Clause" source="github.com/Rayekkk/Ayaneo3Companion"
+      credits={[["Included modules", "TDP & CPU · Fan Control · Vibration · Lighting · Key binding · Magic Modules · Battery · Audio · OLED display"]]}
+      updates={updates ?? undefined} home={homeDir} install={INSTALL} />}
 
-    {status && activeSection !== "tdp" && <PanelSection title="Status"><PanelSectionRow><Field label={status.startsWith("Error:") ? "Action failed" : "Done"} description={status.replace(/^Error:\s*/, "")} /></PanelSectionRow></PanelSection>}
+    {status && activeSection !== "tdp" && <PanelSection title="Status"><PanelSectionRow><Field focusable label={status.startsWith("Error:") ? "Action failed" : "Done"} description={status.replace(/^Error:\s*/, "")} /></PanelSectionRow></PanelSection>}
   </PageShell>;
 };
 
@@ -537,6 +479,8 @@ const Icon: FC = () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 export default definePlugin(() => {
   // Per-game profiles must keep following Steam even while the QAM is closed.
   startTdpWatcher();
+  updates?.dispose();
+  updates = new UpdateController({ check: checkForUpdates, download: performUpdate }, "ayaneo3companion");
   return {
     name: "AYANEO 3 Companion",
     titleView: <div className={staticClasses.Title}>AYANEO 3 Companion</div>,
@@ -545,7 +489,7 @@ export default definePlugin(() => {
     icon: <Icon />,
     onDismount() {
       stopTdpWatcher(); confirmedState = null;
-      resetUpdates();
+      updates?.dispose(); updates = null; home = "";
     },
   };
 });

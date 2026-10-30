@@ -154,6 +154,11 @@ class ControllerFeedbackTests(unittest.TestCase):
         layout.assert_called_once()
         power.assert_not_called()
 
+    def test_version_names_the_home_folder_for_the_panels_short_paths(self):
+        with patch.object(companion_common, "plugin_version", return_value="1.3.0"):
+            result = asyncio.run(self.plugin.get_version())
+        self.assertEqual(result, {"ok": True, "version": "1.3.0", "home": main.decky.DECKY_USER_HOME})
+
     def test_update_rpc_passes_selected_version_and_rejects_no_selection(self):
         updates = Mock()
         updates.download.return_value = {"ok": False, "error": "latest release changed"}

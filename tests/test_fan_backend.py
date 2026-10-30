@@ -247,6 +247,11 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda:fresh._task is None and not fresh._mutation.locked())
         self.assertFalse(fan.settings.getSetting('state')['enabled']);self.assertIn('validated',fresh._error)
 
+    async def test_unreadable_settings_error_names_the_reason_without_the_path(self):
+        denied=PermissionError(13,'Permission denied','/home/deck/homebrew/settings/fan_settings.json')
+        with patch.object(fan.settings,'getSetting',side_effect=denied):self.p._load()
+        self.assertEqual(self.p._error,'Permission denied');self.assertFalse(self.p._settings_valid)
+
     async def test_unconfirmed_release_runs_one_release_only_session_before_latching_off(self):
         fresh,made=await self.supervised([DeadClient()])
         await self.until(lambda:fresh._task is None and not fresh._mutation.locked())

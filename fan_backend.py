@@ -16,7 +16,7 @@ import threading
 import time
 
 import decky
-from diagnostics import event as diagnostic_event, transition as diagnostic_transition
+from diagnostics import event as diagnostic_event, shown, transition as diagnostic_transition
 import module_runtime
 from dk_process import PYTHON, system_env
 from safe_settings import SettingsManager
@@ -77,7 +77,7 @@ def read_automatic():
                                    override=sample['override'], checked_at=time.monotonic(), reason='')
         return result
     except Exception as exc:
-        message = str(exc) or 'Fresh fan reading unavailable.'
+        message = shown(exc) or 'Fresh fan reading unavailable.'
         return dict(valid=False, error=message, ownership=dict(blocked=True, state='unavailable',
                      reason=message, checked_at=time.monotonic()))
     finally:
@@ -369,7 +369,7 @@ class Client:
             if not self.state.get('automatic') or self.state.get('kind') != 'closed':
                 raise RuntimeError(self.state.get('error') or 'Firmware automatic readback is pending.')
             if errors:
-                raise RuntimeError('Fan communication cleanup failed: '+str(errors[0])) from errors[0]
+                raise RuntimeError('Fan communication cleanup failed: '+shown(errors[0])) from errors[0]
 
 
 def retire_legacy_guard() -> bool:
@@ -428,7 +428,7 @@ class Plugin:
             raw = settings.getSetting('state', None)
             self._state = defaults() if raw is None else validate_settings(raw)
         except (ValueError, TypeError, OSError) as exc:
-            self._state = defaults(); self._error = str(exc); self._settings_valid = False
+            self._state = defaults(); self._error = shown(exc); self._settings_valid = False
             diagnostic_transition('fan', 'settings', 'unavailable', level='warning', error=exc,
                                   store='fan_settings', pending=True)
         self._loaded = True
@@ -533,21 +533,21 @@ class Plugin:
                 await module_runtime.offload('fan', release_orphan)
             except Exception as error:
                 diagnostic_event('fan', 'orphan_release_failed', level='error', error=error, stage='session_end')
-                raise RuntimeError(f'{exc} Leftover fan override release failed: {error}') from exc
+                raise RuntimeError(f'{shown(exc)} Leftover fan override release failed: {shown(error)}') from exc
             self._client = None  # Its override is released; nothing is left to close.
-            return f'{exc} Firmware automatic restored by a release-only session.'
+            return f'{shown(exc)} Firmware automatic restored by a release-only session.'
 
     async def _end_session(self, exc):
         """Prove firmware automatic, then classify how the session ended."""
         if self._client is None:
-            return outcome_of(exc), str(exc)  # Failed start: the guardian never armed a target.
+            return outcome_of(exc), shown(exc)  # Failed start: the guardian never armed a target.
         state = self._client.snapshot()
         # The guardian sees our timeout's channel close as EOF (pause); it is a retry wherever it surfaced.
         exc = self._client.timeout or exc
         # A terminal packet or recovery receipt carries the guardian's class; local failures are ours.
         local = isinstance(exc, TimeoutError) or state.get('kind') not in ('closed', 'disconnected')
-        reason = state.get('error') or str(exc)
-        joined = lambda error: str(error) if str(error).startswith(reason) else f'{reason} {error}'
+        reason = state.get('error') or shown(exc)
+        joined = lambda error: shown(error) if shown(error).startswith(reason) else f'{reason} {shown(error)}'
         try:
             unconfirmed = await self._close_client()
         except Exception as error:
@@ -556,7 +556,7 @@ class Plugin:
             return 'fault', joined(unconfirmed)
         state = self._client.snapshot()
         if local:
-            return outcome_of(exc), str(exc)
+            return outcome_of(exc), shown(exc)
         return state.get('outcome') or 'fault', state.get('error') or reason
 
     async def _save_off(self, reason):
@@ -566,7 +566,7 @@ class Plugin:
         try:
             await self._persist(value)
         except Exception as save_error:
-            self._state = value; reason = f'{reason} {save_error}'
+            self._state = value; reason = f'{reason} {shown(save_error)}'
         self._error = reason
         diagnostic_event('fan', 'control_fault', level='error', stage='monitor', enabled=False, reason=reason)
 
@@ -590,7 +590,7 @@ class Plugin:
                     return  # The resumed session start releases any leftover override.
             await self._release_leftover_override(legacy)
         except Exception as exc:
-            self._error = str(exc)
+            self._error = shown(exc)
             diagnostic_transition('fan', 'availability', 'unavailable', level='warning' if self._supported else 'info', error=exc,
                                   supported=self._supported, stage='startup')
             self._state['enabled'] = False
@@ -598,7 +598,7 @@ class Plugin:
                 try:
                     await self._persist(self._revised())
                 except Exception as save_error:
-                    self._error += ' ' + str(save_error)
+                    self._error += ' ' + shown(save_error)
 
     async def _release_leftover_override(self, legacy: bool = False):
         """Fan stays OFF: release once a manual duty left by a killed session or 1.2.x.
@@ -619,7 +619,7 @@ class Plugin:
             try:
                 await module_runtime.offload('fan', release_orphan)
             except Exception as exc:
-                self._error = f'Leftover fan override release failed: {exc}'
+                self._error = f'Leftover fan override release failed: {shown(exc)}'
                 diagnostic_event('fan', 'orphan_release_failed', level='error', error=exc, stage='startup')
 
     async def _start_client(self):
@@ -740,7 +740,7 @@ class Plugin:
                             if self._settings_valid:
                                 await self._persist(value)
                             raise
-                        self._error = unconfirmed or self._client.snapshot().get('error') or str(communication)
+                        self._error = unconfirmed or self._client.snapshot().get('error') or shown(communication)
                 if self._settings_valid:
                     await self._persist(value)
                 if enabled and not self._live():
@@ -757,14 +757,14 @@ class Plugin:
                     # No background EC ownership, sensor polling or workers while off.
                     await self._shutdown()
             except Exception as exc:
-                self._error = str(exc)
+                self._error = shown(exc)
                 if enabled:
                     self._state['enabled'] = False; self._applied = None
                     if not self._closing:  # Unload never changes the saved intent.
                         try:
                             await self._persist(self._revised())
                         except Exception as save_error:
-                            self._error += ' ' + str(save_error)
+                            self._error += ' ' + shown(save_error)
                     await self._shutdown()
                 else:
                     # Disk failure cannot leave idle workers or a monitor that
@@ -772,7 +772,7 @@ class Plugin:
                     try:
                         await self._shutdown()
                     except Exception as close_error:
-                        self._error += ' ' + str(close_error)
+                        self._error += ' ' + shown(close_error)
                 raise
         return await self.get_state()
 
@@ -814,7 +814,7 @@ class Plugin:
                     await self._apply()
                 except Exception as exc:
                     # A failed curve switch must not leave the previous mode armed.
-                    self._error = str(exc); self._applied = None
+                    self._error = shown(exc); self._applied = None
                     self._state = self._revised(enabled=False)
                     try:
                         await self._persist(self._state)

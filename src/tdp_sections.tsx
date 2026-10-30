@@ -3,7 +3,8 @@
 // The Notice, Power, Custom limits and More sections of the TDP page (tdp.tsx).
 
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
-import { confirmAction, detailsRows, infoRow, unwrap } from "./shared";
+import { unwrap } from "./shared";
+import { confirmAction, detailsRows, infoRow } from "./ui";
 import {
   absolute, boostRoomNote, drawText, fromAbsolute, limitsText, normalise, offsetMax, powerSummary, PRESET_LABELS,
   PRESET_ORDER, presetNote, resolvedPreset, scopeNote, simpleTuning, sourceNote, tdpNotice, withFppt, withSpl, withSppt,
@@ -54,7 +55,7 @@ export const powerSection = (s: TdpState) => {
       if (base) (base.ac ? setAcTuning : setTuning)(base.tuning);
       clearDraft();
       proceed();
-    });
+    }, { destructive: true });
   };
 
   // ── Preset handler ────────────────────────────────────────────────────────────
@@ -447,7 +448,7 @@ export const moreSection = (s: TdpState) => {
         <ButtonItem layout="below" disabled={loading} description={failureFor("delete")}
           onClick={() => confirmAction(`Delete profile for ${game.name}?`,
             `Its power, CPU Boost and energy settings are removed. ${game.name} will use Global settings.`,
-            "Delete", () => void deleteProfile())}>
+            "Delete", () => void deleteProfile(), { destructive: true })}>
           {`Delete profile for ${game.name}`}
         </ButtonItem>
       </PanelSectionRow>}

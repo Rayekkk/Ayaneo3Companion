@@ -6,6 +6,19 @@ All notable changes to AYANEO 3 Companion, newest first.
 
 ### Changed
 
+- **Panel:** the B button on a module page goes back to the module list (it used
+  to close the Quick Access menu), with the focus on the module you came from.
+  Leaving Fan Control or TDP with unsaved curve or Custom limit changes first
+  asks "Discard changes?".
+- **About:** version, author and included modules first, then **Updates** at the
+  bottom with the same texts as the other plugins; a downloaded ZIP is shown as
+  `~/Downloads/…`. If the plugin cannot start, the updater stays available.
+- **Fan curve:** the graph uses the editor shared with the other plugins; it is
+  edited the same way (A or a tap, LB/RB, D-pad, dragging), B now reads "Done".
+- **Texts:** labels and titles in sentence case and US English (for example
+  **Key binding**, **Bypass charging**, "color"); loading shows a spinner and a
+  failed first TDP read offers **Try again**. Confirmations ask a question
+  ("Eject the left module?") and report their result in a notification.
 - **Clearer errors:** when something fails unexpectedly, the panel shows a short
   message and the details go to the Decky log, never file paths.
 - **Downloads that cannot hang:** RyzenAdj, the speaker calibration file and

@@ -11,6 +11,7 @@ from pathlib import Path
 import decky
 
 import companion_common
+import diagnostics
 import dk_process
 from companion_common import LOG
 
@@ -256,7 +257,7 @@ def _write_charge_bypass_unlocked(enabled: bool) -> None:
                 if _read_charge_behaviour(behaviour) != previous:
                     raise RuntimeError("charge control rollback readback mismatch")
             except Exception as recovery:
-                raise RuntimeError(f"{error}; charge recovery failed: {recovery}") from error
+                raise RuntimeError(f"{diagnostics.shown(error)}; charge recovery failed: {diagnostics.shown(recovery)}") from error
             raise
         return
 
@@ -282,7 +283,7 @@ def _write_charge_bypass_unlocked(enabled: bool) -> None:
                 if ec.read(1) != previous:
                     raise RuntimeError("EC charge rollback readback mismatch")
             except Exception as recovery:
-                raise RuntimeError(f"{error}; charge recovery failed: {recovery}") from error
+                raise RuntimeError(f"{diagnostics.shown(error)}; charge recovery failed: {diagnostics.shown(recovery)}") from error
             raise
 
 
@@ -325,7 +326,7 @@ def _write_ec_register(register: int, value: int) -> None:
                 if ec.read(1) != previous:
                     raise RuntimeError("EC rollback readback mismatch")
             except Exception as recovery:
-                raise RuntimeError(f"{error}; EC recovery failed: {recovery}") from error
+                raise RuntimeError(f"{diagnostics.shown(error)}; EC recovery failed: {diagnostics.shown(recovery)}") from error
             raise
 
 
@@ -399,7 +400,7 @@ def set_controller_power(enabled: bool) -> None:
                     if _native_controller_power() != previous:
                         raise RuntimeError("controller power rollback readback mismatch")
                 except Exception as recovery:
-                    raise RuntimeError(f"{error}; controller recovery failed: {recovery}") from error
+                    raise RuntimeError(f"{diagnostics.shown(error)}; controller recovery failed: {diagnostics.shown(recovery)}") from error
                 raise
         return
     _write_ec_register(EC_CONTROLLER_POWER_REGISTER,

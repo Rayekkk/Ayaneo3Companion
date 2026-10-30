@@ -16,6 +16,7 @@ from pathlib import Path
 import decky
 
 import companion_common
+import diagnostics
 import dk_fs
 import dk_net
 import dk_process
@@ -359,7 +360,7 @@ def _apply_audio_fix_locked(stop_playback: bool = True) -> None:
     try:
         configured = AUDIO_FIRMWARE_PATH.read_text().strip()
     except OSError as error:
-        raise RuntimeError(f"kernel firmware path is unavailable: {error}") from error
+        raise RuntimeError(f"kernel firmware path is unavailable: {diagnostics.shown(error)}") from error
     allowed = {"", str(AUDIO_FIRMWARE_ROOT), *AUDIO_LEGACY_TEST_PATHS}
     if configured not in allowed:
         raise RuntimeError(f"another custom firmware path is active: {configured}")
@@ -383,7 +384,7 @@ def _apply_audio_fix_locked(stop_playback: bool = True) -> None:
                 raise RuntimeError("audio firmware path rollback readback mismatch")
             _reload_audio_dsps(card)
         except Exception as recovery:
-            raise RuntimeError(f"{error}; audio recovery failed: {recovery}") from error
+            raise RuntimeError(f"{diagnostics.shown(error)}; audio recovery failed: {diagnostics.shown(recovery)}") from error
         raise
 
 
@@ -421,7 +422,7 @@ def _remove_audio_fix_locked(reload_dsp: bool = True) -> None:
                     if card is not None:
                         _reload_audio_dsps(card)
             except Exception as recovery:
-                raise RuntimeError(f"{error}; audio recovery failed: {recovery}") from error
+                raise RuntimeError(f"{diagnostics.shown(error)}; audio recovery failed: {diagnostics.shown(recovery)}") from error
         raise
     if AUDIO_FIRMWARE_ROOT.exists():
         shutil.rmtree(AUDIO_FIRMWARE_ROOT)
@@ -442,7 +443,7 @@ def _download_audio_calibration() -> bytes:
     except dk_net.Mismatch as error:
         raise RuntimeError("audio calibration file checksum mismatch") from error
     except dk_net.NetError as error:
-        raise RuntimeError(f"audio calibration download failed: {error}") from error
+        raise RuntimeError(f"audio calibration download failed: {diagnostics.shown(error)}") from error
 
 
 def _prepare_audio_calibration_firmware() -> tuple[Path, Path]:
@@ -642,11 +643,11 @@ def _write_audio_efi(path: Path, candidate: bytes, original: bytes) -> None:
             lock_error = error
     failures = []
     if write_error is not None:
-        failures.append(f"could not save audio calibration: {write_error}")
+        failures.append(f"could not save audio calibration: {diagnostics.shown(write_error)}")
     if rollback_error is not None:
-        failures.append(f"audio calibration recovery failed: {rollback_error}")
+        failures.append(f"audio calibration recovery failed: {diagnostics.shown(rollback_error)}")
     if lock_error is not None:
-        failures.append(f"could not relock audio calibration EFI: {lock_error}")
+        failures.append(f"could not relock audio calibration EFI: {diagnostics.shown(lock_error)}")
     if failures:
         raise RuntimeError("; ".join(failures)) from (write_error or lock_error)
 
