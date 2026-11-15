@@ -138,7 +138,7 @@ function harness({ entry = 'src/index.tsx', component = 'Content', ui = {}, glob
       if (name === 'react') return hooks;
       if (name === 'react/jsx-runtime') return jsx;
       if (name in modules) return modules[name];
-      if (name === '@decky/api') return { callable, definePlugin: fn => fn, toaster: { toast: t => toasts.push(copy(t)) },
+      if (name === '@decky/api') return { callable, definePlugin: fn => fn, toaster: { toast: t => toasts.push({ ...copy({ ...t, onClick: undefined }), onClick: t.onClick }) },  // onClick kept: tests touch the toast
         useQuickAccessVisible: () => visible,  // @decky/api exports it too (Ayaneo3Companion imports it from there)
         addEventListener: (event, fn) => { listeners.set(event, [...(listeners.get(event) ?? []), fn]); return fn; },
         removeEventListener: (event, fn) => listeners.set(event, (listeners.get(event) ?? []).filter(f => f !== fn)),
