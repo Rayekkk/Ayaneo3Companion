@@ -199,6 +199,7 @@ class HardwareQualityTests(unittest.TestCase):
         for name, value in (("_supported_model", mock.Mock(return_value=True)),
                             ("_ryzenadj_available", True), ("_capture_baseline", mock.Mock()),
                             ("_helper_verified", mock.Mock(return_value=True)),
+                            ("_get_ac_online", mock.Mock(return_value=True)),
                             ("_spawn_ryzenadj", mock.Mock(side_effect=lambda args, timeout: (
                                 runs.append(args) or (0, "", ""))))):
             patcher = mock.patch.object(tdp_backend, name, value)

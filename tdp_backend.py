@@ -53,6 +53,9 @@ LIMITS = ("spl", "sppt", "fppt")
 # milliwatts. FPPT is accepted to 50 W; 45 W is the user's chosen ceiling.
 HARD_MIN_MW = 5000
 CEILINGS_MW = (30000, 43000, 45000)
+# Hidden ceilings on battery: higher SPPT/FPPT under load make the battery cut out
+# and the console turns off. Applied at the write only; the panel keeps the user's values.
+BATTERY_CEILINGS_MW = (30000, 35000, 40000)
 PRESETS = {
     "silent":      {"spl": 10, "sppt": 15, "fppt": 20},
     "balanced":    {"spl": 15, "sppt": 25, "fppt": 30},
@@ -321,6 +324,13 @@ def _clamp_triplet(spl, sppt, fppt,
     fppt = max(spl, min(fppt, fppt_max))
     sppt = max(spl, min(sppt, sppt_max, fppt))
     return spl, sppt, fppt
+
+
+def _hardware_triplet(spl, sppt, fppt) -> tuple[int, int, int]:
+    """What is written for a target: the console range, and the battery ceilings off the charger."""
+    on_ac = _get_ac_online()
+    return _clamp_triplet(spl, sppt, fppt,
+                          CEILINGS_MW if on_ac else tuple(map(min, CEILINGS_MW, BATTERY_CEILINGS_MW)))
 
 
 def _clamp_for_settings(state: dict, spl, sppt, fppt, ceilings=None) -> tuple[int, int, int]:
@@ -944,8 +954,6 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
     if not _apply_lock.acquire(timeout=8.0):
         return _fail("apply busy")
     try:
-        # Callers clamp first; this repeats it so nothing above the ceilings is ever written.
-        spl_mw, sppt_mw, fppt_mw = _clamp_triplet(spl_mw, sppt_mw, fppt_mw)
         if not _ryzenadj_available:
             return _fail("verified ryzenadj is unavailable")
         try:
@@ -953,6 +961,9 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
                 return _fail(POWERSTATION_TDP_ERROR)
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return _fail(f"Could not verify whether PowerStation owns TDP control: {shown(exc)}")
+        # Callers clamp first; this repeats it so nothing above the ceilings is ever
+        # written, and adds the battery ceilings right before the write.
+        spl_mw, sppt_mw, fppt_mw = _hardware_triplet(spl_mw, sppt_mw, fppt_mw)
         result = _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
         if result["success"]:
             _record_applied("ryzenadj", (spl_mw, sppt_mw, fppt_mw))
@@ -1077,9 +1088,8 @@ def _apply_and_record(spl: int, sppt: int, fppt: int, why: str, reason: str) -> 
         result = _apply_limits_with_saved_cpu_power(state, *target, reason=reason)
         if result["success"]:
             _save_active(state, *target)
-            decky.logger.info(
-                f"{LOG} Applied {why}: "
-                f"{target[0] // 1000}/{target[1] // 1000}/{target[2] // 1000} W")
+            # What reached the SMU: below the target on battery (BATTERY_CEILINGS_MW).
+            decky.logger.info(f"{LOG} Applied {why}: {'/'.join(str(v // 1000) for v in _applied_mw)} W")
         else:
             event('tdp','limits_apply_failed',level='warning',returncode=result.get('returncode'),reason='hardware_unconfirmed',repeat=60)
         return result
@@ -1092,7 +1102,7 @@ def _target_matches(target: tuple) -> bool:
     if any(value is None for value in current):
         return False
     tolerance = DRIFT_TOLERANCE_RYZENADJ_W
-    wanted = tuple(value / 1000 for value in target)
+    wanted = tuple(value / 1000 for value in _hardware_triplet(*target))
     return all(abs(actual - expected) <= tolerance
                for actual, expected in zip(current, wanted))
 
@@ -1255,6 +1265,7 @@ def _enforce_target(want: tuple) -> None:
     """
     global _drift_settled, _drift_attempts
 
+    want = _hardware_triplet(*want)  # the battery ceilings are no drift
     if want != _drift_target:
         _reset_drift(want)
 
@@ -2556,8 +2567,20 @@ class Plugin:
             transition('tdp','enforcement_loop','unavailable',level='warning',error=e,outcome='unavailable')
 
     async def _enforce_loop(self):
+        ac_seen = None
         while True:
-            await asyncio.sleep(5)
+            # A pass every 5 s, but an unplugged charger within 1 s: until the
+            # battery ceilings are written the console can turn off under load.
+            for _ in range(5):
+                await asyncio.sleep(1)
+                try:
+                    ac_now = await _offload(_get_ac_online)
+                except Exception as e:
+                    event('tdp', 'ac_poll_failed', level='warning', error=e, repeat=60)
+                    continue
+                changed, ac_seen = ac_seen is not None and ac_now != ac_seen, ac_now
+                if changed:
+                    break
             await self._enforce_pass()
 
     async def _migration(self):

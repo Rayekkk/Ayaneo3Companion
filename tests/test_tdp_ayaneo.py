@@ -287,8 +287,8 @@ class AyaneoTdpTests(unittest.TestCase):
         self.unplug()
         with patch.object(tdp.time, "monotonic", return_value=tdp.time.monotonic()):
             tdp._check_and_enforce()
-        self.assertEqual(self.writes, [(30000, 43000, 45000)])
-        self.assertEqual(self.smu, [30.0, 43.0, 45.0])
+        self.assertEqual(self.writes, [(30000, 35000, 40000)], "on battery: the battery ceilings")
+        self.assertEqual(self.smu, [30.0, 35.0, 40.0])
         # Without a readback every settle step writes again: the firmware may act late.
         generation = tdp._ac_generation
         for _ in tdp.AC_SETTLE_DELAYS_S:
@@ -299,7 +299,7 @@ class AyaneoTdpTests(unittest.TestCase):
         self.ready(readback=True)
         self.unplug()
         tdp._check_and_enforce()
-        self.assertEqual(self.smu, [30.0, 43.0, 45.0])
+        self.assertEqual(self.smu, [30.0, 35.0, 40.0])
         tdp._invalidate_limits_cache()
         self.assertTrue(tdp._reapply_current_target(tdp._ac_generation))
         self.assertEqual(len(self.writes), 1, "a matching readback needs no second write")
@@ -317,6 +317,38 @@ class AyaneoTdpTests(unittest.TestCase):
         self.smu[0] = 28.0
         tdp._check_and_enforce()
         self.assertEqual(len(self.writes), 1, "without a readback only power-source changes rewrite")
+
+    def test_battery_ceilings_cap_the_write_but_not_the_saved_target(self):
+        self.ready(readback=True)
+        self.unplug()
+        tdp._check_and_enforce()
+        self.assertEqual(self.writes, [(30000, 35000, 40000)])
+        state = tdp._load_settings()
+        self.assertEqual((state["active_spl"], state["active_sppt"], state["active_fppt"]),
+                         (30000, 43000, 45000), "the panel keeps the user's values")
+        tdp._invalidate_limits_cache()
+        tdp._check_and_enforce()
+        self.assertTrue(tdp._reapply_current_target(tdp._ac_generation))
+        self.assertEqual(len(self.writes), 1, "the battery ceilings are no drift")
+        self.assertTrue(tdp._apply_limits(10000, 15000, 20000)["success"])
+        self.assertEqual(self.writes[-1], (10000, 15000, 20000), "lower targets pass unchanged")
+        self.writes.clear()
+        self.unplug()  # back on the charger
+        tdp._check_and_enforce()
+        self.assertEqual(self.writes, [(30000, 43000, 45000)])
+
+    def test_an_unplugged_charger_is_seen_within_a_second(self):
+        plugin = tdp.Plugin()
+        states, sleeps = iter([True, False]), []
+
+        async def scenario():
+            with patch.object(tdp, "_get_ac_online", side_effect=lambda: next(states)), \
+                 patch.object(tdp.asyncio, "sleep", AsyncMock(side_effect=sleeps.append)), \
+                 patch.object(plugin, "_enforce_pass", AsyncMock(side_effect=asyncio.CancelledError)):
+                with self.assertRaises(asyncio.CancelledError):
+                    await plugin._enforce_loop()
+        asyncio.run(scenario())
+        self.assertEqual(sleeps, [1, 1], "the pass runs on the change, not after 5 s")
 
     def test_turning_tdp_control_off_stops_writing(self):
         self.ready(readback=False)
