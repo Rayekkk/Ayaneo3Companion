@@ -61,7 +61,7 @@ On a fresh system the QAM button may not work before Companion fixes the key bin
 
 ```bash
 chmod +x bootstrap.sh
-./bootstrap.sh Ayaneo3Companion-1.3.0.zip
+./bootstrap.sh Ayaneo3Companion-1.4.0.zip
 ```
 
 Decky Loader must already be installed. The installer checks the device and the whole ZIP,
@@ -144,7 +144,9 @@ The ceilings are the ones the console's SMU accepts, measured on the Ryzen 7 884
 AYANEO 3 has no firmware TDP interface, so Companion writes the limits with a pinned,
 checksum-verified `ryzenadj` that it downloads once. The firmware lowers the sustained limit
 to 28 W on every charger change, so Companion writes the limits again after each power-source
-change and after sleep. While PowerStation (another TDP service) runs, TDP changes are refused
+change and after sleep. On battery the limits written stay at or below 30/35/40 W
+(SPL/SPPT/FPPT), because higher peaks under load can turn the console off; the panel keeps your
+values, and they apply in full as soon as the charger is connected. While PowerStation (another TDP service) runs, TDP changes are refused
 and the page says why; CPU Boost and EPP stay available. Settings from 1.2.x are carried over
 once.
 

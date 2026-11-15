@@ -2,7 +2,7 @@
 
 All notable changes to AYANEO 3 Companion, newest first.
 
-## [Unreleased]
+## [1.4.0] - 2026-11-15
 
 ### ✨ Added
 
@@ -45,6 +45,9 @@ All notable changes to AYANEO 3 Companion, newest first.
 - RyzenAdj's download no longer uses the RAM-backed `/tmp`.
 
 ### 🐛 Fixed
+- **TDP:** on battery the console no longer turns off with **Performance** in demanding games: the limits
+  written stay at or below 30/35/40 W (SPL/SPPT/FPPT) until the charger is connected, and the panel keeps
+  your values.
 - **Settings:** an empty settings file no longer blocks every change as lost settings.
 - **Settings:** a damaged settings file is kept as `.corrupt-<time>` before it is replaced.
 - **Settings:** settings that could not be read back are never written, and recovery copies are as private as the
